@@ -64,6 +64,11 @@ async def main(host: str, port: int) -> None:
     await cli.bluetooth_gatt_write(FAKE_ADDR, ECHO, b"pong", False)
     await asyncio.sleep(0.2)
     assert bytes(await cli.bluetooth_gatt_read(FAKE_ADDR, ECHO)) == b"pong"
+    # Writes without response are not acknowledged; the proxy must apply them, and the read queued after
+    # them, in order.
+    for i in range(50):
+        await cli.bluetooth_gatt_write(FAKE_ADDR, ECHO, b"w%02d" % i, False)
+    assert bytes(await cli.bluetooth_gatt_read(FAKE_ADDR, ECHO)) == b"w49"
     print("read/write ok")
 
     notes = []

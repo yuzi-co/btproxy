@@ -43,10 +43,19 @@ type Server struct {
 }
 
 // btConn is a connection slot. conn is nil while the connection is being made; dropped records a link that
-// went down before that.
+// went down before that. GATT requests for the connection run one at a time from queue, in arrival order, as
+// ESPHome handles them; queue and running are guarded by Server.mu.
 type btConn struct {
 	conn    ble.Conn
 	dropped bool
+	queue   []gattJob
+	running bool
+}
+
+type gattJob struct {
+	c   *client
+	typ uint32
+	r   request
 }
 
 func NewServer(cfg Config, adapter ble.Adapter, log *slog.Logger) *Server {
@@ -176,15 +185,6 @@ func (s *Server) connectionsFree() []byte {
 
 func (s *Server) sendConnectionsFree() {
 	s.broadcast(msgBTConnectionsFreeResponse, s.connectionsFree())
-}
-
-func (s *Server) conn(addr uint64) ble.Conn {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if bc := s.conns[addr]; bc != nil {
-		return bc.conn
-	}
-	return nil
 }
 
 func (s *Server) connect(addr uint64, addrType uint32) {
@@ -411,39 +411,84 @@ func (c *client) handle(f Frame) bool {
 			c.log.Warn("bad message", "type", f.Type, "err", err)
 			return false
 		}
-		go c.bluetooth(f.Type, r)
+		if f.Type == msgBTDeviceRequest {
+			// Connects and disconnects block on the radio too, but must not wait behind a stuck GATT request.
+			go c.deviceRequest(r)
+		} else {
+			s.enqueue(gattJob{c: c, typ: f.Type, r: r})
+		}
 	default:
 		c.log.Info("ignoring unsupported message", "type", f.Type)
 	}
 	return true
 }
 
-// bluetooth runs a connection or GATT request; these block on the radio, so each gets its own goroutine.
-func (c *client) bluetooth(typ uint32, r request) {
+// deviceRequest runs a connect, disconnect, cache clearing or pairing request.
+func (c *client) deviceRequest(r request) {
 	s := c.s
-	if typ == msgBTDeviceRequest {
-		switch r.kind {
-		case reqConnectV3WithCache, reqConnectV3WithoutCache:
-			s.connect(r.addr, r.addrType)
-		case reqDisconnect:
-			s.disconnect(r.addr)
-		case reqClearCache:
-			err := s.adapter.ClearCache(r.addr)
-			code := int32(0)
-			if err != nil {
-				c.log.Warn("clear cache", "addr", ble.FormatMAC(r.addr), "err", err)
-				code = gattError
-			}
-			c.send(msgBTDeviceClearCacheResponse, encAddrResult(r.addr, err == nil, code))
-		case reqPair:
-			c.send(msgBTDevicePairingResponse, encAddrResult(r.addr, false, gattError))
-		case reqUnpair:
-			c.send(msgBTDeviceUnpairingResponse, encAddrResult(r.addr, false, gattError))
+	switch r.kind {
+	case reqConnectV3WithCache, reqConnectV3WithoutCache:
+		s.connect(r.addr, r.addrType)
+	case reqDisconnect:
+		s.disconnect(r.addr)
+	case reqClearCache:
+		err := s.adapter.ClearCache(r.addr)
+		code := int32(0)
+		if err != nil {
+			c.log.Warn("clear cache", "addr", ble.FormatMAC(r.addr), "err", err)
+			code = gattError
 		}
+		c.send(msgBTDeviceClearCacheResponse, encAddrResult(r.addr, err == nil, code))
+	case reqPair:
+		c.send(msgBTDevicePairingResponse, encAddrResult(r.addr, false, gattError))
+	case reqUnpair:
+		c.send(msgBTDeviceUnpairingResponse, encAddrResult(r.addr, false, gattError))
+	}
+}
+
+// enqueue queues a GATT request on its connection and starts the connection's worker if it is idle. Requests
+// for a device that is not connected fail at once.
+func (s *Server) enqueue(j gattJob) {
+	s.mu.Lock()
+	bc := s.conns[j.r.addr]
+	if bc == nil || bc.conn == nil {
+		s.mu.Unlock()
+		j.c.gatt(nil, j.typ, j.r)
 		return
 	}
+	bc.queue = append(bc.queue, j)
+	start := !bc.running
+	bc.running = true
+	s.mu.Unlock()
+	if start {
+		go s.runQueue(bc)
+	}
+}
 
-	conn := s.conn(r.addr)
+// runQueue runs a connection's GATT requests until its queue is empty. Requests still queued when the
+// connection goes away fail with ErrNotConnected instead of reaching the old connection.
+func (s *Server) runQueue(bc *btConn) {
+	for {
+		s.mu.Lock()
+		if len(bc.queue) == 0 {
+			bc.running = false
+			s.mu.Unlock()
+			return
+		}
+		j := bc.queue[0]
+		bc.queue[0] = gattJob{}
+		bc.queue = bc.queue[1:]
+		var conn ble.Conn
+		if s.conns[j.r.addr] == bc {
+			conn = bc.conn
+		}
+		s.mu.Unlock()
+		j.c.gatt(conn, j.typ, j.r)
+	}
+}
+
+// gatt runs one GATT request on conn, which is nil if the device is not connected.
+func (c *client) gatt(conn ble.Conn, typ uint32, r request) {
 	gattErr := func(err error) {
 		c.log.Warn("gatt request failed", "type", typ, "addr", ble.FormatMAC(r.addr), "handle", r.handle, "err", err)
 		c.send(msgBTGATTErrorResponse, encGATTError(r.addr, r.handle, gattError))

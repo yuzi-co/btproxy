@@ -27,9 +27,12 @@ func (a testAdapter) Connect(_ uint64, _ uint32, ev ble.Events) (ble.Conn, error
 	return a.connect(ev)
 }
 
-// testConn records writes; delay, if set, makes each write take that long.
+// testConn records writes; delay, if set, makes each write take that long, and stuck, if set, holds every
+// write until Disconnect.
 type testConn struct {
 	delay func(i int) time.Duration
+	stuck chan struct{}
+	once  sync.Once
 
 	mu     sync.Mutex
 	writes [][]byte
@@ -41,7 +44,12 @@ func (c *testConn) Read(uint16) ([]byte, error)           { return nil, errors.N
 func (c *testConn) ReadDescriptor(uint16) ([]byte, error) { return nil, errors.New("not readable") }
 func (c *testConn) WriteDescriptor(uint16, []byte) error  { return nil }
 func (c *testConn) Notify(uint16, bool) error             { return nil }
-func (c *testConn) Disconnect() error                     { return nil }
+func (c *testConn) Disconnect() error {
+	if c.stuck != nil {
+		c.once.Do(func() { close(c.stuck) })
+	}
+	return nil
+}
 
 func (c *testConn) Write(_ uint16, data []byte, _ bool) error {
 	c.mu.Lock()
@@ -49,6 +57,10 @@ func (c *testConn) Write(_ uint16, data []byte, _ bool) error {
 	c.mu.Unlock()
 	if c.delay != nil {
 		time.Sleep(c.delay(i))
+	}
+	if c.stuck != nil {
+		<-c.stuck
+		return ble.ErrNotConnected
 	}
 	c.mu.Lock()
 	c.writes = append(c.writes, data)
@@ -135,4 +147,60 @@ func TestLinkLostWhileConnecting(t *testing.T) {
 	if free := tc.expect(msgBTConnectionsFreeResponse); fieldValue(free, 1) != 3 {
 		t.Errorf("slot not freed: %+v", free)
 	}
+}
+
+// TestWritesInOrder sends 50 writes without response back to back; they must reach the device in order even
+// when the backend takes a varying time per write.
+func TestWritesInOrder(t *testing.T) {
+	tconn := &testConn{delay: func(i int) time.Duration { return time.Duration(i%7) * time.Millisecond }}
+	tc := startServer(t, testAdapter{connect: func(ble.Events) (ble.Conn, error) { return tconn, nil }})
+	if r := tc.connect(); fieldValue(r, 2) != 1 {
+		t.Fatalf("not connected: %+v", r)
+	}
+	const n = 50
+	for i := range n + 1 {
+		var e enc
+		e.uint(1, testAddr)
+		e.uint(2, 0x0c)
+		e.bool(3, i == n) // the last one with response, to know when all are done
+		e.bytes(4, []byte{byte(i), 0xff})
+		tc.send(msgBTGATTWriteRequest, e.b)
+	}
+	tc.expect(msgBTGATTWriteResponse)
+	tconn.mu.Lock()
+	defer tconn.mu.Unlock()
+	if len(tconn.writes) != n+1 {
+		t.Fatalf("%d writes arrived, want %d", len(tconn.writes), n+1)
+	}
+	for i, w := range tconn.writes {
+		if int(w[0]) != i {
+			t.Fatalf("write %d carried %d", i, w[0])
+		}
+	}
+}
+
+// TestDisconnectNotBlocked checks that a disconnect goes through while a GATT request hangs on the device.
+func TestDisconnectNotBlocked(t *testing.T) {
+	tconn := &testConn{stuck: make(chan struct{})}
+	tc := startServer(t, testAdapter{connect: func(ble.Events) (ble.Conn, error) { return tconn, nil }})
+	if r := tc.connect(); fieldValue(r, 2) != 1 {
+		t.Fatalf("not connected: %+v", r)
+	}
+	for range 2 { // the second write waits in the queue behind the first
+		var e enc
+		e.uint(1, testAddr)
+		e.uint(2, 0x0c)
+		e.bool(3, true)
+		e.bytes(4, []byte{1})
+		tc.send(msgBTGATTWriteRequest, e.b)
+	}
+	var e enc
+	e.uint(1, testAddr)
+	e.uint(2, reqDisconnect)
+	tc.send(msgBTDeviceRequest, e.b)
+	if r := tc.expect(msgBTDeviceConnectionResponse); fieldValue(r, 2) != 0 {
+		t.Fatalf("still connected: %+v", r)
+	}
+	tc.expect(msgBTGATTErrorResponse)
+	tc.expect(msgBTGATTErrorResponse)
 }
