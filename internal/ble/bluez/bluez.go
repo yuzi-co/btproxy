@@ -155,6 +155,10 @@ func (a *Adapter) devicePath(addr uint64) dbus.ObjectPath {
 	return dbus.ObjectPath(string(a.path) + "/dev_" + strings.ReplaceAll(ble.FormatMAC(addr), ":", "_"))
 }
 
+// ClearCache removes the device from BlueZ, which drops its cached GATT database, unless it is paired or
+// bonded: RemoveDevice would delete the bond too, and BlueZ has no call that clears only the GATT cache. For
+// those devices this reports success and keeps the cache; BlueZ re-reads it only when the device's Service
+// Changed indication or a fresh pairing tells it to.
 func (a *Adapter) ClearCache(addr uint64) error {
 	p := a.devicePath(addr)
 	a.mu.Lock()
@@ -162,6 +166,11 @@ func (a *Adapter) ClearCache(addr uint64) error {
 	a.mu.Unlock()
 	if connected {
 		return errors.New("device is connected")
+	}
+	for _, prop := range []string{"Paired", "Bonded"} {
+		if v, err := a.obj(p).GetProperty(ifDevice + "." + prop); err == nil && v.Value() == true {
+			return nil
+		}
 	}
 	err := a.obj(a.path).Call(ifAdapter+".RemoveDevice", 0, p).Err
 	var de dbus.Error

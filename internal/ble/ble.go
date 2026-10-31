@@ -106,7 +106,7 @@ type Adapter interface {
 	// Scan delivers advertisements until stop is called.
 	Scan(fn func(Advert)) (stop func(), err error)
 	Connect(addr uint64, addrType uint32, ev Events) (Conn, error)
-	// ClearCache forgets what the stack knows about a device (services, bonding where it applies).
+	// ClearCache forgets the services the stack has cached for a device. Bonds are kept.
 	ClearCache(addr uint64) error
 }
 
