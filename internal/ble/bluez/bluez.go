@@ -5,6 +5,7 @@
 package bluez
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ const (
 	connectTimeout  = 30 * time.Second
 	resolveTimeout  = 30 * time.Second
 	gattCallTimeout = 30 * time.Second
+	readEchoWindow  = 2 * time.Second // how long a read result may take to show up as a Value change
 )
 
 type Adapter struct {
@@ -375,7 +377,8 @@ func uuidLE(u ble.UUID) []byte {
 func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn, error) {
 	p := a.devicePath(addr)
 	c := &conn{a: a, path: p, ev: ev, resolved: make(chan struct{}), lost: make(chan struct{}),
-		notifying: map[uint16]bool{}}
+		notifying: map[uint16]bool{}, reading: map[uint16]int{}, held: map[uint16][][]byte{},
+		echoes: map[uint16][]echo{}}
 	a.mu.Lock()
 	if _, busy := a.conns[p]; busy {
 		a.mu.Unlock()
@@ -449,10 +452,26 @@ type conn struct {
 
 	gattDB // set before Connect returns, read-only afterwards
 
+	evMu sync.Mutex // serializes notification delivery, so held values do not overtake later ones
+
 	mu        sync.Mutex
 	up        bool // connected and reported to the caller
 	closed    bool
 	notifying map[uint16]bool
+	reading   map[uint16]int      // ReadValue calls in flight per characteristic
+	held      map[uint16][][]byte // Value changes seen while a read was in flight
+	echoes    map[uint16][]echo   // read results whose Value change has not been seen yet
+}
+
+// echo is a value our own ReadValue stored in BlueZ's cache. BlueZ announces every read result with a Value
+// PropertiesChanged, exactly like a notification, before it replies; the signal and the reply reach us on
+// different goroutines, so it can be seen during the read or shortly after. The first Value change for the
+// handle that matches is dropped. A real notification carrying the same value within readEchoWindow of a read
+// whose echo already went by is not affected; one arriving before the echo is processed may be dropped
+// instead of it, which loses nothing since the value is the same.
+type echo struct {
+	data    []byte
+	expires time.Time
 }
 
 func (c *conn) markResolved() { c.resolvedOnce.Do(func() { close(c.resolved) }) }
@@ -483,12 +502,74 @@ func (c *conn) valueChanged(p dbus.ObjectPath, data []byte) {
 	if !ok {
 		return
 	}
+	data = append([]byte(nil), data...)
+	c.evMu.Lock()
+	defer c.evMu.Unlock()
 	c.mu.Lock()
-	on := c.notifying[h]
-	c.mu.Unlock()
-	if on {
-		c.ev.Notification(h, append([]byte(nil), data...))
+	if c.reading[h] > 0 { // may be the read's own result: decide when the read returns
+		c.held[h] = append(c.held[h], data)
+		c.mu.Unlock()
+		return
 	}
+	forward := !c.takeEcho(h, data) && c.notifying[h]
+	c.mu.Unlock()
+	if forward {
+		c.ev.Notification(h, data)
+	}
+}
+
+func (c *conn) readStarted(h uint16) {
+	c.mu.Lock()
+	c.reading[h]++
+	c.mu.Unlock()
+}
+
+// readDone records a read result as an expected echo and, once no read is in flight on the handle, forwards
+// the held Value changes that were not echoes.
+func (c *conn) readDone(h uint16, data []byte, ok bool) {
+	c.evMu.Lock()
+	defer c.evMu.Unlock()
+	c.mu.Lock()
+	c.reading[h]--
+	if ok {
+		c.echoes[h] = append(c.echoes[h], echo{data: data, expires: time.Now().Add(readEchoWindow)})
+	}
+	var out [][]byte
+	if c.reading[h] == 0 {
+		for _, v := range c.held[h] {
+			if !c.takeEcho(h, v) && c.notifying[h] {
+				out = append(out, v)
+			}
+		}
+		delete(c.held, h)
+		delete(c.reading, h)
+	}
+	c.mu.Unlock()
+	for _, v := range out {
+		c.ev.Notification(h, v)
+	}
+}
+
+// takeEcho drops expired echoes and consumes the first one equal to data. Called with c.mu held.
+func (c *conn) takeEcho(h uint16, data []byte) bool {
+	now := time.Now()
+	es := c.echoes[h][:0]
+	found := false
+	for _, e := range c.echoes[h] {
+		switch {
+		case now.After(e.expires):
+		case !found && bytes.Equal(e.data, data):
+			found = true
+		default:
+			es = append(es, e)
+		}
+	}
+	if len(es) == 0 {
+		delete(c.echoes, h)
+	} else {
+		c.echoes[h] = es
+	}
+	return found
 }
 
 // handleOf reads the attribute handle from the last path element (service000a, char000b, desc000d).
@@ -644,7 +725,9 @@ func (c *conn) Read(h uint16) ([]byte, error) {
 		return nil, err
 	}
 	var data []byte
+	c.readStarted(h)
 	err = c.call(p, ifChar+".ReadValue", map[string]any{}).Store(&data)
+	c.readDone(h, data, err == nil)
 	return data, err
 }
 

@@ -4,9 +4,12 @@ package bluez
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/godbus/dbus/v5"
+
+	"btproxy/internal/ble"
 )
 
 func TestHandleOf(t *testing.T) {
@@ -85,5 +88,42 @@ func TestBuildGATT(t *testing.T) {
 	}
 	if h, ok := charValueHandle(chr); !ok || h != 0x0c {
 		t.Errorf("charValueHandle(%s) = %#x, %v", chr, h, ok)
+	}
+}
+
+// TestReadEcho checks that the Value change BlueZ emits for our own ReadValue is not forwarded as a
+// notification, whether it is seen during the read or after it, while real notifications still are.
+func TestReadEcho(t *testing.T) {
+	const h = 0x0c
+	p := dbus.ObjectPath("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/service000a/char000b")
+	var got []string
+	c := &conn{notifying: map[uint16]bool{h: true}, reading: map[uint16]int{}, held: map[uint16][][]byte{},
+		echoes: map[uint16][]echo{},
+		ev: ble.Events{Notification: func(hh uint16, d []byte) {
+			if hh != h {
+				t.Errorf("notification for %#x", hh)
+			}
+			got = append(got, string(d))
+		}}}
+
+	// Echo seen while the read is in flight, next to a real notification.
+	c.readStarted(h)
+	c.valueChanged(p, []byte("n1"))
+	c.valueChanged(p, []byte("r1"))
+	c.readDone(h, []byte("r1"), true)
+	// Echo seen after the read returned; a later notification with the same value is real.
+	c.readStarted(h)
+	c.readDone(h, []byte("r2"), true)
+	c.valueChanged(p, []byte("n2"))
+	c.valueChanged(p, []byte("r2"))
+	c.valueChanged(p, []byte("r2"))
+	// A failed read expects no echo.
+	c.readStarted(h)
+	c.readDone(h, nil, false)
+	c.valueChanged(p, nil)
+
+	want := []string{"n1", "n2", "r2", ""}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("notifications %q, want %q", got, want)
 	}
 }
