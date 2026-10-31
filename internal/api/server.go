@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -317,6 +318,8 @@ type client struct {
 
 	wmu           sync.Mutex
 	advSubscribed bool // guarded by s.mu
+	apiMajor      uint32
+	apiMinor      uint32 // set by HelloRequest, before any Bluetooth request
 }
 
 func (c *client) send(typ uint32, payload []byte) {
@@ -355,6 +358,12 @@ func (c *client) handle(f Frame) bool {
 	s := c.s
 	switch f.Type {
 	case msgHelloRequest:
+		var err error
+		if c.apiMajor, c.apiMinor, err = decHello(f.Payload); err != nil {
+			c.log.Warn("bad message", "type", f.Type, "err", err)
+			return false
+		}
+		c.log.Debug("hello", "api", fmt.Sprintf("%d.%d", c.apiMajor, c.apiMinor))
 		c.send(msgHelloResponse, encHelloResponse("btproxy "+s.cfg.ProjectVersion, s.cfg.Name))
 	case msgDisconnectRequest:
 		c.send(msgDisconnectResponse, nil)
@@ -505,7 +514,7 @@ func (c *client) gatt(conn ble.Conn, typ uint32, r request) {
 			return
 		}
 		for i := range svcs { // one service per message, like ESPHome
-			c.send(msgBTGATTGetServicesResponse, encServices(r.addr, svcs[i:i+1]))
+			c.send(msgBTGATTGetServicesResponse, encServices(r.addr, svcs[i:i+1], efficientUUIDs(c.apiMajor, c.apiMinor)))
 		}
 		c.send(msgBTGATTGetServicesDoneResponse, encAddrHandle(r.addr, 0))
 	case msgBTGATTReadRequest, msgBTGATTReadDescriptorRequest:

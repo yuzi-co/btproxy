@@ -162,34 +162,38 @@ func encConnectionsFree(free, limit uint32, allocated []uint64) []byte {
 	return e.b
 }
 
-// encUUID writes the 128-bit form (both halves, even zero ones: their position matters) and, for UUIDs on the
-// Bluetooth base, the short form too.
-func encUUID(e *enc, u ble.UUID, shortField protowire.Number) {
+// efficientUUIDs reports whether a client of the given API version reads short_uuid (API 1.12 and later).
+func efficientUUIDs(major, minor uint32) bool { return major > 1 || major == 1 && minor >= 12 }
+
+// encUUID writes one form of a UUID, as ESPHome does: short_uuid when the UUID is on the Bluetooth base and
+// the client reads it, otherwise the 128-bit form (both halves, even zero ones: their position matters).
+func encUUID(e *enc, u ble.UUID, shortField protowire.Number, efficient bool) {
+	if s, ok := u.Short(); ok && efficient && s != 0 {
+		e.uint(shortField, uint64(s))
+		return
+	}
 	for _, v := range []uint64{u.Hi, u.Lo} {
 		e.b = protowire.AppendTag(e.b, 1, protowire.VarintType)
 		e.b = protowire.AppendVarint(e.b, v)
 	}
-	if s, ok := u.Short(); ok {
-		e.uint(shortField, uint64(s))
-	}
 }
 
 // encServices encodes one GetServicesResponse holding the given services.
-func encServices(addr uint64, services []ble.Service) []byte {
+func encServices(addr uint64, services []ble.Service, efficient bool) []byte {
 	var e enc
 	e.uint(1, addr)
 	for _, s := range services {
 		var se enc
-		encUUID(&se, s.UUID, 4)
+		encUUID(&se, s.UUID, 4, efficient)
 		se.uint(2, uint64(s.Handle))
 		for _, c := range s.Characteristics {
 			var ce enc
-			encUUID(&ce, c.UUID, 5)
+			encUUID(&ce, c.UUID, 5, efficient)
 			ce.uint(2, uint64(c.Handle))
 			ce.uint(3, uint64(c.Properties))
 			for _, d := range c.Descriptors {
 				var de enc
-				encUUID(&de, d.UUID, 3)
+				encUUID(&de, d.UUID, 3, efficient)
 				de.uint(2, uint64(d.Handle))
 				ce.msg(4, de.b)
 			}
@@ -240,6 +244,20 @@ func encScannerState(state, mode, configured uint32) []byte {
 	e.uint(2, uint64(mode))
 	e.uint(3, uint64(configured))
 	return e.b
+}
+
+// decHello returns the client's API version from a HelloRequest.
+func decHello(b []byte) (major, minor uint32, err error) {
+	fs, err := fields(b)
+	for _, f := range fs {
+		switch f.num {
+		case 2:
+			major = uint32(f.v)
+		case 3:
+			minor = uint32(f.v)
+		}
+	}
+	return major, minor, err
 }
 
 // request holds the fields shared by the Bluetooth requests: address, handle, request type, flags and data.
