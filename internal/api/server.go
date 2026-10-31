@@ -42,9 +42,11 @@ type Server struct {
 	pending  []ble.Advert
 }
 
-// btConn is a connection slot. conn is nil while the connection is being made.
+// btConn is a connection slot. conn is nil while the connection is being made; dropped records a link that
+// went down before that.
 type btConn struct {
-	conn ble.Conn
+	conn    ble.Conn
+	dropped bool
 }
 
 func NewServer(cfg Config, adapter ble.Adapter, log *slog.Logger) *Server {
@@ -201,22 +203,24 @@ func (s *Server) connect(addr uint64, addrType uint32) {
 		s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, false, 0, gattError))
 		return
 	}
-	s.conns[addr] = &btConn{}
+	slot := &btConn{}
+	s.conns[addr] = slot
 	s.mu.Unlock()
 	s.sendConnectionsFree()
 
 	log := s.log.With("addr", ble.FormatMAC(addr))
 	log.Info("connecting")
-	var conn ble.Conn
 	conn, err := s.adapter.Connect(addr, addrType, ble.Events{
 		Notification: func(h uint16, data []byte) {
 			s.broadcast(msgBTGATTNotifyDataResponse, encAddrHandleData(addr, h, data))
 		},
 		Disconnected: func(reason error) {
 			s.mu.Lock()
-			bc := s.conns[addr]
-			mine := bc != nil && bc.conn != nil && bc.conn == conn
-			if mine {
+			mine := s.conns[addr] == slot
+			if mine && slot.conn == nil { // Connect has not returned yet: it frees the slot
+				slot.dropped = true
+				mine = false
+			} else if mine {
 				delete(s.conns, addr)
 			}
 			s.mu.Unlock()
@@ -229,26 +233,40 @@ func (s *Server) connect(addr uint64, addrType uint32) {
 	})
 	if err != nil {
 		log.Warn("connect failed", "err", err)
-		s.mu.Lock()
-		delete(s.conns, addr)
-		s.mu.Unlock()
+		s.release(addr, slot)
 		s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, false, 0, gattError))
 		s.sendConnectionsFree()
 		return
 	}
 	s.mu.Lock()
-	bc := s.conns[addr]
-	if bc != nil {
-		bc.conn = conn
+	withdrawn, dropped := s.conns[addr] != slot, slot.dropped
+	if !withdrawn && !dropped {
+		slot.conn = conn
 	}
 	s.mu.Unlock()
-	if bc == nil { // disconnect requested, or the last client left, while connecting
+	if withdrawn { // disconnect requested, or the last client left, while connecting
 		log.Info("connected after the request was withdrawn, disconnecting")
 		conn.Disconnect()
 		return
 	}
+	if dropped {
+		log.Info("link lost while connecting")
+		s.release(addr, slot)
+		s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, false, 0, 0))
+		s.sendConnectionsFree()
+		return
+	}
 	log.Info("connected", "mtu", conn.MTU())
 	s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, true, conn.MTU(), 0))
+}
+
+// release frees a connection slot unless it has been replaced.
+func (s *Server) release(addr uint64, slot *btConn) {
+	s.mu.Lock()
+	if s.conns[addr] == slot {
+		delete(s.conns, addr)
+	}
+	s.mu.Unlock()
 }
 
 func (s *Server) disconnect(addr uint64) {

@@ -374,7 +374,8 @@ func uuidLE(u ble.UUID) []byte {
 
 func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn, error) {
 	p := a.devicePath(addr)
-	c := &conn{a: a, path: p, ev: ev, resolved: make(chan struct{}), notifying: map[uint16]bool{}}
+	c := &conn{a: a, path: p, ev: ev, resolved: make(chan struct{}), lost: make(chan struct{}),
+		notifying: map[uint16]bool{}}
 	a.mu.Lock()
 	if _, busy := a.conns[p]; busy {
 		a.mu.Unlock()
@@ -415,15 +416,22 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	}
 	select {
 	case <-c.resolved:
+	case <-c.lost:
+		return fail(errors.New("link lost while resolving services"))
 	case <-time.After(resolveTimeout):
 		return fail(errors.New("services not resolved in time"))
 	}
 	if err := c.loadGATT(); err != nil {
 		return fail(err)
 	}
+	// From here on a lost link is reported through ev.Disconnected; before, Connect fails instead.
 	c.mu.Lock()
-	c.up = true
+	lost := c.closed
+	c.up = !lost
 	c.mu.Unlock()
+	if lost {
+		return fail(errors.New("link lost while connecting"))
+	}
 	return c, nil
 }
 
@@ -436,6 +444,8 @@ type conn struct {
 
 	resolved     chan struct{}
 	resolvedOnce sync.Once
+	lost         chan struct{} // closed when the link goes down
+	lostOnce     sync.Once
 
 	gattDB // set before Connect returns, read-only afterwards
 
@@ -452,6 +462,7 @@ func (c *conn) deviceChanged(changed map[string]dbus.Variant) {
 		c.markResolved()
 	}
 	if v, ok := changed["Connected"]; ok && v.Value() == false {
+		c.lostOnce.Do(func() { close(c.lost) })
 		c.mu.Lock()
 		report := c.up && !c.closed
 		c.closed = true
