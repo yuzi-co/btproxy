@@ -443,7 +443,8 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	return c, nil
 }
 
-// conn is one connected device. GATT objects are looked up by the handle encoded in their D-Bus path.
+// conn is one connected device. GATT objects are looked up by the handle encoded in their D-Bus path
+// (see charValueHandle for characteristics).
 type conn struct {
 	a    *Adapter
 	path dbus.ObjectPath
@@ -452,14 +453,11 @@ type conn struct {
 	resolved     chan struct{}
 	resolvedOnce sync.Once
 
+	gattDB // set before Connect returns, read-only afterwards
+
 	mu        sync.Mutex
 	up        bool // connected and reported to the caller
 	closed    bool
-	mtu       uint32
-	services  []ble.Service
-	chars     map[uint16]dbus.ObjectPath
-	descs     map[uint16]dbus.ObjectPath
-	cccdOwner map[uint16]uint16 // CCCD descriptor handle -> characteristic handle
 	notifying map[uint16]bool
 }
 
@@ -486,7 +484,7 @@ func (c *conn) deviceChanged(changed map[string]dbus.Variant) {
 }
 
 func (c *conn) valueChanged(p dbus.ObjectPath, data []byte) {
-	h, ok := handleOf(p)
+	h, ok := charValueHandle(p)
 	if !ok {
 		return
 	}
@@ -516,21 +514,44 @@ var charFlags = map[string]uint32{
 	"indicate": 0x20, "authenticated-signed-writes": 0x40, "extended-properties": 0x80,
 }
 
-// loadGATT builds the service list and handle maps from BlueZ's object tree.
+// loadGATT reads BlueZ's object tree into the connection's GATT database.
 func (c *conn) loadGATT() error {
 	objs, err := c.a.managedObjects()
 	if err != nil {
 		return fmt.Errorf("gatt objects: %w", err)
 	}
-	prefix := string(c.path) + "/"
+	c.gattDB = buildGATT(c.path, objs)
+	return nil
+}
+
+// gattDB is the remote GATT database of a connection, with the D-Bus object behind every handle.
+type gattDB struct {
+	mtu       uint32
+	services  []ble.Service
+	chars     map[uint16]dbus.ObjectPath // by value handle
+	descs     map[uint16]dbus.ObjectPath
+	cccdOwner map[uint16]uint16 // CCCD descriptor handle -> characteristic value handle
+}
+
+// charValueHandle maps a characteristic object path to its value handle. BlueZ names the object after the
+// characteristic declaration (char000b), while ESPHome reports the value handle that follows it (0x000c).
+// Home Assistant keeps one GATT cache per device across proxies, so the handles must match an ESP32's.
+func charValueHandle(p dbus.ObjectPath) (uint16, bool) {
+	h, ok := handleOf(p)
+	return h + 1, ok
+}
+
+// buildGATT builds the service list and handle maps from the objects under a device path.
+func buildGATT(dev dbus.ObjectPath, objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) gattDB {
+	prefix := string(dev) + "/"
 	svcs := map[dbus.ObjectPath]*ble.Service{}
 	type charEntry struct {
 		svc dbus.ObjectPath
 		ch  ble.Characteristic
 	}
 	chars := map[dbus.ObjectPath]*charEntry{}
-	c.chars, c.descs, c.cccdOwner = map[uint16]dbus.ObjectPath{}, map[uint16]dbus.ObjectPath{}, map[uint16]uint16{}
-	c.mtu = 23
+	db := gattDB{mtu: 23, chars: map[uint16]dbus.ObjectPath{}, descs: map[uint16]dbus.ObjectPath{},
+		cccdOwner: map[uint16]uint16{}}
 	uuidOf := func(props map[string]dbus.Variant) ble.UUID {
 		s, _ := props["UUID"].Value().(string)
 		u, _ := ble.ParseUUID(s)
@@ -540,25 +561,27 @@ func (c *conn) loadGATT() error {
 		if !strings.HasPrefix(string(p), prefix) {
 			continue
 		}
-		h, ok := handleOf(p)
-		if !ok {
-			continue
-		}
 		if props, ok := ifs[ifService]; ok {
-			svcs[p] = &ble.Service{UUID: uuidOf(props), Handle: h}
+			if h, ok := handleOf(p); ok {
+				svcs[p] = &ble.Service{UUID: uuidOf(props), Handle: h}
+			}
 		}
 		if props, ok := ifs[ifChar]; ok {
+			h, ok := charValueHandle(p)
+			if !ok {
+				continue
+			}
 			ch := ble.Characteristic{UUID: uuidOf(props), Handle: h}
 			flags, _ := props["Flags"].Value().([]string)
 			for _, f := range flags {
 				ch.Properties |= charFlags[f]
 			}
-			if m, ok := props["MTU"].Value().(uint16); ok && uint32(m) > c.mtu {
-				c.mtu = uint32(m)
+			if m, ok := props["MTU"].Value().(uint16); ok && uint32(m) > db.mtu {
+				db.mtu = uint32(m)
 			}
 			svc, _ := props["Service"].Value().(dbus.ObjectPath)
 			chars[p] = &charEntry{svc: svc, ch: ch}
-			c.chars[h] = p
+			db.chars[h] = p
 		}
 	}
 	for p, ifs := range objs {
@@ -577,23 +600,23 @@ func (c *conn) loadGATT() error {
 		}
 		d := ble.Descriptor{UUID: uuidOf(props), Handle: h}
 		ce.ch.Descriptors = append(ce.ch.Descriptors, d)
-		c.descs[h] = p
+		db.descs[h] = p
 		if s, ok := d.UUID.Short(); ok && s == 0x2902 {
-			c.cccdOwner[h] = ce.ch.Handle
+			db.cccdOwner[h] = ce.ch.Handle
 		}
 	}
 	for _, ce := range chars {
 		if s := svcs[ce.svc]; s != nil {
+			sortDescs(ce.ch.Descriptors)
 			s.Characteristics = append(s.Characteristics, ce.ch)
 		}
 	}
-	c.services = c.services[:0]
 	for _, s := range svcs {
 		sortChars(s.Characteristics)
-		c.services = append(c.services, *s)
+		db.services = append(db.services, *s)
 	}
-	sortServices(c.services)
-	return nil
+	sortServices(db.services)
+	return db
 }
 
 func (c *conn) MTU() uint32 { return c.mtu }

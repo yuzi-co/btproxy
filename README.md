@@ -50,7 +50,9 @@ yet, so add it by IP.
   power), so the raw AD structures are rebuilt from those and capped at 62 bytes. Field order differs from the
   air; Home Assistant parses the fields, so that does not matter. `UUIDs` can include services BlueZ learnt
   by connecting.
-- Attribute handles come from BlueZ's object paths (`service000a/char000b/desc000d`).
+- Attribute handles come from BlueZ's object paths (`service000a/char000b/desc000d`). BlueZ names a
+  characteristic after its declaration handle; the proxy reports the value handle after it (`0x000c` here), as an
+  ESP32 does, because Home Assistant shares one GATT cache per device between proxies.
 - BlueZ owns the CCCD descriptors, so a write to one turns notifications on or off with
   `StartNotify`/`StopNotify` instead.
 - Discovery keeps running while a connection is being made (ESPHome pauses it; BlueZ copes without).
