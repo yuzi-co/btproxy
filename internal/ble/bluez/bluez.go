@@ -38,11 +38,10 @@ type Adapter struct {
 	path dbus.ObjectPath
 	mac  uint64
 
-	mu       sync.Mutex
-	devices  map[dbus.ObjectPath]*device // advertisement state of every device BlueZ reports
-	scanFn   func(ble.Advert)            // nil while not scanning
-	conns    map[dbus.ObjectPath]*conn
-	scanHold int // connections being made; discovery pauses meanwhile, as ESPHome does
+	mu      sync.Mutex
+	devices map[dbus.ObjectPath]*device // advertisement state of every device BlueZ reports
+	scanFn  func(ble.Advert)            // nil while not scanning
+	conns   map[dbus.ObjectPath]*conn
 }
 
 // device caches the Device1 properties an advertisement is rebuilt from.
@@ -125,15 +124,12 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 	}
 	a.mu.Lock()
 	a.scanFn = fn
-	hold := a.scanHold > 0
 	a.mu.Unlock()
-	if !hold {
-		if err := a.startDiscovery(); err != nil {
-			a.mu.Lock()
-			a.scanFn = nil
-			a.mu.Unlock()
-			return nil, err
-		}
+	if err := a.startDiscovery(); err != nil {
+		a.mu.Lock()
+		a.scanFn = nil
+		a.mu.Unlock()
+		return nil, err
 	}
 	var once sync.Once
 	return func() {
@@ -153,27 +149,6 @@ func (a *Adapter) startDiscovery() error {
 		return nil
 	}
 	return err
-}
-
-// holdScan pauses discovery while a connection is made; releaseScan resumes it when nothing else holds it.
-func (a *Adapter) holdScan() {
-	a.mu.Lock()
-	a.scanHold++
-	first := a.scanHold == 1 && a.scanFn != nil
-	a.mu.Unlock()
-	if first {
-		a.obj(a.path).Call(ifAdapter+".StopDiscovery", 0)
-	}
-}
-
-func (a *Adapter) releaseScan() {
-	a.mu.Lock()
-	a.scanHold--
-	resume := a.scanHold == 0 && a.scanFn != nil
-	a.mu.Unlock()
-	if resume {
-		a.startDiscovery()
-	}
 }
 
 func (a *Adapter) devicePath(addr uint64) dbus.ObjectPath {
