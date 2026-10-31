@@ -4,8 +4,10 @@ An ESPHome-compatible Bluetooth proxy for Linux, written in Go. Home Assistant a
 integration (port 6053) exactly like an ESP32 proxy, then scans and connects to BLE devices through the host's
 Bluetooth adapter. It talks to BlueZ over D-Bus, so the adapter stays usable by other programs at the same time.
 
-Status: works end to end against `aioesphomeapi` (Home Assistant's client library) with the fake backend; the
-BlueZ backend compiles and its unit tests pass, but it has not run against a real adapter yet.
+Status: in daily use since 2026-10-31 on an OpenWrt 23.05 router (MT7620A, mipsle, 64 MB RAM) with a Realtek
+RTL8761B USB stick, serving Home Assistant 2026.10: advertisements for device tracking plus an active, bonded
+connection to a Tion breezer. The fake backend passes an end-to-end test with `aioesphomeapi` (Home Assistant's
+client library).
 
 ## What it supports
 
@@ -51,7 +53,30 @@ yet, so add it by IP.
 - Attribute handles come from BlueZ's object paths (`service000a/char000b/desc000d`).
 - BlueZ owns the CCCD descriptors, so a write to one turns notifications on or off with
   `StartNotify`/`StopNotify` instead.
-- Discovery pauses while a connection is being made, as ESPHome does.
+- Discovery keeps running while a connection is being made (ESPHome pauses it; BlueZ copes without).
+- There is no idle timeout on API clients: Home Assistant does not ping while advertisements flow, so dead peers
+  are found with TCP keepalive (30 s idle, then 3 probes 10 s apart).
+
+## Deploy
+
+OpenWrt (23.05): `opkg install kmod-bluetooth bluez-daemon` plus the firmware for the stick (for example
+`rtl8761bu-firmware`), copy the build for the router's architecture (`dist/btproxy-mipsle` for MT7620/MT7621) to
+`/usr/bin/btproxy`, and [contrib/openwrt/btproxy.init](contrib/openwrt/btproxy.init) to `/etc/init.d/btproxy`.
+OpenWrt keeps BlueZ's state in `/var/lib/bluetooth` on tmpfs; link it to a directory on flash (for example
+`/etc/bluetooth/keys`) so bonds survive a reboot, and list `/usr/bin/btproxy`, `/etc/init.d/btproxy` and that
+directory in `/etc/sysupgrade.conf`.
+
+systemd (Raspberry Pi OS, Debian): copy the binary to `/usr/local/bin/btproxy` and
+[contrib/systemd/btproxy.service](contrib/systemd/btproxy.service) to `/etc/systemd/system/`, then
+`systemctl enable --now btproxy`.
+
+### Bonded devices
+
+Devices that need an encrypted link (a Tion breezer, for example) must be bonded with the proxy's adapter.
+Either pair once with `bluetoothctl`, or move an existing bond: stop `bluetoothd` on both machines, copy
+`/var/lib/bluetooth/<adapter MAC>/<device MAC>/` (`info` and `attributes`) into the new adapter's directory,
+then start `bluetoothd`. Copy only while `bluetoothd` is stopped, because it rewrites `info` from memory when it
+exits.
 
 ## Test
 

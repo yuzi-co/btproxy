@@ -1,0 +1,13 @@
+[Unit]
+Description=btproxy, ESPHome-compatible Bluetooth proxy
+Requires=bluetooth.service
+After=bluetooth.service network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/btproxy -name btproxy-%H -area ""
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
