@@ -109,7 +109,10 @@ func (a *Adapter) rawAdvert(ad ble.Advert) {
 		a.mu.Unlock()
 		return
 	}
-	a.rawSeen = true
+	if !a.rawSeen {
+		a.rawSeen = true
+		a.kickScan() // the supervisor drops the match rule for every device's properties
+	}
 	fn := a.scanFn
 	if fn != nil {
 		a.adverts++
@@ -137,8 +140,12 @@ func (a *Adapter) rawHandles() bool {
 	return true
 }
 
+// rawProven tells whether the monitor delivers advertisements, so BlueZ's are needed neither as
+// advertisements nor to check the monitor against. Called with a.mu held.
+func (a *Adapter) rawProven() bool { return a.raw != nil && a.rawSeen }
+
 // dropRaw closes the monitor and has the supervisor restart the scan, so discovery reports duplicates
-// again. Called with a.mu held.
+// again, and follow every device's properties again. Called with a.mu held.
 func (a *Adapter) dropRaw() {
 	a.raw.Close()
 	a.raw = nil

@@ -34,11 +34,13 @@ type fakeBlueZ struct {
 	mu          sync.Mutex
 	powered     bool
 	discovering bool
-	registered  int           // monitors BlueZ accepted (read through GetManagedObjects)
-	starts      int           // StartDiscovery calls
-	stops       int           // StopDiscovery calls
-	dupData     bool          // DuplicateData of the last discovery filter
-	wedge       chan struct{} // while set, StartDiscovery waits for it to close, as a wedged bluetoothd does
+	registered  int                      // monitors BlueZ accepted (read through GetManagedObjects)
+	starts      int                      // StartDiscovery calls
+	stops       int                      // StopDiscovery calls
+	dupData     bool                     // DuplicateData of the last discovery filter
+	wedge       chan struct{}            // while set, StartDiscovery waits for it to close, as a wedged bluetoothd does
+	devices     map[dbus.ObjectPath]bool // announced with InterfacesAdded
+	connectFail bool                     // Device1.Connect fails
 }
 
 const fakeAdapter = dbus.ObjectPath("/org/bluez/hci0")
@@ -49,7 +51,7 @@ func startFakeBlueZ(t *testing.T, addr string, monitors bool) *fakeBlueZ {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeBlueZ{t: t, bus: bus, monitors: monitors, powered: true}
+	f := &fakeBlueZ{t: t, bus: bus, monitors: monitors, powered: true, devices: map[dbus.ObjectPath]bool{}}
 	bus.Export(fakeRoot{f}, "/", ifObjManager)
 	bus.Export(fakeProps{f}, fakeAdapter, ifProps)
 	bus.Export(fakeAdapterIf{f}, fakeAdapter, ifAdapter)
@@ -84,11 +86,34 @@ func (f *fakeBlueZ) setWedged(on bool) {
 	}
 }
 
+const fakeDevice = fakeAdapter + "/dev_AA_BB_CC_DD_EE_FF"
+
 // advertise reports an advertisement from one device, as BlueZ does during discovery.
-func (f *fakeBlueZ) advertise() {
-	f.bus.Emit(fakeAdapter+"/dev_AA_BB_CC_DD_EE_FF", ifProps+".PropertiesChanged", ifDevice,
-		map[string]dbus.Variant{"Address": dbus.MakeVariant("AA:BB:CC:DD:EE:FF"),
-			"RSSI": dbus.MakeVariant(int16(-60))}, []string{})
+func (f *fakeBlueZ) advertise() { f.advertiseFrom(fakeDevice, -60) }
+
+// advertiseFrom reports an advertisement: InterfacesAdded the first time BlueZ sees a device, as it creates
+// its object then, and PropertiesChanged afterwards.
+func (f *fakeBlueZ) advertiseFrom(p dbus.ObjectPath, rssi int16) {
+	addr := strings.ReplaceAll(strings.TrimPrefix(string(p), string(fakeAdapter)+"/dev_"), "_", ":")
+	props := map[string]dbus.Variant{"Address": dbus.MakeVariant(addr), "RSSI": dbus.MakeVariant(rssi)}
+	f.mu.Lock()
+	known := f.devices[p]
+	f.devices[p] = true
+	f.mu.Unlock()
+	if known {
+		f.bus.Emit(p, ifProps+".PropertiesChanged", ifDevice, props, []string{})
+		return
+	}
+	f.bus.Export(fakeDeviceIf{f, p}, p, ifDevice)
+	f.bus.Emit("/", ifObjManager+".InterfacesAdded", p, map[string]map[string]dbus.Variant{ifDevice: props})
+}
+
+// removeDevice drops a device, as BlueZ does when it has not seen one for a while.
+func (f *fakeBlueZ) removeDevice(p dbus.ObjectPath) {
+	f.mu.Lock()
+	delete(f.devices, p)
+	f.mu.Unlock()
+	f.bus.Emit("/", ifObjManager+".InterfacesRemoved", p, []string{ifDevice})
 }
 
 func (f *fakeBlueZ) state() (powered, discovering bool, registered int) {
@@ -169,6 +194,30 @@ func (a fakeAdapterIf) StopDiscovery() *dbus.Error {
 	a.f.discovering = false
 	a.f.stops++
 	a.f.mu.Unlock()
+	return nil
+}
+
+type fakeDeviceIf struct {
+	f *fakeBlueZ
+	p dbus.ObjectPath
+}
+
+// Connect announces the connection and its resolved services before replying, as BlueZ does.
+func (d fakeDeviceIf) Connect() *dbus.Error {
+	d.f.mu.Lock()
+	fail := d.f.connectFail
+	d.f.mu.Unlock()
+	if fail {
+		return dbus.NewError("org.bluez.Error.Failed", []any{"le-connection-abort-by-local"})
+	}
+	d.f.bus.Emit(d.p, ifProps+".PropertiesChanged", ifDevice, map[string]dbus.Variant{
+		"Connected": dbus.MakeVariant(true), "ServicesResolved": dbus.MakeVariant(true)}, []string{})
+	return nil
+}
+
+func (d fakeDeviceIf) Disconnect() *dbus.Error {
+	d.f.bus.Emit(d.p, ifProps+".PropertiesChanged", ifDevice, map[string]dbus.Variant{
+		"Connected": dbus.MakeVariant(false), "ServicesResolved": dbus.MakeVariant(false)}, []string{})
 	return nil
 }
 

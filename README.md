@@ -132,7 +132,11 @@ opened), the proxy rebuilds advertisements from BlueZ's parsed properties (see [
 The monitor needs `CAP_NET_RAW` (root has it) and a kernel with Bluetooth sockets, which any kernel that runs
 BlueZ has. `auto` falls back to BlueZ's properties when the socket cannot be opened, when reading it fails, and
 when it delivers nothing while BlueZ reports 30 advertisements. `on` refuses to start without the monitor, but
-still falls back on later failures. The log says which source is in use. The proxy reads only the
+still falls back on later failures. The log says which source is in use. Once the monitor has delivered an
+advertisement, the proxy stops receiving BlueZ's property signals for devices it is not connected to, which
+BlueZ sends for every advertisement it processes and which cost more CPU to decode than the advertisement
+itself. It follows only the devices it connects to, and receives every device's signals again after a
+fallback. The proxy reads only the
 `-adapter` controller (`hciN` is controller index N), and a socket filter in the kernel passes it only
 advertising reports, so connection traffic does not wake it up.
 
