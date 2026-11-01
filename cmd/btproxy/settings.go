@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,7 +28,7 @@ type setting struct {
 	name, label, help string
 	kind              ui.Kind
 	options           []string
-	backend           string // shown only with this backend; "" for all
+	backend           string // shown only with these comma-separated backends; "" for all
 	readOnly          bool   // shown, but changed only in the settings file or on the command line
 }
 
@@ -55,6 +56,8 @@ var settings = []struct {
 			help: "Comma-separated MACs, prefixes (AA:BB:CC), uuid:fe95 or mfr:0x004c. Empty: all."},
 		{name: "adv-deny", label: "Drop advertisements from", help: "As above; deny wins."},
 		{name: "adv-deny-random", label: "Drop advertisements from random addresses (phones)", kind: ui.Bool},
+		{name: "connect-retries", label: "Connect retries on radio failures", kind: ui.Number,
+			backend: "bluez,winrt"},
 	}},
 	{"BlueZ", []setting{
 		{name: "adapter", label: "Adapters", backend: "bluez", help: "Comma-separated, such as hci0,hci1."},
@@ -64,12 +67,16 @@ var settings = []struct {
 		{name: "scan-pause-on-connect", label: "Pause scanning while connecting", kind: ui.Bool, backend: "bluez"},
 		{name: "stall-timeout", label: "Restart scanning after silence", backend: "bluez",
 			help: "Such as 3m; 0 disables."},
-		{name: "connect-retries", label: "Connect retries on HCI 0x3e", kind: ui.Number, backend: "bluez"},
 		{name: "bluetoothd-restart", label: "bluetoothd restart command", backend: "bluez", readOnly: true},
 	}},
 	{"Logging", []setting{
 		{name: "debug", label: "Debug logging", kind: ui.Bool},
 	}},
+}
+
+// forBackend tells whether the setting applies to backend.
+func (s setting) forBackend(backend string) bool {
+	return s.backend == "" || slices.Contains(strings.Split(s.backend, ","), backend)
 }
 
 func lookupSetting(name string) (setting, bool) {
@@ -397,7 +404,7 @@ func (p settingsPage) Page() ui.Page {
 	for _, sec := range settings {
 		var fields []ui.Field
 		for _, s := range sec.list {
-			if s.backend != "" && s.backend != backend || s.name == "encryption-key" && !api.Encryption {
+			if !s.forBackend(backend) || s.name == "encryption-key" && !api.Encryption {
 				continue
 			}
 			fields = append(fields, s.field())

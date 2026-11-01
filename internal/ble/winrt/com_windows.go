@@ -107,10 +107,18 @@ func hresultError(hr uint32) error {
 	n, err := windows.FormatMessage(windows.FORMAT_MESSAGE_FROM_SYSTEM|windows.FORMAT_MESSAGE_IGNORE_INSERTS,
 		0, msgID, 0, buf, nil)
 	if err == nil && n > 0 {
-		return fmt.Errorf("0x%08x: %s", hr, strings.TrimRight(windows.UTF16ToString(buf[:n]), " .\r\n"))
+		return hresult{hr, fmt.Sprintf("0x%08x: %s", hr, strings.TrimRight(windows.UTF16ToString(buf[:n]), " .\r\n"))}
 	}
-	return fmt.Errorf("HRESULT 0x%08x", hr)
+	return hresult{hr, fmt.Sprintf("HRESULT 0x%08x", hr)}
 }
+
+// hresult is a failed HRESULT with its system message, so callers can tell errors apart by code.
+type hresult struct {
+	code uint32
+	msg  string
+}
+
+func (h hresult) Error() string { return h.msg }
 
 // eventHandler makes a TypedEventHandler<sender, args> for an event; the signatures give its IID.
 func eventHandler(senderSig, argsSig string, fn func(sender, args unsafe.Pointer)) *foundation.TypedEventHandler {

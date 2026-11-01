@@ -68,12 +68,32 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		cacheMode = bluetooth.BluetoothCacheModeUncached
 	}
 	a.mu.Unlock()
+
+	// One deadline for the link to come up, retries included.
+	deadline := time.Now().Add(connectTimeout)
+	log := a.log.With("addr", ble.FormatMAC(addr))
 	c.ops.RLock() // an Unpair while connecting waits for this
-	err := c.connect(addrType, cacheMode)
+	retries, err := a.connRetry.Do(func() error {
+		return c.connect(addrType, cacheMode, deadline)
+	}, func(err error) bool {
+		if !radioFailure(err) {
+			log.Debug("connect failed, not a radio failure", "err", err)
+			return false
+		}
+		return c.reset()
+	}, ev.Withdrawn, func(n int, err error) {
+		log.Debug("connect failed on the radio, retrying", "retry", n, "err", err)
+	})
 	c.ops.RUnlock()
 	if err != nil {
 		c.release()
+		if retries > 0 {
+			return nil, fmt.Errorf("%d retries: %w", retries, err)
+		}
 		return nil, err
+	}
+	if retries > 0 {
+		log.Info("connected after retries", "retries", retries)
 	}
 	if cacheMode == bluetooth.BluetoothCacheModeUncached {
 		a.mu.Lock()
@@ -83,7 +103,9 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	return c, nil
 }
 
-func (c *conn) connect(addrType uint32, cacheMode bluetooth.BluetoothCacheMode) error {
+// connect makes one attempt: device lookup, GATT session, link up by deadline, service discovery. On failure
+// it leaves the WinRT objects it made in c, for reset or release to free.
+func (c *conn) connect(addrType uint32, cacheMode bluetooth.BluetoothCacheMode, deadline time.Time) error {
 	t := bluetooth.BluetoothAddressTypePublic
 	if addrType == ble.AddrRandom {
 		t = bluetooth.BluetoothAddressTypeRandom
@@ -130,9 +152,11 @@ func (c *conn) connect(addrType uint32, cacheMode bluetooth.BluetoothCacheMode) 
 	}
 
 	if !c.connected() {
+		t := time.NewTimer(time.Until(deadline))
+		defer t.Stop()
 		select {
 		case <-c.upCh:
-		case <-time.After(connectTimeout):
+		case <-t.C:
 			return errors.New("no connection in time")
 		}
 	}
@@ -143,13 +167,38 @@ func (c *conn) connect(addrType uint32, cacheMode bluetooth.BluetoothCacheMode) 
 
 	// From here on a lost link is reported through ev.Disconnected; before, Connect fails instead.
 	c.mu.Lock()
-	lost := c.closed || !c.connected()
+	closed := c.closed
+	lost := closed || !c.connected()
 	c.up = !lost
 	c.mu.Unlock()
+	if closed {
+		return errors.New("connection closed while connecting")
+	}
 	if lost {
-		return errors.New("link lost while connecting")
+		return errLinkLost
 	}
 	return nil
+}
+
+// reset frees the WinRT objects of a failed attempt so the next one starts afresh, and reports whether the
+// connection may be retried (it was not released meanwhile). It is called with c.ops held shared.
+func (c *conn) reset() bool {
+	c.ops.RUnlock()
+	c.ops.Lock()
+	c.free()
+	c.services, c.svcObjs = nil, nil
+	c.chars = map[uint16]*char{}
+	c.descs = map[uint16]*gatt.GattDescriptor{}
+	c.cccd = map[uint16]uint16{}
+	select {
+	case <-c.upCh:
+	default:
+	}
+	c.ops.Unlock()
+	c.ops.RLock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.closed
 }
 
 func (c *conn) connected() bool {
@@ -698,35 +747,46 @@ func (c *conn) release() bool {
 		delete(c.a.conns, c.addr)
 	}
 	c.a.mu.Unlock()
+	c.free()
+	return true
+}
 
-	for _, ch := range c.chars {
+// free closes the WinRT objects of the connection; it is called with c.ops held exclusively. A second call
+// does nothing.
+func (c *conn) free() {
+	for h, ch := range c.chars {
 		if ch.h != nil {
 			ch.c.RemoveValueChanged(ch.tok)
 			ch.h.Release()
 		}
 		ch.c.Release()
+		delete(c.chars, h)
 	}
-	for _, d := range c.descs {
+	for h, d := range c.descs {
 		d.Release()
+		delete(c.descs, h)
 	}
 	for _, s := range c.svcObjs {
 		s.Close()
 		s.Release()
 	}
+	c.svcObjs = nil
 	if c.session != nil {
 		c.session.SetMaintainConnection(false)
 		c.session.Close()
 		c.session.Release()
+		c.session = nil
 	}
 	if c.dev != nil {
 		if c.statusH != nil {
 			c.dev.RemoveConnectionStatusChanged(c.statusTok)
 			c.statusH.Release()
+			c.statusH = nil
 		}
 		c.dev.Close()
 		c.dev.Release()
+		c.dev = nil
 	}
-	return true
 }
 
 // Unpair removes the bond with a device, dropping any connection to it without reporting it.

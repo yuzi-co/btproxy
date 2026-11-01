@@ -24,10 +24,19 @@ const (
 	mtuSettleWindow = time.Second     // how long a new connection may take to finish its MTU exchange
 )
 
+// Options configures the adapter.
+type Options struct {
+	// ConnectRetries is how often a connect that failed at once on the radio is retried (see retry_windows.go).
+	ConnectRetries int
+	// Log receives the adapter's log lines; nil discards them.
+	Log *logx.Logger
+}
+
 // Adapter is the default Bluetooth radio of the machine.
 type Adapter struct {
-	log *logx.Logger
-	mac uint64
+	log       *logx.Logger
+	mac       uint64
+	connRetry ble.ConnectRetry
 
 	mu       sync.Mutex
 	mode     ble.ScanMode
@@ -42,7 +51,11 @@ type Adapter struct {
 }
 
 // Open initializes WinRT and opens the default Bluetooth adapter.
-func Open(log *logx.Logger) (*Adapter, error) {
+func Open(opt Options) (*Adapter, error) {
+	log := opt.Log
+	if log == nil {
+		log = logx.Discard()
+	}
 	initCOM()
 	op, err := bluetooth.BluetoothAdapterGetDefaultAsync()
 	if err != nil {
@@ -67,8 +80,8 @@ func Open(log *logx.Logger) (*Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Adapter{log: log, mac: mac, mode: ble.ScanActive, conns: map[uint64]*conn{},
-		uncached: map[uint64]bool{}}, nil
+	return &Adapter{log: log, mac: mac, connRetry: connectRetry(opt.ConnectRetries), mode: ble.ScanActive,
+		conns: map[uint64]*conn{}, uncached: map[uint64]bool{}}, nil
 }
 
 func (a *Adapter) MAC() uint64 { return a.mac }

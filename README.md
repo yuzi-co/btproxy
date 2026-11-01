@@ -101,7 +101,8 @@ for example `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"
 `-raw-adverts` (`auto`, `on` or `off`: where advertisements come from, see [Advertisements](#advertisements);
 default `auto`), `-scan-pause-on-connect` (`true`: stop scanning while a connection is being made, like
 ESPHome, see [Scanning](#scanning)), `-connect-retries` (2: retry a connect that fails at once with HCI reason
-0x3e this many times before reporting the failure, see [Scanning](#scanning); `0` disables),
+0x3e this many times before reporting the failure, see [Scanning](#scanning) and, for Windows,
+[Windows](#windows); `0` disables),
 `-adv-allow`, `-adv-deny` and `-adv-deny-random` (see [Advertisement filter](#advertisement-filter)),
 `-encryption-key` and `-encryption-key-file` (see [Encryption](#encryption)), `-debug`, `-config`, `-ui`,
 `-ui-password` and `-ui-password-file` (see [Settings page](#settings-page)); on Windows also `-tray` and
@@ -236,6 +237,15 @@ Differences from the BlueZ backend and an ESP32:
   passkey typed in fails.
 - Cache clearing makes the next service discovery for the device bypass the Windows GATT cache, which also
   refreshes that cache. Bonds are kept.
+- A connect that fails at once on the radio is retried, as with BlueZ (`-connect-retries`, 2 by default). Windows
+  has no connect call that fails: it keeps trying to connect while a GATT session asks for the link, so a
+  device out of range runs into the 30 s limit, which is not retried. A link that comes up and fails in its
+  first connection events (what BlueZ reports as HCI reason 0x3e) shows up as the first service discovery
+  answering Unreachable, discovery failing with `ERROR_GEN_FAILURE` or `ERROR_DEVICE_NOT_AVAILABLE`, or the
+  link being down again once discovery is done. The proxy then closes the device and session objects and
+  tries again after 500 ms with new ones, unless the attempt took longer than 5 s, the next would start more
+  than 8 s after the first, or the connect was withdrawn. The 30 s limit for the link to come up covers all
+  attempts. Not found, access denied, cancelled operations, ATT errors and timeouts fail at once.
 - Connection parameters cannot be set (Windows offers presets only), so the feature is not advertised. Scanning
   is not paused while connecting.
 
