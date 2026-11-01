@@ -205,8 +205,8 @@ Only one btproxy runs per listen address (a named mutex): a second one, such as 
 started at logon runs, says so in a message box (or in the log without a tray) and exits.
 
 The icon is drawn by `cmd/btproxy/gen_icon.go` (`go generate ./cmd/btproxy`) into `btproxy.ico`. It uses the default Bluetooth adapter, which must support LE and the central role;
-`-adapter` and the BlueZ flags (`-agent`, `-stall-timeout`, `-bluetoothd-restart`, `-raw-adverts`,
-`-scan-pause-on-connect`) have no effect. Listening on all interfaces makes Windows Firewall ask on the first
+`-adapter` and the BlueZ flags (`-agent`, `-stall-timeout`, `-bluetoothd-restart`, `-raw-adverts`) have no
+effect. Listening on all interfaces makes Windows Firewall ask on the first
 start; Home Assistant needs TCP 6053 in and, for discovery, UDP 5353. The default `-mac` is the first network
 interface whose MAC is neither locally administered nor a hypervisor's (Hyper-V, VMware, VirtualBox, Xen,
 Parallels). Home Assistant keys the device on it, so on a laptop that moves between Ethernet and Wi-Fi set
@@ -246,8 +246,13 @@ Differences from the BlueZ backend and an ESP32:
   tries again after 500 ms with new ones, unless the attempt took longer than 5 s, the next would start more
   than 8 s after the first, or the connect was withdrawn. The 30 s limit for the link to come up covers all
   attempts. Not found, access denied, cancelled operations, ATT errors and timeouts fail at once.
-- Connection parameters cannot be set (Windows offers presets only), so the feature is not advertised. Scanning
-  is not paused while connecting.
+- Connection parameters cannot be set (Windows offers presets only), so the feature is not advertised.
+- Scanning pauses while connecting (`-scan-pause-on-connect`, on by default), as with BlueZ: from the connect
+  call until the services are resolved or the connect fails, the advertisement watcher is stopped and the
+  scanner reported idle, then a new watcher starts. Overlapping connects share the pause, which ends after 60 s
+  at the latest. Watchers of other programs (another btproxy, for one) keep the radio scanning. A watcher
+  that cannot start again is retried every 5 s, and the proxy checks every 10 s that the running watcher has
+  not stopped or aborted without telling, which it then replaces the same way.
 
 ## mDNS
 

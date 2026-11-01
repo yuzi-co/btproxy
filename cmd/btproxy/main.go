@@ -37,7 +37,7 @@ var backends = map[string]func(adapter string, log *logx.Logger) (ble.Adapter, e
 	},
 }
 
-// Flags read by the bluez backend; connect-retries also by winrt.
+// Flags read by the bluez backend; scan-pause-on-connect and connect-retries also by winrt.
 var (
 	useAgent          bool
 	stallTimeout      time.Duration
@@ -82,7 +82,7 @@ func main() {
 	flag.StringVar(&rawAdverts, "raw-adverts", "auto",
 		"read advertisements from the HCI monitor: auto, on or off (bluez backend; needs CAP_NET_RAW)")
 	flag.BoolVar(&scanPause, "scan-pause-on-connect", true,
-		"stop scanning while a connection is being made, like ESPHome (bluez backend)")
+		"stop scanning while a connection is being made, like ESPHome (bluez and winrt backends)")
 	flag.IntVar(&connectRetries, "connect-retries", 2,
 		"retry a connect that fails at once on the radio (HCI 0x3e) this many times, 0 to disable (bluez and winrt backends)")
 	flag.Parse()

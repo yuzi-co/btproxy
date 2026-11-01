@@ -20,14 +20,21 @@ const (
 	callTimeout     = 30 * time.Second // one WinRT operation (lookup, discovery, read, write)
 	connectTimeout  = 30 * time.Second // until Windows reports the link up
 	pairTimeout     = 60 * time.Second
-	scanRetry       = 5 * time.Second // after the watcher stops on its own, e.g. with the radio off
-	mtuSettleWindow = time.Second     // how long a new connection may take to finish its MTU exchange
+	mtuSettleWindow = time.Second // how long a new connection may take to finish its MTU exchange
+)
+
+// Variables, so the tests can shorten them.
+var (
+	scanRetry = 5 * time.Second  // after the watcher stops on its own, e.g. with the radio off
+	scanCheck = 10 * time.Second // how often a running watcher's status is checked
 )
 
 // Options configures the adapter.
 type Options struct {
 	// ConnectRetries is how often a connect that failed at once on the radio is retried (see retry_windows.go).
 	ConnectRetries int
+	// PauseOnConnect stops scanning while a connect is in progress (see pause_windows.go).
+	PauseOnConnect bool
 	// Log receives the adapter's log lines; nil discards them.
 	Log *logx.Logger
 }
@@ -37,17 +44,29 @@ type Adapter struct {
 	log       *logx.Logger
 	mac       uint64
 	connRetry ble.ConnectRetry
+	// newScanner starts a watcher; a field, so the tests can do without the radio.
+	newScanner     func(ble.ScanMode) (scanWatcher, error)
+	pauseOnConnect bool
 
-	mu       sync.Mutex
-	mode     ble.ScanMode
-	status   ble.ScanStatus
-	onStatus func(ble.ScanStatus)
-	scanning bool                             // scanning is wanted
-	fn       atomic.Pointer[func(ble.Advert)] // read without mu: Stop may wait for a running Received handler
-	w        *watcher
-	retry    *time.Timer
-	conns    map[uint64]*conn
-	uncached map[uint64]bool // devices whose next service discovery bypasses the Windows GATT cache
+	mu         sync.Mutex
+	mode       ble.ScanMode
+	status     ble.ScanStatus
+	onStatus   func(ble.ScanStatus)
+	scanning   bool                             // scanning is wanted
+	fn         atomic.Pointer[func(ble.Advert)] // read without mu: Stop may wait for a running Received handler
+	w          scanWatcher
+	retry      *time.Timer // restarts a failed watcher
+	check      *time.Timer // checks the running watcher's status
+	connecting int         // connects in progress, which pause scanning (see pause_windows.go)
+	conns      map[uint64]*conn
+	uncached   map[uint64]bool // devices whose next service discovery bypasses the Windows GATT cache
+}
+
+// scanWatcher is a started advertisement watcher.
+type scanWatcher interface {
+	close()
+	// alive is false once the watcher has stopped or aborted on its own.
+	alive() bool
 }
 
 // Open initializes WinRT and opens the default Bluetooth adapter.
@@ -80,8 +99,16 @@ func Open(opt Options) (*Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Adapter{log: log, mac: mac, connRetry: connectRetry(opt.ConnectRetries), mode: ble.ScanActive,
-		conns: map[uint64]*conn{}, uncached: map[uint64]bool{}}, nil
+	a := &Adapter{log: log, mac: mac, connRetry: connectRetry(opt.ConnectRetries), pauseOnConnect: opt.PauseOnConnect,
+		mode: ble.ScanActive, conns: map[uint64]*conn{}, uncached: map[uint64]bool{}}
+	a.newScanner = func(m ble.ScanMode) (scanWatcher, error) {
+		w, err := a.newWatcher(m)
+		if err != nil {
+			return nil, err
+		}
+		return w, nil
+	}
+	return a, nil
 }
 
 func (a *Adapter) MAC() uint64 { return a.mac }
@@ -96,12 +123,15 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 	}
 	a.scanning = true
 	a.fn.Store(&fn)
-	if err := a.startLocked(); err != nil {
+	if a.connecting > 0 {
+		a.setStatusLocked(ble.ScanIdle) // paused: the last connect to finish starts the watcher
+	} else if err := a.startLocked(); err != nil {
 		a.scanning = false
 		a.fn.Store(nil)
 		a.setStatusLocked(ble.ScanFailed)
 		return nil, err
 	}
+	a.scheduleCheckLocked()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -110,9 +140,32 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 			a.scanning = false
 			a.fn.Store(nil)
 			a.stopLocked()
+			if a.check != nil {
+				a.check.Stop()
+				a.check = nil
+			}
 			a.setStatusLocked(ble.ScanIdle)
 		})
 	}, nil
+}
+
+// scheduleCheckLocked arms the periodic check that a running watcher still runs. The Stopped event normally
+// reports a watcher that stopped on its own, but a watcher can also end up Aborted without one.
+func (a *Adapter) scheduleCheckLocked() {
+	var t *time.Timer
+	t = time.AfterFunc(scanCheck, func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.check != t || !a.scanning {
+			return
+		}
+		if a.w != nil && !a.w.alive() {
+			a.log.Warn("scanning stopped without notice, retrying", "in", scanRetry)
+			a.failedLocked()
+		}
+		a.scheduleCheckLocked()
+	})
+	a.check = t
 }
 
 func (a *Adapter) SetScanMode(m ble.ScanMode) {
@@ -159,7 +212,7 @@ func (a *Adapter) startLocked() error {
 		a.retry = nil
 	}
 	a.setStatusLocked(ble.ScanStarting)
-	w, err := a.newWatcher(a.mode)
+	w, err := a.newScanner(a.mode)
 	if err != nil {
 		return err
 	}
@@ -191,6 +244,10 @@ func (a *Adapter) failedLocked() {
 			return
 		}
 		a.retry = nil
+		if a.connecting > 0 {
+			a.setStatusLocked(ble.ScanIdle) // paused: the last connect to finish starts the watcher
+			return
+		}
 		if err := a.startLocked(); err != nil {
 			a.log.Debug("scan restart failed", "err", err)
 			a.failedLocked()
@@ -250,6 +307,12 @@ func (a *Adapter) newWatcher(mode ble.ScanMode) (*watcher, error) {
 	return w, nil
 }
 
+func (w *watcher) alive() bool {
+	st, err := w.w.GetStatus()
+	return err != nil || st != advertisement.BluetoothLEAdvertisementWatcherStatusAborted &&
+		st != advertisement.BluetoothLEAdvertisementWatcherStatusStopped
+}
+
 func (w *watcher) close() {
 	w.mu.Lock()
 	if w.closed {
@@ -277,7 +340,7 @@ func (a *Adapter) watcherStopped(w *watcher, code bluetooth.BluetoothError) {
 	go func() {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		if a.w != w {
+		if a.w != scanWatcher(w) {
 			return
 		}
 		a.log.Warn("scanning stopped by Windows, retrying", "bluetooth_error", int(code), "in", scanRetry)

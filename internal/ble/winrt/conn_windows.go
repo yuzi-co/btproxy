@@ -68,6 +68,9 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		cacheMode = bluetooth.BluetoothCacheModeUncached
 	}
 	a.mu.Unlock()
+	// Until the services are resolved or the connect fails: the link is most fragile in its first
+	// connection events, and service discovery is a burst of traffic right after.
+	defer a.pauseScan()()
 
 	// One deadline for the link to come up, retries included.
 	deadline := time.Now().Add(connectTimeout)
