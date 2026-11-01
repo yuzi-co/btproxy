@@ -30,6 +30,29 @@ client library).
 - API encryption (Noise, as ESPHome's `api: encryption: key:`), off by default (see [Encryption](#encryption)).
 - Not supported: setting the encryption key from Home Assistant, IPv6 mDNS.
 
+## Compared with other proxies
+
+As of 2026-11, against ESPHome's `bluetooth_proxy` on an ESP32 and [denvera/bt-proxy](https://github.com/denvera/bt-proxy)
+(Python and bleak on Linux, ESPHome API 1.10). "?" means not checked.
+
+| Feature | btproxy | ESPHome ESP32 | denvera/bt-proxy |
+|---|---|---|---|
+| Runs on | Linux with BlueZ, one static binary (5 MB on mipsle) | ESP32 | Linux with BlueZ, Python |
+| Advertisements | true raw from the HCI monitor, rebuilt from BlueZ as fallback | true raw | rebuilt by bleak |
+| Passive scanning, scanner state and mode | yes (passive needs `bluetoothd --experimental`) | yes | yes |
+| Connections, GATT read/write/notify | yes | yes | yes |
+| Pairing and unpairing | yes (Just Works) | yes | no |
+| Cache clearing | yes, bonds kept | yes | reported, nothing cleared |
+| Connection parameters | yes (HCI LE Connection Update) | yes | no |
+| API encryption (Noise) | yes, off by default | yes | no |
+| Log streaming to Home Assistant | yes | yes | ? |
+| mDNS discovery | yes (IPv4) | yes | yes |
+| Recovery from `bluetoothd` restarts and hangs | yes, optional restart command | n/a | restarts yes, hangs ? |
+| Shares the adapter with other programs | yes, through BlueZ | n/a | yes, through BlueZ |
+
+Shelly Gen2+ devices, the Ruuvi Gateway and Theengs / OpenMQTTGateway also relay advertisements to Home
+Assistant, but cannot make connections.
+
 ## Build
 
 ```sh
