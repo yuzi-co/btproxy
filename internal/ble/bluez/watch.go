@@ -52,6 +52,7 @@ type scanState struct {
 	armed       bool
 	armedMode   ble.ScanMode
 	armedEpoch  int
+	armedMons   bool // monitors registered next to active discovery (see dupFilterOff)
 	lastErr     string
 	seen        int       // adverts when reconcile last looked
 	quietSince  time.Time // when seen last changed or the scan was armed
@@ -277,12 +278,11 @@ func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 		err := a.registerMonitors()
 		if err == nil {
 			a.armed, a.armedMode, a.armedEpoch, a.quietSince = true, ble.ScanPassive, epoch, time.Now()
+			a.rawActive.Store(false)
 			a.log.Info("scanning passively")
 			return nil
 		}
-		var de dbus.Error
-		if isTimeout(err) || errors.As(err, &de) && (de.Name == "org.freedesktop.DBus.Error.ServiceUnknown" ||
-			de.Name == "org.freedesktop.DBus.Error.NoReply") {
+		if unreachable(err) {
 			return err // bluetoothd is gone or stuck, which says nothing about the monitor API
 		}
 		a.log.Warn("passive scanning unavailable (bluetoothd needs --experimental), scanning actively", "err", err)
@@ -290,16 +290,60 @@ func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 		a.noMonitor = true
 		a.mu.Unlock()
 	}
-	filter := map[string]any{"Transport": "le", "DuplicateData": true}
-	if err := a.call(a.path, ifAdapter+".SetDiscoveryFilter", filter).Err; err != nil {
-		return err
+	// Repeated advertisements matter only when they are rebuilt from Device1 properties; with the HCI monitor,
+	// leaving them out spares bluetoothd and the bus a signal per advertisement.
+	a.mu.Lock()
+	raw, noMonitor := a.raw != nil, a.noMonitor
+	a.mu.Unlock()
+	if raw && !noMonitor {
+		if err := a.dupFilterOff(); err != nil {
+			return err
+		}
 	}
-	if err := a.startDiscovery(); err != nil {
+	filter := map[string]any{"Transport": "le", "DuplicateData": !raw}
+	err := a.call(a.path, ifAdapter+".SetDiscoveryFilter", filter).Err
+	if err == nil {
+		err = a.startDiscovery()
+	}
+	if err != nil {
+		if a.armedMons {
+			a.unregisterMonitors()
+			a.armedMons = false
+		}
 		return err
 	}
 	a.armed, a.armedMode, a.armedEpoch, a.quietSince = true, ble.ScanActive, epoch, time.Now()
+	a.rawActive.Store(true)
 	a.log.Info("scanning actively")
 	return nil
+}
+
+// dupFilterOff registers the advertisement monitors before active discovery starts, when advertisements come
+// from the HCI monitor. The kernel scans for discovery with the controller's duplicate filter on, so a
+// controller reports a device about once per scan, unless an advertisement monitor is registered: then it
+// turns the filter off, and the HCI monitor sees every advertisement, which presence detection needs. Without
+// the monitor API (bluetoothd without --experimental) discovery runs as before.
+func (a *Adapter) dupFilterOff() error {
+	err := a.registerMonitors()
+	if err == nil {
+		a.armedMons = true
+		return nil
+	}
+	if unreachable(err) {
+		return err
+	}
+	a.log.Info("advertisement monitors unavailable, the controller filters duplicate advertisements", "err", err)
+	a.mu.Lock()
+	a.noMonitor = true
+	a.mu.Unlock()
+	return nil
+}
+
+// unreachable tells whether a call failed because bluetoothd is gone or stuck.
+func unreachable(err error) bool {
+	var de dbus.Error
+	return isTimeout(err) || errors.As(err, &de) && (de.Name == "org.freedesktop.DBus.Error.ServiceUnknown" ||
+		de.Name == "org.freedesktop.DBus.Error.NoReply")
 }
 
 // disarm stops the current scan. Errors are ignored: after a restart BlueZ has forgotten it anyway.
@@ -308,13 +352,18 @@ func (a *Adapter) disarm() {
 		a.unregisterMonitors()
 	} else {
 		a.call(a.path, ifAdapter+".StopDiscovery")
+		if a.armedMons {
+			a.unregisterMonitors()
+			a.armedMons = false
+		}
 	}
 	a.armed = false
+	a.rawActive.Store(false)
 }
 
-// emit reports a device's cached advertisement. Called with a.mu held.
+// emit reports a device's cached advertisement, unless the HCI monitor delivers them. Called with a.mu held.
 func (a *Adapter) emit(d *device) {
-	if a.scanFn != nil && d.rssi != 0 && d.addr != 0 {
+	if a.scanFn != nil && d.rssi != 0 && d.addr != 0 && !a.rawHandles() {
 		a.adverts++
 		a.scanFn(ble.Advert{Addr: d.addr, AddrType: d.addrType, RSSI: int8(d.rssi), Data: d.adData()})
 	}

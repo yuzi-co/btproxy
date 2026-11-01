@@ -9,7 +9,12 @@ import (
 
 func init() {
 	backends["bluez"] = func(name string) (ble.Adapter, error) {
-		a, err := bluez.Open(name, bluez.Options{StallTimeout: stallTimeout, RestartCmd: bluetoothdRestart})
+		raw, err := bluez.ParseRawMode(rawAdverts)
+		if err != nil {
+			return nil, err
+		}
+		a, err := bluez.Open(name, bluez.Options{StallTimeout: stallTimeout, RestartCmd: bluetoothdRestart,
+			RawAdverts: raw})
 		if err != nil {
 			return nil, err
 		}
