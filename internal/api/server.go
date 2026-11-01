@@ -23,6 +23,9 @@ type Config struct {
 	ProjectVersion string
 	MaxConnections int
 	ScanMode       ble.ScanMode // configured scanner mode; adapters without ble.ModeScanner scan actively
+	Logs           *Logs        // log stream for clients that subscribe to logs; nil sends none
+	Backend        string       // backend and adapter names, for the configuration dump
+	Adapter        string
 }
 
 // advBatchSize and advFlushInterval follow ESPHome's batching of raw advertisements.
@@ -306,6 +309,9 @@ func (s *Server) disconnectAll() {
 }
 
 func (s *Server) removeClient(c *client) {
+	if s.cfg.Logs != nil {
+		s.cfg.Logs.unsubscribe(c)
+	}
 	s.mu.Lock()
 	delete(s.clients, c)
 	s.updateScan()
@@ -323,6 +329,7 @@ type client struct {
 	log *slog.Logger
 
 	wmu           sync.Mutex
+	dead          bool // a write failed, guarded by wmu
 	advSubscribed bool // guarded by s.mu
 	apiMajor      uint32
 	apiMinor      uint32 // set by HelloRequest, before any Bluetooth request
@@ -331,8 +338,12 @@ type client struct {
 func (c *client) send(typ uint32, payload []byte) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	if c.dead { // logged once below: with logs subscribed, every failed write would log another line to send
+		return
+	}
 	c.c.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if _, err := c.c.Write(AppendFrame(nil, typ, payload)); err != nil {
+		c.dead = true
 		c.log.Debug("write", "err", err)
 		c.c.Close()
 	}
@@ -390,9 +401,21 @@ func (c *client) handle(f Frame) bool {
 		c.send(msgDeviceCapabilitiesResponse, encCapabilities(s.featureFlags(), ble.FormatMAC(s.adapter.MAC())))
 	case msgListEntitiesRequest:
 		c.send(msgListEntitiesDoneResponse, nil)
-	case msgSubscribeStatesRequest, msgSubscribeLogsRequest, msgSubscribeHAServicesRequest,
-		msgSubscribeHAStatesRequest:
-		// Nothing to report: the proxy has no entities, services or log stream.
+	case msgSubscribeStatesRequest, msgSubscribeHAServicesRequest, msgSubscribeHAStatesRequest:
+		// Nothing to report: the proxy has no entities or services.
+	case msgSubscribeLogsRequest:
+		level, dump, err := decSubscribeLogs(f.Payload)
+		if err != nil {
+			c.log.Warn("bad message", "type", f.Type, "err", err)
+			return false
+		}
+		if s.cfg.Logs == nil {
+			break
+		}
+		s.cfg.Logs.subscribe(c, level)
+		if dump && level >= logConfig {
+			c.send(msgSubscribeLogsResponse, encLog(logConfig, formatLog(logConfig, "btproxy", 0, s.configDump())))
+		}
 	case msgNoiseEncryptionSetKeyRequest:
 		c.send(msgNoiseEncryptionSetKeyResponse, nil) // success = false
 	case msgSubscribeBTAdvertisements:
