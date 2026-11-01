@@ -243,3 +243,33 @@ func TestLastClientLeavesWhileConnecting(t *testing.T) {
 		t.Fatal("connection completed after the last client left was not disconnected")
 	}
 }
+
+// TestConnectWithdrawn checks what Events.Withdrawn tells a backend that retries: false while the connect is
+// wanted, true once a disconnect is requested.
+func TestConnectWithdrawn(t *testing.T) {
+	asked, answer := make(chan struct{}), make(chan bool, 2)
+	tc := startServer(t, testAdapter{connect: func(ev ble.Events) (ble.Conn, error) {
+		answer <- ev.Withdrawn()
+		<-asked
+		answer <- ev.Withdrawn()
+		return nil, errors.New("le-connection-abort-by-local")
+	}})
+	var e enc
+	e.uint(1, testAddr)
+	e.uint(2, reqConnectV3WithCache)
+	tc.send(msgBTDeviceRequest, e.b)
+	if <-answer {
+		t.Fatal("withdrawn before any disconnect")
+	}
+	e = enc{}
+	e.uint(1, testAddr)
+	e.uint(2, reqDisconnect)
+	tc.send(msgBTDeviceRequest, e.b)
+	if r := tc.expect(msgBTDeviceConnectionResponse); fieldValue(r, 2) != 0 {
+		t.Fatalf("reported connected: %+v", r)
+	}
+	close(asked)
+	if !<-answer {
+		t.Error("not withdrawn after a disconnect request")
+	}
+}

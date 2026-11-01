@@ -55,6 +55,8 @@ type Adapter struct {
 
 	scanState // see watch.go
 	rawState  // see raw.go
+
+	retry ble.ConnectRetry // see retry.go
 }
 
 // Options configures the scanner's watchdog (see watch.go).
@@ -68,6 +70,8 @@ type Options struct {
 	RawAdverts RawMode
 	// PauseOnConnect stops scanning while a connect is in progress (see pause.go).
 	PauseOnConnect bool
+	// ConnectRetries is how often a connect that failed at once on the radio is retried (see retry.go).
+	ConnectRetries int
 	// Log receives the adapter's log lines; nil discards them.
 	Log *logx.Logger
 }
@@ -101,6 +105,7 @@ func Open(name string, opt Options) (*Adapter, error) {
 	}
 	a.log = opt.Log.With("adapter", string(a.path))
 	a.stallTimeout, a.restartCmd, a.pauseOnConnect = opt.StallTimeout, opt.RestartCmd, opt.PauseOnConnect
+	a.retry = connectRetry(opt.ConnectRetries)
 	v, err := a.getProperty(a.path, ifAdapter+".Address")
 	if err != nil {
 		return nil, fmt.Errorf("adapter %s: %w", name, err)
@@ -478,16 +483,36 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		return nil, err
 	}
 
+	// One deadline for every attempt, retries included.
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
-	err := a.connect(ctx, p, addr, addrType, known)
-	var de dbus.Error
-	if errors.As(err, &de) && (known && noObject(de.Name) || !known && de.Name == "org.bluez.Error.AlreadyExists") {
-		// BlueZ removed the device or created it just now, before the signal saying so arrived.
-		err = a.connect(ctx, p, addr, addrType, !known)
-	}
+	log := a.log.With("addr", ble.FormatMAC(addr))
+	retries, err := a.retry.Do(func() error {
+		err := a.connect(ctx, p, addr, addrType, known)
+		var de dbus.Error
+		if errors.As(err, &de) && (known && noObject(de.Name) || !known && de.Name == "org.bluez.Error.AlreadyExists") {
+			// BlueZ removed the device or created it just now, before the signal saying so arrived.
+			known = !known
+			err = a.connect(ctx, p, addr, addrType, known)
+		}
+		return err
+	}, func(err error) bool {
+		// Not once the failure tore the connection down (BlueZ removed the device): a retry would find
+		// it gone.
+		select {
+		case <-c.lost:
+			return false
+		default:
+			return radioFailure(err)
+		}
+	}, ev.Withdrawn, func(n int, err error) {
+		log.Debug("connect failed on the radio, retrying", "retry", n, "err", err)
+	})
 	cancel()
 	if err != nil {
 		return fail(fmt.Errorf("connect: %w", err))
+	}
+	if retries > 0 {
+		log.Info("connected after retries", "retries", retries)
 	}
 
 	v, err := a.getProperty(p, ifDevice+".ServicesResolved")

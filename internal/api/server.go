@@ -279,6 +279,11 @@ func (s *Server) connect(addr uint64, addrType uint32) {
 				s.sendConnectionsFree()
 			}
 		},
+		Withdrawn: func() bool {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			return s.conns[addr] != slot
+		},
 	})
 	if err != nil {
 		log.Warn("connect failed", "err", err)

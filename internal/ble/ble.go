@@ -100,6 +100,9 @@ type Conn interface {
 type Events struct {
 	Notification func(handle uint16, data []byte)
 	Disconnected func(reason error)
+	// Withdrawn, if set, reports whether the connect is no longer wanted (a disconnect was requested, or
+	// every client left). A backend that retries a failed connect asks it before each retry.
+	Withdrawn func() bool
 }
 
 // Adapter is a local Bluetooth controller.

@@ -39,6 +39,7 @@ var (
 	bluetoothdRestart string
 	rawAdverts        string
 	scanPause         bool
+	connectRetries    int
 )
 
 func main() {
@@ -67,6 +68,8 @@ func main() {
 		"read advertisements from the HCI monitor: auto, on or off (bluez backend; needs CAP_NET_RAW)")
 	flag.BoolVar(&scanPause, "scan-pause-on-connect", true,
 		"stop scanning while a connection is being made, like ESPHome (bluez backend)")
+	flag.IntVar(&connectRetries, "connect-retries", 2,
+		"retry a connect that fails at once on the radio (HCI 0x3e) this many times, 0 to disable (bluez backend)")
 	flag.Parse()
 
 	level := logx.LevelInfo

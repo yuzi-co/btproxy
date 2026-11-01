@@ -97,7 +97,8 @@ advertisements; `0` disables), `-bluetoothd-restart` (shell command that restart
 for example `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"`; default: none),
 `-raw-adverts` (`auto`, `on` or `off`: where advertisements come from, see [Advertisements](#advertisements);
 default `auto`), `-scan-pause-on-connect` (`true`: stop scanning while a connection is being made, like
-ESPHome, see [Scanning](#scanning)),
+ESPHome, see [Scanning](#scanning)), `-connect-retries` (2: retry a connect that fails at once with HCI reason
+0x3e this many times before reporting the failure, see [Scanning](#scanning); `0` disables),
 `-encryption-key` and `-encryption-key-file` (see [Encryption](#encryption)), `-debug`.
 
 Home Assistant discovers the proxy over mDNS and offers it under Settings, Devices & services. Without mDNS
@@ -272,6 +273,13 @@ watchdog does not count it. The pause cannot stop scanning the kernel does for i
 connect still waits for its device (the kernel then scans with a 60 ms window every 60 ms), or for a bonded
 device `bluetoothd` reconnects to automatically. Pairing a connected device does not pause scanning, as on an
 ESP32.
+
+Some connects still fail that way, within about half a second (`bluetoothd` reports
+`le-connection-abort-by-local`, sometimes an error without a message). The proxy retries those after 200 ms,
+with scanning still paused, up to `-connect-retries` times (2 by default) before it reports the failure to
+Home Assistant. It does not retry a failure that took longer than 3 s (a timeout), any other error, or once
+the connect is withdrawn, and starts no retry more than 5 s after the first attempt. Each retry is logged at
+debug level, and a connect that needed one logs `connected after retries` at info.
 
 ## Connection parameters
 
