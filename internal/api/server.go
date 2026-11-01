@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -586,7 +587,7 @@ func (c *client) handle(f Frame) bool {
 	case msgDeviceInfoRequest:
 		c.send(msgDeviceInfoResponse, encDeviceInfo(deviceInfo{
 			Name: s.cfg.Name, FriendlyName: s.cfg.FriendlyName, MAC: s.cfg.MAC,
-			BTMAC: ble.FormatMAC(s.adapter.MAC()), Version: s.cfg.Version, Model: "Linux",
+			BTMAC: ble.FormatMAC(s.adapter.MAC()), Version: s.cfg.Version, Model: osModel(),
 			Manufacturer: "btproxy", ProjectName: "yuzi.btproxy", ProjectVersion: s.cfg.ProjectVersion,
 			SuggestedArea: s.cfg.SuggestedArea, FeatureFlags: s.featureFlags(),
 			EncryptionSupported: s.cfg.EncryptionKey != nil,
@@ -790,4 +791,12 @@ func (c *client) gatt(conn ble.Conn, typ uint32, r request) {
 		}
 		c.send(msgBTGATTNotifyResponse, encAddrHandle(r.addr, r.handle))
 	}
+}
+
+// osModel is the model DeviceInfo reports, which Home Assistant shows on the proxy's Bluetooth scanner device.
+func osModel() string {
+	if runtime.GOOS == "windows" {
+		return "Windows"
+	}
+	return "Linux"
 }

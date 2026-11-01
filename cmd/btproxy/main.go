@@ -1,5 +1,5 @@
-// Command btproxy is an ESPHome-compatible Bluetooth proxy for Linux: Home Assistant adds it like an ESP32
-// proxy (ESPHome integration, port 6053) and uses the host's Bluetooth adapter through it.
+// Command btproxy is an ESPHome-compatible Bluetooth proxy for Linux and Windows: Home Assistant adds it like
+// an ESP32 proxy (ESPHome integration, port 6053) and uses the host's Bluetooth adapter through it.
 package main
 
 import (
