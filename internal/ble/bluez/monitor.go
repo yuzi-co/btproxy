@@ -38,6 +38,13 @@ var monitorPatterns = [][]orPattern{
 	firstBytePatterns(0x16, 0x95, 0xd2, 0x3d, 0x1a, 0x9f, 0x2c, 0xed),
 }
 
+// quietPatterns is one monitor that matches no real advertisement: manufacturer data under company id
+// 0xffff, which the Bluetooth SIG keeps for tests, followed by bytes no device sends. Registered once raw
+// advertisements have proven themselves (see Adapter.quiet), it keeps the kernel scanning passively with the
+// controller's duplicate filter off, so the HCI monitor sees every advertisement, while bluetoothd, which
+// matches the patterns itself, neither creates Device objects nor calls DeviceFound for any device.
+var quietPatterns = [][]orPattern{{{Type: 0xff, Content: append([]byte{0xff, 0xff}, "btproxy:quiet"...)}}}
+
 func flagPatterns(values ...byte) []orPattern { return firstBytePatterns(0x01, values...) }
 
 func firstBytePatterns(adType byte, values ...byte) []orPattern {
@@ -52,10 +59,15 @@ func monitorPath(i int) dbus.ObjectPath {
 	return monitorRoot + dbus.ObjectPath("/m"+string(rune('0'+i)))
 }
 
-// monitorObjects is the object tree BlueZ reads from the monitor application root.
-func monitorObjects() map[dbus.ObjectPath]map[string]map[string]dbus.Variant {
+// monitorObjects is the object tree BlueZ reads from the monitor application root: the real monitors, or
+// the one that matches nothing.
+func monitorObjects(quiet bool) map[dbus.ObjectPath]map[string]map[string]dbus.Variant {
+	patterns := monitorPatterns
+	if quiet {
+		patterns = quietPatterns
+	}
 	objs := map[dbus.ObjectPath]map[string]map[string]dbus.Variant{}
-	for i, ps := range monitorPatterns {
+	for i, ps := range patterns {
 		objs[monitorPath(i)] = map[string]map[string]dbus.Variant{ifMonitor: {
 			"Type":     dbus.MakeVariant("or_patterns"),
 			"Patterns": dbus.MakeVariant(ps),
@@ -65,20 +77,27 @@ func monitorObjects() map[dbus.ObjectPath]map[string]map[string]dbus.Variant {
 }
 
 // monitorApp serves GetManagedObjects on the application root.
-type monitorApp struct{}
+type monitorApp struct{ a *Adapter }
 
-func (monitorApp) GetManagedObjects() (map[dbus.ObjectPath]map[string]map[string]dbus.Variant, *dbus.Error) {
-	return monitorObjects(), nil
+func (m monitorApp) GetManagedObjects() (map[dbus.ObjectPath]map[string]map[string]dbus.Variant, *dbus.Error) {
+	return monitorObjects(m.a.quietMons.Load()), nil
 }
 
 // monitorProps serves the monitors' properties, for clients that read them one by one.
-type monitorProps struct{ path dbus.ObjectPath }
+type monitorProps struct {
+	a    *Adapter
+	path dbus.ObjectPath
+}
 
 func (m monitorProps) GetAll(iface string) (map[string]dbus.Variant, *dbus.Error) {
 	if iface != ifMonitor {
 		return nil, dbus.NewError("org.freedesktop.DBus.Error.InvalidArgs", []any{"no such interface"})
 	}
-	return monitorObjects()[m.path][ifMonitor], nil
+	props, ok := monitorObjects(m.a.quietMons.Load())[m.path][ifMonitor]
+	if !ok {
+		return nil, dbus.NewError("org.freedesktop.DBus.Error.UnknownObject", []any{"no such monitor"})
+	}
+	return props, nil
 }
 
 func (m monitorProps) Get(iface, name string) (dbus.Variant, *dbus.Error) {
@@ -123,14 +142,14 @@ func (monitor) DeviceLost(dbus.ObjectPath) *dbus.Error { return nil }
 // with BlueZ is what turns passive scanning on. Method tables rather than Export, for the binary size (see
 // RegisterAgent).
 func (a *Adapter) exportMonitors() error {
-	app := monitorApp{}
+	app := monitorApp{a}
 	if err := a.bus.ExportMethodTable(map[string]any{"GetManagedObjects": app.GetManagedObjects},
 		monitorRoot, ifObjManager); err != nil {
 		return err
 	}
 	for i := range monitorPatterns {
 		p := monitorPath(i)
-		m, props := monitor{a}, monitorProps{p}
+		m, props := monitor{a}, monitorProps{a, p}
 		if err := a.bus.ExportMethodTable(map[string]any{"Release": m.Release, "Activate": m.Activate,
 			"DeviceFound": m.DeviceFound, "DeviceLost": m.DeviceLost}, p, ifMonitor); err != nil {
 			return err
@@ -143,8 +162,10 @@ func (a *Adapter) exportMonitors() error {
 	return nil
 }
 
-// registerMonitors starts passive scanning. It fails when bluetoothd runs without --experimental.
-func (a *Adapter) registerMonitors() error {
+// registerMonitors starts passive scanning, with the monitor that matches nothing if quiet. It fails when
+// bluetoothd runs without --experimental.
+func (a *Adapter) registerMonitors(quiet bool) error {
+	a.quietMons.Store(quiet) // BlueZ reads the objects during the call
 	a.mu.Lock()
 	a.monitorUp = true
 	a.mu.Unlock()

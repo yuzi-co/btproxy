@@ -110,8 +110,11 @@ func (a *Adapter) rawAdvert(ad ble.Advert) {
 		return
 	}
 	if !a.rawSeen {
+		// The supervisor drops the match rule for every device's properties and arms the scan again with
+		// bluetoothd reporting no devices (see Adapter.quiet).
 		a.rawSeen = true
-		a.kickScan() // the supervisor drops the match rule for every device's properties
+		a.epoch++
+		a.kickScan()
 	}
 	fn := a.scanFn
 	if fn != nil {

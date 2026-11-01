@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -52,7 +53,8 @@ type scanState struct {
 	armed       bool
 	armedMode   ble.ScanMode
 	armedEpoch  int
-	armedMons   bool // monitors registered next to active discovery (see dupFilterOff)
+	armedMons   bool        // monitors registered next to active discovery (see dupFilterOff)
+	quietMons   atomic.Bool // the monitors registered match nothing (see quiet); read by the monitor objects
 	lastErr     string
 	seen        int       // adverts when reconcile last looked
 	quietSince  time.Time // when seen last changed or the scan was armed
@@ -277,12 +279,13 @@ func (a *Adapter) strike() {
 }
 
 func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
+	quiet := a.quiet()
 	if mode == ble.ScanPassive {
-		err := a.registerMonitors()
+		err := a.registerMonitors(quiet)
 		if err == nil {
 			a.armed, a.armedMode, a.armedEpoch, a.quietSince = true, ble.ScanPassive, epoch, time.Now()
 			a.rawActive.Store(false)
-			a.log.Info("scanning passively")
+			a.log.Info("scanning passively", "bluetoothd_reports_devices", !quiet)
 			return nil
 		}
 		if unreachable(err) {
@@ -299,11 +302,18 @@ func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 	raw, noMonitor := a.raw != nil, a.noMonitor
 	a.mu.Unlock()
 	if raw && !noMonitor {
-		if err := a.dupFilterOff(); err != nil {
+		if err := a.dupFilterOff(quiet); err != nil {
 			return err
 		}
 	}
 	filter := map[string]any{"Transport": "le", "DuplicateData": !raw}
+	// The kernel drops the results of a discovery below the RSSI threshold before bluetoothd sees them, after
+	// the HCI monitor has. Only with the monitor API, whose --experimental also brings ConnectDevice: without
+	// Device objects for the devices around, that is how they are connected.
+	quiet = quiet && a.armedMons
+	if quiet {
+		filter["RSSI"] = int16(quietRSSI)
+	}
 	err := a.call(a.path, ifAdapter+".SetDiscoveryFilter", filter).Err
 	if err == nil {
 		err = a.startDiscovery()
@@ -317,8 +327,39 @@ func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 	}
 	a.armed, a.armedMode, a.armedEpoch, a.quietSince = true, ble.ScanActive, epoch, time.Now()
 	a.rawActive.Store(true)
-	a.log.Info("scanning actively")
+	a.log.Info("scanning actively", "bluetoothd_reports_devices", !quiet)
 	return nil
+}
+
+// quietRSSI is the discovery RSSI threshold that keeps every device from bluetoothd: BlueZ accepts at most
+// 20 dBm, which no advertisement reaches.
+const quietRSSI = 20
+
+// quiet tells whether bluetoothd can be told to report no devices, as raw advertisements have proven
+// themselves (see rawProven). Every advertisement bluetoothd reports costs it, the bus and the proxy a
+// D-Bus message with the device's properties, or a DeviceFound call, and a Device object for every new
+// random address, while the proxy forwards the monitor's copy anyway. Not when the controller matches the
+// advertisement monitors' patterns itself ("controller-patterns"): then a monitor that matches nothing
+// would keep the advertisements from the HCI monitor too.
+func (a *Adapter) quiet() bool {
+	a.mu.Lock()
+	proven := a.rawProven()
+	a.mu.Unlock()
+	if !proven {
+		return false
+	}
+	v, err := a.getProperty(a.path, ifMonitorManager+".SupportedFeatures")
+	if err != nil {
+		return false // no monitor API, or bluetoothd is gone: arming fails or scans as before
+	}
+	features, _ := v.Value().([]string)
+	for _, f := range features {
+		if f == "controller-patterns" {
+			a.log.Info("the controller filters advertisements for the monitors, bluetoothd keeps reporting devices")
+			return false
+		}
+	}
+	return true
 }
 
 // dupFilterOff registers the advertisement monitors before active discovery starts, when advertisements come
@@ -326,8 +367,8 @@ func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 // controller reports a device about once per scan, unless an advertisement monitor is registered: then it
 // turns the filter off, and the HCI monitor sees every advertisement, which presence detection needs. Without
 // the monitor API (bluetoothd without --experimental) discovery runs as before.
-func (a *Adapter) dupFilterOff() error {
-	err := a.registerMonitors()
+func (a *Adapter) dupFilterOff(quiet bool) error {
+	err := a.registerMonitors(quiet)
 	if err == nil {
 		a.armedMons = true
 		return nil

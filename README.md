@@ -145,7 +145,21 @@ still falls back on later failures. The log says which source is in use. Once th
 advertisement, the proxy stops receiving BlueZ's property signals for devices it is not connected to, which
 BlueZ sends for every advertisement it processes and which cost more CPU to decode than the advertisement
 itself. It follows only the devices it connects to, and receives every device's signals again after a
-fallback. The proxy reads only the
+fallback.
+
+From then on, with `bluetoothd --experimental`, the proxy also has `bluetoothd` stop reporting devices at
+all, which spares `bluetoothd`, `dbus-daemon` and the proxy a D-Bus message and often a new `Device` object
+for every advertisement. Passive scanning registers a single advertisement monitor whose pattern matches no
+real advertisement. The kernel keeps scanning passively with the controller's duplicate filter off, and
+`bluetoothd`, which matches the patterns itself, drops every report. Active discovery gets an RSSI threshold
+of 20 dBm, which no advertisement reaches, so the kernel drops every result before `bluetoothd` sees it. The
+HCI monitor sees every report either way. Devices `bluetoothd` has no object for are connected with
+`ConnectDevice`, and bonded devices keep their objects. The real monitors and the plain discovery filter come
+back on a fallback. On controllers that match monitor patterns themselves (`SupportedFeatures` lists
+`controller-patterns`), `bluetoothd` keeps reporting devices, as a monitor that matches nothing would hide every
+advertisement from the HCI monitor too.
+
+The proxy reads only the
 `-adapter` controller (`hciN` is controller index N), and a socket filter in the kernel passes it only
 advertising reports, so connection traffic does not wake it up.
 
