@@ -1,8 +1,13 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
+	"io"
+	"log/slog"
+	"net"
 	"testing"
+	"time"
 
 	"btproxy/internal/ble"
 )
@@ -114,5 +119,42 @@ func TestAdvertDataCopied(t *testing.T) {
 	copy(data, []byte{9, 9, 9})
 	if want := appendRawAdvert(nil, ble.Advert{Addr: 1, Data: []byte{2, 1, 6}}); !bytes.Equal(s.pending, want) {
 		t.Fatalf("batch %x, want %x", s.pending, want)
+	}
+}
+
+// TestAdvertBatching checks ESPHome's batching: a full batch goes at once, a partial one advFlushInterval
+// after its first advertisement.
+func TestAdvertBatching(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	s := NewServer(Config{Name: "test"}, testAdapter{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c := newClient(s, a, s.log)
+	defer c.closeQueue()
+	c.advSubscribed = true
+	s.clients[c] = true
+	r := bufio.NewReader(b)
+	next := func() (int, time.Time) {
+		t.Helper()
+		b.SetReadDeadline(time.Now().Add(2 * time.Second))
+		f, err := ReadFrame(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs, err := fields(f.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(fs), time.Now()
+	}
+	start := time.Now()
+	for i := range advBatchSize + 1 {
+		s.onAdvert(ble.Advert{Addr: uint64(i + 1)})
+	}
+	if n, _ := next(); n != advBatchSize {
+		t.Fatalf("first batch of %d", n)
+	}
+	n, at := next()
+	if n != 1 || at.Sub(start) < advFlushInterval {
+		t.Fatalf("second batch of %d after %v", n, at.Sub(start))
 	}
 }

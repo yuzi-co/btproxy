@@ -33,7 +33,8 @@ type Config struct {
 // handshakeTimeout bounds the encrypted handshake, so a client that opens a connection and stalls is dropped.
 const handshakeTimeout = 30 * time.Second
 
-// advBatchSize and advFlushInterval follow ESPHome's batching of raw advertisements.
+// advBatchSize and advFlushInterval follow ESPHome's batching of raw advertisements: a batch is sent when it
+// is full or advFlushInterval after its first advertisement.
 const (
 	advBatchSize     = 16
 	advFlushInterval = 100 * time.Millisecond
@@ -50,8 +51,10 @@ type Server struct {
 	clients  map[*client]bool
 	conns    map[uint64]*btConn
 	stopScan func()
-	pending  []byte // the advertisements of the batch being collected, encoded
-	pendingN int    // and their number
+	pending  []byte      // the advertisements of the batch being collected, encoded
+	pendingN int         // and their number
+	pendingT time.Time   // when the batch started
+	flushT   *time.Timer // armed by the first advertisement of a batch
 
 	scanKick chan struct{} // scanner status changed: tell the subscribers
 }
@@ -86,7 +89,6 @@ func NewServer(cfg Config, adapter ble.Adapter, log *slog.Logger) *Server {
 
 // Serve accepts clients until the listener is closed.
 func (s *Server) Serve(l net.Listener) error {
-	go s.flushLoop()
 	go s.scanStatusLoop()
 	for {
 		c, err := l.Accept()
@@ -144,6 +146,9 @@ func (s *Server) updateScan() {
 		s.stopScan()
 		s.stopScan = nil
 		s.pending, s.pendingN = nil, 0
+		if s.flushT != nil {
+			s.flushT.Stop()
+		}
 		s.log.Info("scanning stopped")
 	}
 }
@@ -159,14 +164,25 @@ func (s *Server) onAdvert(a ble.Advert) {
 	s.pending = appendRawAdvert(s.pending, a)
 	if s.pendingN++; s.pendingN >= advBatchSize {
 		s.flush()
+		return
+	}
+	if s.pendingN == 1 { // nothing runs while no advertisements arrive
+		s.pendingT = time.Now()
+		if s.flushT == nil {
+			s.flushT = time.AfterFunc(advFlushInterval, s.flushDue)
+		} else {
+			s.flushT.Reset(advFlushInterval)
+		}
 	}
 }
 
-func (s *Server) flushLoop() {
-	for range time.Tick(advFlushInterval) {
-		s.mu.Lock()
+// flushDue sends the batch whose time is up. A batch sent when it filled up may have been followed by a new
+// one by the time this runs; the timer has been armed again for that one.
+func (s *Server) flushDue() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pendingN > 0 && time.Since(s.pendingT) >= advFlushInterval {
 		s.flush()
-		s.mu.Unlock()
 	}
 }
 
@@ -178,6 +194,9 @@ func (s *Server) flush() {
 	}
 	msg := s.pending
 	s.pending, s.pendingN = nil, 0
+	if s.flushT != nil {
+		s.flushT.Stop()
+	}
 	for c := range s.clients {
 		if c.advSubscribed {
 			c.sendDroppable(msgBTRawAdvertisementsResponse, msg)
