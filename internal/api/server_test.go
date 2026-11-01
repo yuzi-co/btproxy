@@ -206,3 +206,27 @@ func TestDisconnectNotBlocked(t *testing.T) {
 	tc.expect(msgBTGATTErrorResponse)
 	tc.expect(msgBTGATTErrorResponse)
 }
+
+// TestLastClientLeavesWhileConnecting closes the only client while a connect is still running: the connection
+// must be dropped when it completes, not kept on a slot nobody will free.
+func TestLastClientLeavesWhileConnecting(t *testing.T) {
+	release, disconnected := make(chan struct{}), make(chan struct{})
+	tconn := &testConn{stuck: disconnected}
+	tc := startServer(t, testAdapter{connect: func(ble.Events) (ble.Conn, error) {
+		<-release
+		return tconn, nil
+	}})
+	var e enc
+	e.uint(1, testAddr)
+	e.uint(2, reqConnectV3WithCache)
+	tc.send(msgBTDeviceRequest, e.b)
+	time.Sleep(100 * time.Millisecond) // let the server start the connect
+	tc.c.Close()
+	time.Sleep(100 * time.Millisecond) // let it notice the client is gone
+	close(release)
+	select {
+	case <-disconnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("connection completed after the last client left was not disconnected")
+	}
+}

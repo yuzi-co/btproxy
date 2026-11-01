@@ -304,13 +304,12 @@ func (s *Server) disconnect(addr uint64) {
 }
 
 // disconnectAll drops every peripheral connection, as an ESP32 proxy does when its last client goes away.
+// Connects still in progress are withdrawn too: connect disconnects them when they complete.
 func (s *Server) disconnectAll() {
 	s.mu.Lock()
 	addrs := make([]uint64, 0, len(s.conns))
-	for a, bc := range s.conns {
-		if bc.conn != nil {
-			addrs = append(addrs, a)
-		}
+	for a := range s.conns {
+		addrs = append(addrs, a)
 	}
 	s.mu.Unlock()
 	for _, a := range addrs {
