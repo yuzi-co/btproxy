@@ -117,6 +117,8 @@ func TestAdvertDataCopied(t *testing.T) {
 	data := []byte{2, 1, 6}
 	s.onAdvert(ble.Advert{Addr: 1, Data: data})
 	copy(data, []byte{9, 9, 9})
+	s.mu.Lock() // the batch's timer runs
+	defer s.mu.Unlock()
 	if want := appendRawAdvert(nil, ble.Advert{Addr: 1, Data: []byte{2, 1, 6}}); !bytes.Equal(s.pending, want) {
 		t.Fatalf("batch %x, want %x", s.pending, want)
 	}
