@@ -7,7 +7,7 @@ import asyncio
 import inspect
 import sys
 
-from aioesphomeapi import APIClient, BluetoothScannerMode, BluetoothScannerState
+from aioesphomeapi import APIClient, BluetoothScannerMode, BluetoothScannerState, LogLevel
 
 FAKE_ADDR = 0xAABBCCDDEE01
 BATTERY, ECHO, CCCD = 0x0003, 0x0013, 0x0014
@@ -31,6 +31,13 @@ async def main(host: str, port: int) -> None:
 
     entities, services = await cli.list_entities_services()
     assert entities == [] and services == []
+
+    logs = []
+    unsub_logs = cli.subscribe_logs(lambda m: logs.append((m.level, m.message.decode())),
+                                    LogLevel.LOG_LEVEL_DEBUG, dump_config=True)
+    await asyncio.sleep(0.3)
+    assert logs and logs[0][0] == LogLevel.LOG_LEVEL_CONFIG and "Bluetooth Proxy:" in logs[0][1], logs
+    print("config dump:", repr(logs[0][1]))
 
     scanner = []  # registered first: the state report answers the advertisement subscription
     unsub_scanner = cli.subscribe_bluetooth_scanner_state(
@@ -129,9 +136,15 @@ async def main(host: str, port: int) -> None:
     print("states:", states[-1], "free:", free[-1])
     assert states[-1][0] is False and free[-1][0] == 3
 
+    # Nothing to remove counts as success, as with BlueZ.
     unpaired = await cli.bluetooth_device_unpair(0xAABBCCDDEE99)
     print("unpair unknown device:", unpaired)
-    assert not unpaired.success and unpaired.error == 0x85, unpaired
+    assert unpaired.success and unpaired.error == 0, unpaired
+
+    connected = [m for lv, m in logs if lv == LogLevel.LOG_LEVEL_INFO and "]: connected " in m]
+    print("log lines:", len(logs), "e.g.", repr(connected[:1]))
+    assert connected and connected[0].startswith("[0;32m[I][server:"), logs
+    unsub_logs()
 
     unsub()
     unsub_free()

@@ -20,6 +20,7 @@ const (
 	msgListEntitiesDoneResponse      = 19
 	msgSubscribeStatesRequest        = 20
 	msgSubscribeLogsRequest          = 28
+	msgSubscribeLogsResponse         = 29
 	msgSubscribeHAServicesRequest    = 34
 	msgGetTimeResponse               = 37
 	msgSubscribeHAStatesRequest      = 38
@@ -255,6 +256,20 @@ func decHello(b []byte) (major, minor uint32, err error) {
 		}
 	}
 	return major, minor, err
+}
+
+// decSubscribeLogs returns the level and the dump_config flag of a SubscribeLogsRequest.
+func decSubscribeLogs(b []byte) (level int32, dump bool, err error) {
+	fs, err := fields(b)
+	for _, f := range fs {
+		switch f.num {
+		case 1:
+			level = int32(min(f.v, logVeryVerbose))
+		case 2:
+			dump = f.v != 0
+		}
+	}
+	return level, dump, err
 }
 
 // request holds the fields shared by the Bluetooth requests: address, handle, request type, flags and data.

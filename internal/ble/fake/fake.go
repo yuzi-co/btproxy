@@ -177,10 +177,11 @@ func (a *Adapter) Connect(addr uint64, _ uint32, ev ble.Events) (ble.Conn, error
 
 func (*Adapter) ClearCache(uint64) error { return nil }
 
-// Unpair drops the connection to FakeAddr, as BlueZ does when it removes a device; other addresses fail.
+// Unpair drops the connection to FakeAddr, as BlueZ does when it removes a device. Other addresses have no
+// bond to remove, which succeeds, as with the bluez backend.
 func (*Adapter) Unpair(addr uint64) error {
 	if addr != FakeAddr {
-		return errors.New("device not found")
+		return nil
 	}
 	live.Lock()
 	c := live.conn

@@ -62,7 +62,9 @@ func main() {
 	if *debug {
 		level = slog.LevelDebug
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	// Everything logged also goes to API clients that subscribe to logs, at the level each asks for.
+	logs := &api.Logs{}
+	log := slog.New(logs.Handler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 	slog.SetDefault(log)
 
 	scan := map[string]ble.ScanMode{"active": ble.ScanActive, "passive": ble.ScanPassive}
@@ -97,6 +99,7 @@ func main() {
 	srv := api.NewServer(api.Config{
 		Name: *name, FriendlyName: *friendly, MAC: *mac, SuggestedArea: *area,
 		Version: esphomeVersion, ProjectVersion: version, MaxConnections: *maxConns, ScanMode: mode,
+		Logs: logs, Backend: *backend, Adapter: *adapterName,
 	}, adapter, log)
 	fatal(log, "serve", "err", srv.Serve(l))
 }

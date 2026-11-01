@@ -21,6 +21,8 @@ client library).
   off: connections are reported dropped, then the adapter is powered on, scanning resumes and, after a
   `bluetoothd` restart, the pairing agent is registered again. A `bluetoothd` that hangs is detected too (see
   [Scanning](#scanning)) and, if `-bluetoothd-restart` is set, restarted.
+- Log streaming: Home Assistant (the ESPHome entry's option to subscribe to the device's logs) and `esphome logs` receive
+  btproxy's log lines like a device's (see [Logs](#logs)).
 - Not supported: connection parameter changes, API encryption (Noise), IPv6 mDNS.
 
 ## Build
@@ -135,6 +137,21 @@ Passive scanning has limits that active scanning does not:
 - There is no idle timeout on API clients: Home Assistant does not ping while advertisements flow, so dead peers
   are found with TCP keepalive (30 s idle, then 3 probes 10 s apart).
 
+## Logs
+
+btproxy logs to stderr (`-debug` for debug lines), which OpenWrt's procd and systemd pass to the system log.
+Every line also goes to API clients that subscribe to logs, at the level each one asks for, even below
+`-debug`'s threshold: a client subscribed at DEBUG gets debug lines while stderr stays at info. Lines are
+formatted like ESPHome's logger, `[I][server:269]: connected addr=AA:BB:CC:DD:EE:01 mtu=247`, in its ANSI
+colours, with the Go file and line in place of the component tag; levels map error, warn, info and debug to
+ESPHome's ERROR, WARN, INFO and DEBUG. Home Assistant subscribes at the level its ESPHome integration logs at
+and writes the lines to its own log.
+
+A subscription with `dump_config` gets one CONFIG line with the proxy's settings (name, versions, MAC, backend,
+adapter, scan mode, connections in use). Logging never waits for a client: each subscriber has a queue of 64
+lines, and when a slow client lets it fill up, further lines are dropped for that client and it gets a warning
+with the count once it catches up.
+
 ## Deploy
 
 OpenWrt (23.05): `opkg install kmod-bluetooth bluez-daemon` plus the firmware for the stick (for example
@@ -164,7 +181,8 @@ skips the agent; BlueZ then still pairs devices that need no confirmation.
 
 Unpairing calls `Adapter1.RemoveDevice`, because BlueZ has no call that removes only the bond: it also forgets
 the device's cached services and drops its connection, which the proxy reports to Home Assistant after the
-unpairing reply. The device shows up again with its next advertisement.
+unpairing reply. The device shows up again with its next advertisement. Unpairing a device BlueZ does not
+know succeeds, since there is no bond to remove.
 
 Alternatively, pair once with `bluetoothctl`, or move an existing bond: stop `bluetoothd` on both machines, copy
 `/var/lib/bluetooth/<adapter MAC>/<device MAC>/` (`info` and `attributes`) into the new adapter's directory,
