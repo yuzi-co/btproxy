@@ -61,7 +61,6 @@ type scanState struct {
 }
 
 func (a *Adapter) initScan() error {
-	a.log = slog.Default().With("adapter", string(a.path))
 	a.kick = make(chan struct{}, 1)
 	if err := a.exportMonitors(); err != nil {
 		return err
@@ -161,8 +160,12 @@ func (a *Adapter) supervise() {
 
 // reconcile brings the scanner to the wanted state: powers the adapter on, (re)starts discovery or the
 // monitor when the mode changed or BlueZ lost them, stops scanning when nobody listens, and restarts
-// discovery that has stalled.
+// discovery that has stalled. First it updates the match rules, so after a fallback from raw advertisements
+// BlueZ's flow before discovery restarts.
 func (a *Adapter) reconcile() {
+	if err := a.syncMatches(); err != nil {
+		a.log.Warn("scanner", "op", "D-Bus match rule", "err", err)
+	}
 	a.mu.Lock()
 	want := a.scanFn != nil
 	gone, off, epoch, adverts := a.gone, a.off, a.epoch, a.adverts

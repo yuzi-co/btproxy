@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,9 @@ type Adapter struct {
 	scanFn  func(ble.Advert)            // nil while not scanning
 	conns   map[dbus.ObjectPath]*conn
 
+	signals    *sigQueue
+	allDevices bool // subscribed to every device's properties (see signals.go)
+
 	scanState // see watch.go
 	rawState  // see raw.go
 }
@@ -79,14 +83,16 @@ type device struct {
 
 // Open connects to the system bus and the named adapter (hci0).
 func Open(name string, opt Options) (*Adapter, error) {
-	bus, err := dbus.ConnectSystemBus()
+	signals := newSigQueue()
+	bus, err := dbus.ConnectSystemBus(dbus.WithSignalHandler(signals))
 	if err != nil {
 		return nil, fmt.Errorf("system bus: %w", err)
 	}
 	a := &Adapter{
-		bus: bus, path: dbus.ObjectPath("/org/bluez/" + name),
+		bus: bus, path: dbus.ObjectPath("/org/bluez/" + name), signals: signals,
 		devices: map[dbus.ObjectPath]*device{}, conns: map[dbus.ObjectPath]*conn{},
 	}
+	a.log = slog.Default().With("adapter", string(a.path))
 	a.stallTimeout, a.restartCmd = opt.StallTimeout, opt.RestartCmd
 	v, err := a.getProperty(a.path, ifAdapter+".Address")
 	if err != nil {
@@ -99,15 +105,12 @@ func Open(name string, opt Options) (*Adapter, error) {
 		return nil, fmt.Errorf("power on %s: %w", name, err)
 	}
 
-	if err := bus.AddMatchSignal(dbus.WithMatchSender(busName), dbus.WithMatchInterface(ifProps),
-		dbus.WithMatchMember("PropertiesChanged"), dbus.WithMatchPathNamespace(a.path)); err != nil {
+	if err := a.addMatches(); err != nil {
 		return nil, err
 	}
-	if err := bus.AddMatchSignal(dbus.WithMatchSender(busName), dbus.WithMatchInterface(ifObjManager)); err != nil {
+	if err := a.syncMatches(); err != nil { // every device, until raw advertisements prove themselves
 		return nil, err
 	}
-	signals := make(chan *dbus.Signal, 256)
-	bus.Signal(signals)
 
 	objs, err := a.managedObjects()
 	if err != nil {
@@ -126,7 +129,7 @@ func Open(name string, opt Options) (*Adapter, error) {
 	if err := a.initRaw(name, opt.RawAdverts); err != nil {
 		return nil, err
 	}
-	go a.dispatch(signals)
+	go a.dispatch()
 	return a, nil
 }
 
@@ -214,62 +217,85 @@ func (a *Adapter) ClearCache(addr uint64) error {
 }
 
 // dispatch routes D-Bus signals to the scanner cache and to connections.
-func (a *Adapter) dispatch(signals <-chan *dbus.Signal) {
-	for s := range signals {
-		a.watch(s)
-		switch s.Name {
-		case ifProps + ".PropertiesChanged":
-			if len(s.Body) < 2 {
-				continue
+func (a *Adapter) dispatch() {
+	var buf []*dbus.Signal
+	var dropped int
+	var lastDrop time.Time
+	for {
+		sigs, n, ok := a.signals.take(buf)
+		if !ok {
+			return
+		}
+		if dropped += n; dropped > 0 && time.Since(lastDrop) >= time.Minute {
+			a.log.Warn("D-Bus signals dropped, the proxy falls behind", "signals", dropped)
+			dropped, lastDrop = 0, time.Now()
+		}
+		for _, s := range sigs {
+			a.handle(s)
+		}
+		clear(sigs)
+		buf = sigs
+	}
+}
+
+// handle routes one signal.
+func (a *Adapter) handle(s *dbus.Signal) {
+	a.watch(s)
+	switch s.Name {
+	case ifProps + ".PropertiesChanged":
+		if len(s.Body) < 2 {
+			return
+		}
+		iface, _ := s.Body[0].(string)
+		changed, _ := s.Body[1].(map[string]dbus.Variant)
+		switch iface {
+		case ifDevice:
+			var ad pending
+			a.mu.Lock()
+			if a.devices[s.Path] != nil { // a change racing InterfacesRemoved must not bring it back
+				ad = a.updateDevice(s.Path, changed, true)
 			}
-			iface, _ := s.Body[0].(string)
-			changed, _ := s.Body[1].(map[string]dbus.Variant)
-			switch iface {
-			case ifDevice:
+			c := a.conns[s.Path]
+			a.mu.Unlock()
+			ad.deliver()
+			if c != nil {
+				c.deviceChanged(changed)
+			}
+		case ifChar:
+			if v, ok := changed["Value"]; ok {
+				if c := a.connFor(s.Path); c != nil {
+					if data, ok := v.Value().([]byte); ok {
+						c.valueChanged(s.Path, data)
+					}
+				}
+			}
+		}
+	case ifObjManager + ".InterfacesAdded":
+		if len(s.Body) < 2 {
+			return
+		}
+		p, _ := s.Body[0].(dbus.ObjectPath)
+		ifs, _ := s.Body[1].(map[string]map[string]dbus.Variant)
+		if props, ok := ifs[ifDevice]; ok && a.underAdapter(p) {
+			a.mu.Lock()
+			ad := a.updateDevice(p, props, true)
+			a.mu.Unlock()
+			ad.deliver()
+		}
+	case ifObjManager + ".InterfacesRemoved":
+		if len(s.Body) < 2 {
+			return
+		}
+		p, _ := s.Body[0].(dbus.ObjectPath)
+		ifs, _ := s.Body[1].([]string)
+		for _, i := range ifs {
+			if i == ifDevice {
 				a.mu.Lock()
-				ad := a.updateDevice(s.Path, changed, true)
-				c := a.conns[s.Path]
+				delete(a.devices, p)
+				c := a.conns[p]
 				a.mu.Unlock()
-				ad.deliver()
 				if c != nil {
-					c.deviceChanged(changed)
-				}
-			case ifChar:
-				if v, ok := changed["Value"]; ok {
-					if c := a.connFor(s.Path); c != nil {
-						if data, ok := v.Value().([]byte); ok {
-							c.valueChanged(s.Path, data)
-						}
-					}
-				}
-			}
-		case ifObjManager + ".InterfacesAdded":
-			if len(s.Body) < 2 {
-				continue
-			}
-			p, _ := s.Body[0].(dbus.ObjectPath)
-			ifs, _ := s.Body[1].(map[string]map[string]dbus.Variant)
-			if props, ok := ifs[ifDevice]; ok && a.underAdapter(p) {
-				a.mu.Lock()
-				ad := a.updateDevice(p, props, true)
-				a.mu.Unlock()
-				ad.deliver()
-			}
-		case ifObjManager + ".InterfacesRemoved":
-			if len(s.Body) < 2 {
-				continue
-			}
-			p, _ := s.Body[0].(dbus.ObjectPath)
-			ifs, _ := s.Body[1].([]string)
-			for _, i := range ifs {
-				if i == ifDevice {
-					a.mu.Lock()
-					delete(a.devices, p)
-					c := a.conns[p]
-					a.mu.Unlock()
-					if c != nil {
-						c.deviceChanged(map[string]dbus.Variant{"Connected": dbus.MakeVariant(false)})
-					}
+					c.deviceChanged(map[string]dbus.Variant{"Connected": dbus.MakeVariant(false)})
 				}
 			}
 		}
@@ -289,14 +315,16 @@ func (a *Adapter) connFor(p dbus.ObjectPath) *conn {
 }
 
 // updateDevice merges Device1 properties into the cache and, if asked and scanning, returns an advertisement
-// for the caller to deliver once it has released a.mu (see emit). Called with a.mu held.
+// for the caller to deliver once it has released a.mu (see emit). While raw advertisements flow, the cache
+// is not used for advertisements and its data maps are not rebuilt; they are cleared instead, so a fallback
+// does not send stale data. Called with a.mu held.
 func (a *Adapter) updateDevice(p dbus.ObjectPath, props map[string]dbus.Variant, emit bool) pending {
 	d := a.devices[p]
 	if d == nil {
 		d = &device{}
 		a.devices[p] = d
 	}
-	fresh := false
+	fresh, cache := false, !a.rawProven()
 	for k, v := range props {
 		switch k {
 		case "Address":
@@ -325,16 +353,18 @@ func (a *Adapter) updateDevice(p dbus.ObjectPath, props map[string]dbus.Variant,
 		case "UUIDs":
 			d.uuids, _ = v.Value().([]string)
 		case "ManufacturerData":
-			d.mfr = map[uint16][]byte{}
-			if m, ok := v.Value().(map[uint16]dbus.Variant); ok {
+			d.mfr = nil
+			if m, ok := v.Value().(map[uint16]dbus.Variant); ok && cache {
+				d.mfr = make(map[uint16][]byte, len(m))
 				for id, data := range m {
 					d.mfr[id], _ = data.Value().([]byte)
 				}
 			}
 			fresh = true
 		case "ServiceData":
-			d.svcData = map[string][]byte{}
-			if m, ok := v.Value().(map[string]dbus.Variant); ok {
+			d.svcData = nil
+			if m, ok := v.Value().(map[string]dbus.Variant); ok && cache {
+				d.svcData = make(map[string][]byte, len(m))
 				for u, data := range m {
 					d.svcData[u], _ = data.Value().([]byte)
 				}
@@ -414,9 +444,14 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	c := &conn{a: a, path: p, ev: ev, resolved: make(chan struct{}), lost: make(chan struct{}),
 		notifying: map[uint16]bool{}, reading: map[uint16]int{}, held: map[uint16][][]byte{},
 		echoes: map[uint16][]echo{}}
+	// Before the connection is registered, so that whatever tears it down finds the rule in place.
+	if err := a.watchDevice(p); err != nil {
+		return nil, fmt.Errorf("match rule: %w", err)
+	}
 	a.mu.Lock()
 	if _, busy := a.conns[p]; busy {
 		a.mu.Unlock()
+		a.unwatchDevice(p)
 		return nil, errors.New("connection already in progress")
 	}
 	a.conns[p] = c
@@ -424,9 +459,12 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	a.mu.Unlock()
 	fail := func(err error) (ble.Conn, error) {
 		a.mu.Lock()
-		delete(a.conns, p)
+		if a.conns[p] == c {
+			delete(a.conns, p)
+		}
 		a.mu.Unlock()
 		a.call(p, ifDevice+".Disconnect")
+		c.unwatch()
 		return nil, err
 	}
 
@@ -484,6 +522,7 @@ type conn struct {
 	resolvedOnce sync.Once
 	lost         chan struct{} // closed when the link goes down
 	lostOnce     sync.Once
+	unwatchOnce  sync.Once
 
 	gattDB // set before Connect returns, read-only afterwards
 
@@ -511,6 +550,9 @@ type echo struct {
 
 func (c *conn) markResolved() { c.resolvedOnce.Do(func() { close(c.resolved) }) }
 
+// unwatch drops the connection's match rule (see watchDevice) when it ends, whichever way.
+func (c *conn) unwatch() { c.unwatchOnce.Do(func() { c.a.unwatchDevice(c.path) }) }
+
 func (c *conn) deviceChanged(changed map[string]dbus.Variant) {
 	if v, ok := changed["ServicesResolved"]; ok && v.Value() == true {
 		c.markResolved()
@@ -526,6 +568,7 @@ func (c *conn) deviceChanged(changed map[string]dbus.Variant) {
 			delete(c.a.conns, c.path)
 		}
 		c.a.mu.Unlock()
+		c.unwatch()
 		if report {
 			c.ev.Disconnected(errors.New("link lost"))
 		}
@@ -834,5 +877,7 @@ func (c *conn) Disconnect() error {
 		delete(c.a.conns, c.path)
 	}
 	c.a.mu.Unlock()
-	return c.call(c.path, ifDevice+".Disconnect").Err
+	err := c.call(c.path, ifDevice+".Disconnect").Err
+	c.unwatch()
+	return err
 }
