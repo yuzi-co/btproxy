@@ -2,14 +2,14 @@ package mdns
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"net"
 	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"btproxy/internal/logx"
 )
 
 // TestCoexist binds the way avahi and umdns do (SO_REUSEADDR, plus SO_REUSEPORT for umdns) before our socket.
@@ -50,7 +50,7 @@ func TestResponder(t *testing.T) {
 		t.Skip("no multicast interface with IPv4")
 	}
 	r, err := Start(Config{Name: "btproxy-test", Port: 6053, TXT: []string{"mac=0123456789ab"}},
-		slog.New(slog.NewTextHandler(io.Discard, nil)))
+		logx.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}

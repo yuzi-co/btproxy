@@ -3,13 +3,12 @@ package api
 import (
 	"bufio"
 	"bytes"
-	"io"
-	"log/slog"
 	"net"
 	"testing"
 	"time"
 
 	"btproxy/internal/ble"
+	"btproxy/internal/logx"
 )
 
 // TestEncServicesUUID checks that each attribute carries one UUID form: short_uuid for base UUIDs when the
@@ -129,7 +128,7 @@ func TestAdvertDataCopied(t *testing.T) {
 func TestAdvertBatching(t *testing.T) {
 	a, b := net.Pipe()
 	defer b.Close()
-	s := NewServer(Config{Name: "test"}, testAdapter{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := NewServer(Config{Name: "test"}, testAdapter{}, logx.Discard())
 	c := newClient(s, a, s.log)
 	defer c.closeQueue()
 	c.advSubscribed = true

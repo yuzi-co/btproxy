@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -19,6 +18,7 @@ import (
 	"btproxy/internal/api"
 	"btproxy/internal/ble"
 	"btproxy/internal/ble/fake"
+	"btproxy/internal/logx"
 	"btproxy/internal/mdns"
 )
 
@@ -28,8 +28,8 @@ var version = "0.1.0"
 const esphomeVersion = "2026.10.0"
 
 // backends maps -backend names to constructors; bluez registers itself on Linux.
-var backends = map[string]func(adapter string) (ble.Adapter, error){
-	"fake": func(string) (ble.Adapter, error) { return &fake.Adapter{}, nil },
+var backends = map[string]func(adapter string, log *logx.Logger) (ble.Adapter, error){
+	"fake": func(string, *logx.Logger) (ble.Adapter, error) { return &fake.Adapter{}, nil },
 }
 
 // Flags read by the bluez backend.
@@ -66,14 +66,13 @@ func main() {
 		"read advertisements from the HCI monitor: auto, on or off (bluez backend; needs CAP_NET_RAW)")
 	flag.Parse()
 
-	level := slog.LevelInfo
+	level := logx.LevelInfo
 	if *debug {
-		level = slog.LevelDebug
+		level = logx.LevelDebug
 	}
 	// Everything logged also goes to API clients that subscribe to logs, at the level each asks for.
 	logs := &api.Logs{}
-	log := slog.New(logs.Handler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
-	slog.SetDefault(log)
+	log := logx.New(os.Stderr, level, logs)
 
 	scan := map[string]ble.ScanMode{"active": ble.ScanActive, "passive": ble.ScanPassive}
 	mode, ok := scan[*scanMode]
@@ -91,7 +90,7 @@ func main() {
 	if !ok {
 		fatal(log, "unknown backend", "backend", *backend)
 	}
-	adapter, err := newAdapter(*adapterName)
+	adapter, err := newAdapter(*adapterName, log)
 	if err != nil {
 		fatal(log, "open adapter", "err", err)
 	}
@@ -122,7 +121,7 @@ func main() {
 
 // startMDNS advertises the API like an ESPHome device and, on SIGINT or SIGTERM, withdraws the advertisement
 // before exiting. A failure only disables discovery.
-func startMDNS(log *slog.Logger, name, friendly, mac string, port int, ifaces string, encrypted bool) {
+func startMDNS(log *logx.Logger, name, friendly, mac string, port int, ifaces string, encrypted bool) {
 	var names []string
 	for _, n := range strings.Split(ifaces, ",") {
 		if n = strings.TrimSpace(n); n != "" {
@@ -198,7 +197,7 @@ func hostMAC(a ble.Adapter) string {
 	return ble.FormatMAC(a.MAC())
 }
 
-func fatal(log *slog.Logger, msg string, args ...any) {
+func fatal(log *logx.Logger, msg string, args ...any) {
 	log.Error(msg, args...)
 	fmt.Fprintln(os.Stderr, "exiting")
 	os.Exit(1)

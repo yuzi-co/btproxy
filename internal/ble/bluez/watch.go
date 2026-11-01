@@ -4,7 +4,6 @@ package bluez
 
 import (
 	"errors"
-	"log/slog"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -13,6 +12,7 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"btproxy/internal/ble"
+	"btproxy/internal/logx"
 )
 
 // Timings, variables so the tests can shorten them. scanRetry is how often the supervisor retries when the
@@ -31,7 +31,7 @@ const restartAfter = 2
 // so mode switches, recovery and scan start and stop never race. Fields are guarded by Adapter.mu except
 // those marked as the supervisor's.
 type scanState struct {
-	log      *slog.Logger
+	log      *logx.Logger
 	kick     chan struct{}
 	mode     ble.ScanMode // requested
 	status   ble.ScanStatus
@@ -42,7 +42,7 @@ type scanState struct {
 	epoch     int          // bumped whenever BlueZ may have dropped our discovery session or monitor
 	noMonitor bool         // the monitor API is missing or failed: scan actively until bluetoothd restarts
 	monitorUp bool         // the monitor is (being) registered; a Release then means BlueZ dropped it
-	agentLog  *slog.Logger // set once RegisterAgent was called
+	agentLog  *logx.Logger // set once RegisterAgent was called
 	adverts   int          // advertisements delivered, for the stall watchdog
 
 	// Set by Open.

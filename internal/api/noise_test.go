@@ -9,10 +9,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"log/slog"
 	"net"
 	"testing"
 	"time"
+
+	"btproxy/internal/logx"
 )
 
 // Test keys only: the PSK is bytes 0..31, the ephemeral private keys 0x40.. and 0x80...
@@ -90,7 +91,7 @@ func startNoiseServer(t *testing.T, key []byte) net.Conn {
 	}
 	t.Cleanup(func() { l.Close() })
 	cfg := Config{Name: "test", MAC: "AA:BB:CC:00:11:22", EncryptionKey: key}
-	go NewServer(cfg, testAdapter{}, slog.New(slog.NewTextHandler(io.Discard, nil))).Serve(l)
+	go NewServer(cfg, testAdapter{}, logx.Discard()).Serve(l)
 	c, err := net.Dial("tcp", l.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +232,7 @@ func TestPlaintextNoiseClient(t *testing.T) {
 func TestNoiseQueueOrder(t *testing.T) {
 	a, b := net.Pipe()
 	defer b.Close()
-	c := newClient(&Server{cfg: Config{EncryptionKey: testPSK}}, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c := newClient(&Server{cfg: Config{EncryptionKey: testPSK}}, a, logx.Discard())
 	c.wmu.Lock()
 	c.sendC = newNoiseCipher(testPSK)
 	c.wmu.Unlock()

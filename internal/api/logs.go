@@ -1,19 +1,14 @@
 package api
 
 import (
-	"context"
 	"fmt"
-	"log/slog"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"unicode"
-	"unicode/utf8"
 
 	"btproxy/internal/ble"
+	"btproxy/internal/logx"
 )
 
 // ESPHome log levels (LogLevel in api.proto).
@@ -33,7 +28,7 @@ const logQueue = 64
 
 // Logs sends log records to the API clients that asked for them with SubscribeLogsRequest, formatted like
 // ESPHome's logger so Home Assistant and `esphome logs` show them as they show a device's. Records are only
-// queued in Handle; each subscriber has its own sender, and a client that falls behind loses messages instead
+// queued in Log; each subscriber has its own sender, and a client that falls behind loses messages instead
 // of holding up the program. Nothing on that path logs, so a log line never produces another.
 type Logs struct {
 	mu   sync.Mutex
@@ -45,10 +40,6 @@ type logSub struct {
 	level int32 // guarded by Logs.mu
 	ch    chan []byte
 }
-
-// Handler returns an slog.Handler that passes records to next, as before, and also to the subscribers.
-// Records below next's level still reach subscribers that asked for them.
-func (l *Logs) Handler(next slog.Handler) slog.Handler { return &logHandler{logs: l, next: next} }
 
 // subscribe sets a client's level, starting its sender on the first subscription. Level logNone keeps the
 // subscription but sends nothing, as in ESPHome.
@@ -130,19 +121,19 @@ func (s *Server) configDump() string {
 		ble.FormatMAC(s.adapter.MAC()), mode, used, s.cfg.MaxConnections)
 }
 
-// esphomeLevel maps an slog level to ESPHome's. CONFIG has no slog counterpart: only the configuration dump
+// esphomeLevel maps a logx level to ESPHome's. CONFIG has no logx counterpart: only the configuration dump
 // uses it. Levels below Debug, which btproxy does not use, become VERBOSE and VERY_VERBOSE.
-func esphomeLevel(l slog.Level) int32 {
+func esphomeLevel(l logx.Level) int32 {
 	switch {
-	case l >= slog.LevelError:
+	case l >= logx.LevelError:
 		return logError
-	case l >= slog.LevelWarn:
+	case l >= logx.LevelWarn:
 		return logWarn
-	case l >= slog.LevelInfo:
+	case l >= logx.LevelInfo:
 		return logInfo
-	case l >= slog.LevelDebug:
+	case l >= logx.LevelDebug:
 		return logDebug
-	case l >= slog.LevelDebug-4:
+	case l >= logx.LevelDebug-4:
 		return logVerbose
 	}
 	return logVeryVerbose
@@ -168,95 +159,19 @@ func encLog(level int32, msg []byte) []byte {
 	return e.b
 }
 
-// logHandler is the slog.Handler from Logs.Handler. attrs holds the attributes added with WithAttrs, already
-// formatted, and group the prefix from WithGroup.
-type logHandler struct {
-	logs  *Logs
-	next  slog.Handler
-	attrs string
-	group string
-}
+// Wants reports whether any subscriber takes records at level (logx.Tap).
+func (l *Logs) Wants(level logx.Level) bool { return esphomeLevel(level) <= l.max.Load() }
 
-func (h *logHandler) Enabled(ctx context.Context, l slog.Level) bool {
-	return h.next.Enabled(ctx, l) || esphomeLevel(l) <= h.logs.max.Load()
-}
-
-func (h *logHandler) Handle(ctx context.Context, r slog.Record) error {
-	var err error
-	if h.next.Enabled(ctx, r.Level) {
-		err = h.next.Handle(ctx, r)
-	}
-	level := esphomeLevel(r.Level)
-	if level > h.logs.max.Load() {
-		return err
-	}
-	// The tag and line are the Go file and line that logged, standing in for ESPHome's component tag.
-	tag, line := "btproxy", 0
-	if r.PC != 0 {
-		f, _ := runtime.CallersFrames([]uintptr{r.PC}).Next()
-		tag, line = strings.TrimSuffix(filepath.Base(f.File), ".go"), f.Line
-	}
-	var b strings.Builder
-	b.WriteString(r.Message)
-	b.WriteString(h.attrs)
-	r.Attrs(func(a slog.Attr) bool {
-		appendAttr(&b, h.group, a)
-		return true
-	})
-	h.logs.publish(level, encLog(level, formatLog(level, tag, line, b.String())))
-	return err
-}
-
-func (h *logHandler) WithAttrs(as []slog.Attr) slog.Handler {
-	var b strings.Builder
-	b.WriteString(h.attrs)
-	for _, a := range as {
-		appendAttr(&b, h.group, a)
-	}
-	return &logHandler{logs: h.logs, next: h.next.WithAttrs(as), attrs: b.String(), group: h.group}
-}
-
-func (h *logHandler) WithGroup(name string) slog.Handler {
-	if name == "" {
-		return h
-	}
-	return &logHandler{logs: h.logs, next: h.next.WithGroup(name), attrs: h.attrs, group: h.group + name + "."}
-}
-
-// appendAttr writes " key=value" as slog's text handler does, quoting values that need it.
-func appendAttr(b *strings.Builder, prefix string, a slog.Attr) {
-	a.Value = a.Value.Resolve()
-	if a.Equal(slog.Attr{}) {
+// Log formats a record like an ESPHome log line and queues it for the subscribers that take its level
+// (logx.Tap). The tag and line are the Go file and line that logged, standing in for ESPHome's component tag.
+func (l *Logs) Log(level logx.Level, file string, line int, text string) {
+	el := esphomeLevel(level)
+	if el > l.max.Load() {
 		return
 	}
-	if a.Value.Kind() == slog.KindGroup {
-		if a.Key != "" {
-			prefix += a.Key + "."
-		}
-		for _, g := range a.Value.Group() {
-			appendAttr(b, prefix, g)
-		}
-		return
+	tag := "btproxy"
+	if file != "" {
+		tag = strings.TrimSuffix(filepath.Base(file), ".go")
 	}
-	b.WriteByte(' ')
-	b.WriteString(prefix)
-	b.WriteString(a.Key)
-	b.WriteByte('=')
-	v := a.Value.String()
-	if needsQuote(v) {
-		v = strconv.Quote(v)
-	}
-	b.WriteString(v)
-}
-
-func needsQuote(s string) bool {
-	if s == "" {
-		return true
-	}
-	for _, r := range s {
-		if r == ' ' || r == '=' || r == '"' || r == utf8.RuneError || !unicode.IsPrint(r) {
-			return true
-		}
-	}
-	return false
+	l.publish(el, encLog(el, formatLog(el, tag, line, text)))
 }

@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +17,7 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"btproxy/internal/ble"
+	"btproxy/internal/logx"
 )
 
 const (
@@ -66,6 +66,8 @@ type Options struct {
 	RestartCmd string
 	// RawAdverts selects where advertisements come from (see raw.go).
 	RawAdverts RawMode
+	// Log receives the adapter's log lines; nil discards them.
+	Log *logx.Logger
 }
 
 // device caches the Device1 properties an advertisement is rebuilt from.
@@ -92,7 +94,10 @@ func Open(name string, opt Options) (*Adapter, error) {
 		bus: bus, path: dbus.ObjectPath("/org/bluez/" + name), signals: signals,
 		devices: map[dbus.ObjectPath]*device{}, conns: map[dbus.ObjectPath]*conn{},
 	}
-	a.log = slog.Default().With("adapter", string(a.path))
+	if opt.Log == nil {
+		opt.Log = logx.Discard()
+	}
+	a.log = opt.Log.With("adapter", string(a.path))
 	a.stallTimeout, a.restartCmd = opt.StallTimeout, opt.RestartCmd
 	v, err := a.getProperty(a.path, ifAdapter+".Address")
 	if err != nil {
