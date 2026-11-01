@@ -365,7 +365,6 @@ func (c *conn) discoverChar(ch *gatt.GattCharacteristic, mode bluetooth.Bluetoot
 	}
 	// The low byte is the GATT properties field; the rest are extended properties Windows folds in.
 	info = ble.Characteristic{UUID: uuidOf(g), Handle: h, Properties: uint32(props) & 0xff}
-	c.chars[h] = &char{c: ch, props: info.Properties}
 	op, err := ch.GetDescriptorsWithCacheModeAsync(mode)
 	if err != nil {
 		return info, err
@@ -404,7 +403,12 @@ func (c *conn) discoverChar(ch *gatt.GattCharacteristic, mode bluetooth.Bluetoot
 		info.Descriptors = append(info.Descriptors, ble.Descriptor{UUID: u, Handle: dh})
 		return nil
 	})
-	return info, err
+	if err != nil {
+		return info, err
+	}
+	// Only now: on an error the caller releases ch, so free must not find it here and release it again.
+	c.chars[h] = &char{c: ch, props: info.Properties}
+	return info, nil
 }
 
 // eachItem calls fn for every element of a vector view; fn owns the element.

@@ -74,6 +74,37 @@ func waitState(t *testing.T, a *Adapter, want ble.ScanState) {
 	}
 }
 
+// Stopping the scan must not wait for the watcher to close: the API server stops it holding the lock that the
+// advertisement callback, which closing may wait for, takes.
+func TestStopDoesNotWaitForClose(t *testing.T) {
+	release := make(chan struct{})
+	closed := make(chan struct{})
+	a := &Adapter{log: logx.Discard(), mode: ble.ScanActive, conns: map[uint64]*conn{}, uncached: map[uint64]bool{},
+		newScanner: func(ble.ScanMode) (scanWatcher, error) { return blockingWatcher{release, closed}, nil }}
+	stop, err := a.Scan(func(ble.Advert) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { stop(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop waits for the watcher to close")
+	}
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher not closed")
+	}
+}
+
+type blockingWatcher struct{ release, closed chan struct{} }
+
+func (w blockingWatcher) close()      { <-w.release; close(w.closed) }
+func (w blockingWatcher) alive() bool { return true }
+
 func TestPauseScan(t *testing.T) {
 	a, r := newTestAdapter(t, true)
 	waitState(t, a, ble.ScanRunning)

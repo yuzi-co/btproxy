@@ -17,7 +17,10 @@ const (
 	maxData   = 62                     // an ESP32 proxy's limit: advertisement plus scan response
 	holdFor   = 200 * time.Millisecond // how long a scannable advertisement waits for its scan response
 	holdSlots = 8
-	fragSlots = 4
+	// fragSlots is how many devices can be sending fragmented extended advertisements at once. Beyond that the
+	// oldest is forgotten, and the next fragment it sends looks like a new advertisement: reports carry nothing
+	// that tells them apart.
+	fragSlots = 16
 )
 
 // Extended advertising report event type bits (Core 5.x, Vol 4, Part E, 7.7.65.13).
@@ -146,6 +149,7 @@ func (d *decoder) report(r report, now time.Time) {
 		if d.inFragment(k, false) {
 			return
 		}
+		r.data = wholeAD(r.data)
 		d.frags[d.fragN] = k
 		d.fragN = (d.fragN + 1) % fragSlots
 	} else if d.inFragment(k, true) {
@@ -228,6 +232,19 @@ func (d *decoder) expire(now time.Time) {
 			d.release(h)
 		}
 	}
+}
+
+// wholeAD is the part of src made of complete AD structures: a fragment can end inside one.
+func wholeAD(src []byte) []byte {
+	n := 0
+	for n < len(src) {
+		l := 1 + int(src[n])
+		if l == 1 || n+l > len(src) {
+			break
+		}
+		n += l
+	}
+	return src[:n]
 }
 
 // appendAD appends src to dst within maxData bytes. If it does not fit whole (only possible for extended

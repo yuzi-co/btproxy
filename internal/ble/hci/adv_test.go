@@ -237,6 +237,21 @@ func TestDecoderFragments(t *testing.T) {
 	}
 }
 
+// A short first fragment that ends inside an AD structure loses that structure.
+func TestDecoderShortFragment(t *testing.T) {
+	var got []ble.Advert
+	d := decoder{emit: keep(&got)}
+	now := time.Unix(1000, 0)
+	name := []byte{5, 0x09, 'A', 'b', 'c', 'd'}
+	cut := []byte{20, 0xff, 1, 2, 3, 4}
+	const more, complete = 1 << 5, 0
+	d.event(event(subLEExtAdvReport, extReport(more, 1, "c00000000001", 0xc0, append(append([]byte(nil), name...), cut...))), now)
+	d.event(event(subLEExtAdvReport, extReport(complete, 1, "c00000000001", 0xc0, make([]byte, 15))), now)
+	if len(got) != 1 || !bytes.Equal(got[0].Data, name) {
+		t.Fatalf("got %+v, want only the name", got)
+	}
+}
+
 func TestAppendAD(t *testing.T) {
 	big := append([]byte{57, 0xff}, make([]byte, 56)...)
 	for _, c := range []struct {

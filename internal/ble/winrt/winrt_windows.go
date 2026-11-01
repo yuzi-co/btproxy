@@ -149,6 +149,13 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 			defer a.mu.Unlock()
 			a.scanning = false
 			a.fn.Store(nil)
+			// The API server calls this with the lock its advertisement callback takes, and closing the
+			// watcher may wait for a running Received handler, which may be waiting for that lock. So the
+			// watcher is closed on the side.
+			if w := a.w; w != nil {
+				a.w = nil
+				go w.close()
+			}
 			a.stopLocked()
 			if a.check != nil {
 				a.check.Stop()
