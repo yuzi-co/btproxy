@@ -3,14 +3,13 @@ package api
 import (
 	"bufio"
 	"errors"
-	"io"
-	"log/slog"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
 	"btproxy/internal/ble"
+	"btproxy/internal/logx"
 )
 
 const testAddr = 0xAA_BB_CC_DD_EE_02
@@ -84,7 +83,7 @@ func startServer(t *testing.T, a ble.Adapter) *testClient {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
-	go NewServer(Config{Name: "test"}, a, slog.New(slog.NewTextHandler(io.Discard, nil))).Serve(l)
+	go NewServer(Config{Name: "test"}, a, logx.Discard()).Serve(l)
 	c, err := net.Dial("tcp", l.Addr().String())
 	if err != nil {
 		t.Fatal(err)

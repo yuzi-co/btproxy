@@ -8,13 +8,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"btproxy/internal/logx"
 )
 
 const (
@@ -46,7 +47,7 @@ func (i iface) String() string { return fmt.Sprint(i.name, i.ips) }
 type Responder struct {
 	svc   service
 	names []string
-	log   *slog.Logger
+	log   *logx.Logger
 	conn  *net.UDPConn
 	raw   syscall.RawConn
 
@@ -59,7 +60,7 @@ type Responder struct {
 }
 
 // Start opens the socket, joins the group on the configured interfaces and starts answering and announcing.
-func Start(cfg Config, log *slog.Logger) (*Responder, error) {
+func Start(cfg Config, log *logx.Logger) (*Responder, error) {
 	lc := net.ListenConfig{Control: reuse}
 	pc, err := lc.ListenPacket(context.Background(), "udp4", fmt.Sprintf(":%d", port))
 	if err != nil {

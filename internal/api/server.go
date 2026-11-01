@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"btproxy/internal/ble"
+	"btproxy/internal/logx"
 )
 
 // Config describes the proxy as Home Assistant sees it.
@@ -45,7 +45,7 @@ const (
 type Server struct {
 	cfg     Config
 	adapter ble.Adapter
-	log     *slog.Logger
+	log     *logx.Logger
 
 	mu       sync.Mutex
 	clients  map[*client]bool
@@ -75,7 +75,7 @@ type gattJob struct {
 	r   request
 }
 
-func NewServer(cfg Config, adapter ble.Adapter, log *slog.Logger) *Server {
+func NewServer(cfg Config, adapter ble.Adapter, log *logx.Logger) *Server {
 	if cfg.MaxConnections <= 0 {
 		cfg.MaxConnections = 3
 	}
@@ -377,7 +377,7 @@ const (
 type client struct {
 	s   *Server
 	c   net.Conn
-	log *slog.Logger
+	log *logx.Logger
 
 	wmu           sync.Mutex
 	out           chan outMsg  // to the writer; closed by run when it ends
@@ -399,7 +399,7 @@ type outMsg struct {
 }
 
 // newClient makes a client and starts its writer.
-func newClient(s *Server, c net.Conn, log *slog.Logger) *client {
+func newClient(s *Server, c net.Conn, log *logx.Logger) *client {
 	cl := &client{s: s, c: c, log: log, out: make(chan outMsg, outQueue)}
 	go cl.writeLoop()
 	return cl

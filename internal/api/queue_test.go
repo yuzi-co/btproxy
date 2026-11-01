@@ -5,13 +5,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"log/slog"
 	"net"
 	"runtime"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"btproxy/internal/logx"
 )
 
 // pipeListener hands the server connections made with net.Pipe, whose writes block until the other end
@@ -72,7 +73,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // every message, in order.
 func TestStalledClient(t *testing.T) {
 	l := newPipeListener()
-	s := NewServer(Config{Name: "test"}, testAdapter{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := NewServer(Config{Name: "test"}, testAdapter{}, logx.Discard())
 	go s.Serve(l)
 	t.Cleanup(func() { l.Close() })
 	l.dial(t) // never read
@@ -116,7 +117,7 @@ func TestStalledClient(t *testing.T) {
 // client stays until something that cannot be dropped finds the queue full.
 func TestStalledClientAdverts(t *testing.T) {
 	conn := &stuckConn{entered: make(chan struct{}), closed: make(chan struct{})}
-	c := newClient(&Server{}, conn, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c := newClient(&Server{}, conn, logx.Discard())
 	defer c.closeQueue()
 	c.send(msgPingRequest, nil)
 	<-conn.entered // the writer holds that message and waits
@@ -171,7 +172,7 @@ func (c *stuckConn) Close() error                     { c.once.Do(func() { close
 func TestNoGoroutineLeak(t *testing.T) {
 	l := newPipeListener()
 	logs := &Logs{}
-	log := slog.New(logs.Handler(slog.NewTextHandler(io.Discard, nil)))
+	log := logx.New(nil, logx.LevelInfo, logs)
 	s := NewServer(Config{Name: "test", Logs: logs}, testAdapter{}, log)
 	go s.Serve(l)
 	defer l.Close()
@@ -220,7 +221,7 @@ func (l *flakyListener) Accept() (net.Conn, error) {
 // closed.
 func TestServeRetriesAccept(t *testing.T) {
 	l := &flakyListener{pipeListener: newPipeListener(), fails: 5}
-	s := NewServer(Config{Name: "test"}, testAdapter{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := NewServer(Config{Name: "test"}, testAdapter{}, logx.Discard())
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(l) }()
 	c := l.dial(t)

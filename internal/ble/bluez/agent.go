@@ -6,10 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/godbus/dbus/v5"
+
+	"btproxy/internal/logx"
 )
 
 const (
@@ -23,7 +24,7 @@ const (
 // RegisterAgent registers a "Just Works" pairing agent (NoInputNoOutput) and asks BlueZ to make it the default.
 // Pairing works without an agent too, but BlueZ then refuses requests that need a confirmation. If another
 // program holds the default agent, ours stays registered and still serves the pairings the proxy starts.
-func (a *Adapter) RegisterAgent(log *slog.Logger) error {
+func (a *Adapter) RegisterAgent(log *logx.Logger) error {
 	a.mu.Lock()
 	a.agentLog = log // registered again when bluetoothd restarts
 	a.mu.Unlock()
@@ -55,7 +56,7 @@ func (a *Adapter) RegisterAgent(log *slog.Logger) error {
 // agent that accepts everything does not let any device in range pair with the host.
 type agent struct {
 	a   *Adapter
-	log *slog.Logger
+	log *logx.Logger
 }
 
 var errRejected = dbus.NewError("org.bluez.Error.Rejected", nil)

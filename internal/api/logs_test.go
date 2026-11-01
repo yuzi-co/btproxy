@@ -2,22 +2,23 @@ package api
 
 import (
 	"bufio"
-	"context"
+	"bytes"
 	"io"
-	"log/slog"
 	"net"
 	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"btproxy/internal/logx"
 )
 
 func TestEsphomeLevel(t *testing.T) {
-	for l, want := range map[slog.Level]int32{
-		slog.LevelError + 4: logError, slog.LevelError: logError, slog.LevelWarn: logWarn, slog.LevelInfo: logInfo,
-		slog.LevelInfo - 1: logDebug, slog.LevelDebug: logDebug, slog.LevelDebug - 4: logVerbose,
-		slog.LevelDebug - 8: logVeryVerbose,
+	for l, want := range map[logx.Level]int32{
+		logx.LevelError + 4: logError, logx.LevelError: logError, logx.LevelWarn: logWarn, logx.LevelInfo: logInfo,
+		logx.LevelInfo - 1: logDebug, logx.LevelDebug: logDebug, logx.LevelDebug - 4: logVerbose,
+		logx.LevelDebug - 8: logVeryVerbose,
 	} {
 		if got := esphomeLevel(l); got != want {
 			t.Errorf("%v: got %d, want %d", l, got, want)
@@ -52,7 +53,7 @@ type logPeer struct {
 func newLogPeer(t *testing.T, logs *Logs, level int32) *logPeer {
 	a, b := net.Pipe()
 	t.Cleanup(func() { a.Close(); b.Close() })
-	c := newClient(&Server{}, a, slog.New(logs.Handler(slog.NewTextHandler(io.Discard, nil))))
+	c := newClient(&Server{}, a, logx.New(nil, logx.LevelInfo, logs))
 	t.Cleanup(c.closeQueue)
 	logs.subscribe(c, level)
 	t.Cleanup(func() { logs.unsubscribe(c) })
@@ -84,29 +85,32 @@ func (lp *logPeer) next() (int32, string) {
 }
 
 // TestLogsLevels checks the formatting of records and attributes and each subscriber's level filter, including
-// records below the level of the handler that writes to stderr.
+// records below the level of the writer (stderr).
 func TestLogsLevels(t *testing.T) {
 	logs := &Logs{}
-	log := slog.New(logs.Handler(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	if log.Enabled(context.Background(), slog.LevelInfo) {
+	var out bytes.Buffer
+	log := logx.New(&out, logx.LevelWarn, logs)
+	if log.Enabled(logx.LevelInfo) {
 		t.Fatal("info enabled without subscribers")
 	}
 	debug := newLogPeer(t, logs, logDebug)
 	warn := newLogPeer(t, logs, logWarn)
-	if !log.Enabled(context.Background(), slog.LevelDebug) || log.Enabled(context.Background(), slog.LevelDebug-4) {
+	if !log.Enabled(logx.LevelDebug) || log.Enabled(logx.LevelDebug-4) {
 		t.Fatal("Enabled does not follow the subscribers")
 	}
+	done := make(chan struct{})
 	go func() {
-		l := log.With("client", "1.2.3.4:5").WithGroup("g")
+		defer close(done)
+		l := log.With("client", "1.2.3.4:5").With("conn", 2)
 		l.Debug("hello", "api", "1.10")
-		l.Warn("bad message", "err", io.EOF, "s", "two words", slog.Group("x", "n", 1))
+		l.Warn("bad message", "err", io.EOF, "s", "two words", "n", 1)
 		log.Debug("later") // for the debug subscriber only
 	}()
-	re := regexp.MustCompile(`^\033\[0;36m\[D\]\[logs_test:\d{3}\]: hello client=1\.2\.3\.4:5 g\.api=1\.10\033\[0m$`)
+	re := regexp.MustCompile(`^\033\[0;36m\[D\]\[logs_test:\d{3}\]: hello client=1\.2\.3\.4:5 conn=2 api=1\.10\033\[0m$`)
 	if l, m := debug.next(); l != logDebug || !re.MatchString(m) {
 		t.Errorf("debug: level %d %q", l, m)
 	}
-	want := `bad message client=1.2.3.4:5 g.err=EOF g.s="two words" g.x.n=1`
+	want := `bad message client=1.2.3.4:5 conn=2 err=EOF s="two words" n=1`
 	if l, m := debug.next(); l != logWarn || !strings.Contains(m, "[W][logs_test:") || !strings.Contains(m, want) {
 		t.Errorf("debug: level %d %q", l, m)
 	}
@@ -116,27 +120,30 @@ func TestLogsLevels(t *testing.T) {
 	if _, m := debug.next(); !strings.Contains(m, "later") {
 		t.Errorf("debug: %q", m)
 	}
+	<-done
+	// The writer got the warning only.
+	wantOut := ` level=WARN msg="bad message" client=1.2.3.4:5 conn=2 err=EOF s="two words" n=1` + "\n"
+	if s := out.String(); strings.Count(s, "\n") != 1 || !strings.HasSuffix(s, wantOut) {
+		t.Errorf("writer: %q", s)
+	}
 
 	logs.subscribe(debug.c, logNone)
 	logs.unsubscribe(warn.c)
-	if log.Enabled(context.Background(), slog.LevelInfo) {
+	if log.Enabled(logx.LevelInfo) {
 		t.Error("enabled after the subscribers left")
 	}
 }
 
-// countHandler counts the records that reach it.
-type countHandler struct{ n *atomic.Int64 }
+// countWriter counts the records written to it; logx writes each with one Write.
+type countWriter struct{ n *atomic.Int64 }
 
-func (h countHandler) Enabled(context.Context, slog.Level) bool  { return true }
-func (h countHandler) Handle(context.Context, slog.Record) error { h.n.Add(1); return nil }
-func (h countHandler) WithAttrs([]slog.Attr) slog.Handler        { return h }
-func (h countHandler) WithGroup(string) slog.Handler             { return h }
+func (w countWriter) Write(p []byte) (int, error) { w.n.Add(1); return len(p), nil }
 
 // TestLogsSlowClient logs to a client that reads nothing: logging must not wait for it, the excess is dropped,
 // and the client hears about the drops once it reads again.
 func TestLogsSlowClient(t *testing.T) {
 	logs := &Logs{}
-	log := slog.New(logs.Handler(slog.NewTextHandler(io.Discard, nil)))
+	log := logx.New(io.Discard, logx.LevelInfo, logs)
 	lp := newLogPeer(t, logs, logInfo)
 	done := make(chan struct{})
 	go func() {
@@ -169,7 +176,7 @@ func TestLogsSlowClient(t *testing.T) {
 func TestLogsDeadClient(t *testing.T) {
 	var n atomic.Int64
 	logs := &Logs{}
-	log := slog.New(logs.Handler(countHandler{&n}))
+	log := logx.New(countWriter{&n}, logx.LevelDebug, logs)
 	a, b := net.Pipe()
 	b.Close()
 	c := newClient(&Server{}, a, log)
@@ -192,7 +199,7 @@ func TestSubscribeLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
-	log := slog.New(logs.Handler(slog.NewTextHandler(io.Discard, nil)))
+	log := logx.New(io.Discard, logx.LevelInfo, logs)
 	go NewServer(Config{Name: "test", MaxConnections: 2, Logs: logs, Backend: "fake"}, testAdapter{}, log).Serve(l)
 	c, err := net.Dial("tcp", l.Addr().String())
 	if err != nil {

@@ -1,13 +1,12 @@
 package api
 
 import (
-	"io"
-	"log/slog"
 	"net"
 	"testing"
 	"time"
 
 	"btproxy/internal/ble"
+	"btproxy/internal/logx"
 )
 
 // discardConn is a net.Conn that accepts every write at once.
@@ -20,7 +19,7 @@ func (discardConn) Close() error                     { return nil }
 // BenchmarkAdverts measures the advertisement path from the scan callback to the client's socket, with one
 // subscribed plaintext client.
 func BenchmarkAdverts(b *testing.B) {
-	s := NewServer(Config{Name: "bench"}, testAdapter{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := NewServer(Config{Name: "bench"}, testAdapter{}, logx.Discard())
 	c := newClient(s, discardConn{}, s.log)
 	c.advSubscribed = true
 	b.Cleanup(c.closeQueue)
