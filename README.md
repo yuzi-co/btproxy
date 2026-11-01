@@ -15,13 +15,15 @@ client library).
 - Active connections: connect, service discovery, read and write of characteristics and descriptors,
   notifications, disconnect, connection slot reporting, cache clearing. Up to `-connections` (default 3).
 - Pairing and unpairing on request from Home Assistant ("Just Works" only, see [Bonded devices](#bonded-devices)).
+- Connection parameter changes (interval, latency, supervision timeout) on a live connection, sent as an HCI
+  command (see [Connection parameters](#connection-parameters)).
 - Active and passive scanning, scanner state and mode reporting, and mode changes from Home Assistant (see
   [Scanning](#scanning)).
 - Recovery without a restart when `bluetoothd` restarts, the adapter disappears and returns, or it is powered
   off: connections are reported dropped, then the adapter is powered on, scanning resumes and, after a
   `bluetoothd` restart, the pairing agent is registered again. A `bluetoothd` that hangs is detected too (see
   [Scanning](#scanning)) and, if `-bluetoothd-restart` is set, restarted.
-- Not supported: connection parameter changes, API encryption (Noise), IPv6 mDNS.
+- Not supported: API encryption (Noise), IPv6 mDNS.
 
 ## Build
 
@@ -117,6 +119,24 @@ Passive scanning has limits that active scanning does not:
   8 dB or more, so unchanged beacons arrive far less often and RSSI is coarse. Prefer active scanning for
   presence detection.
 - No scan responses, so names and other scan-response data of active-only devices are missing.
+
+## Connection parameters
+
+Home Assistant integrations can ask for other connection parameters on a connected device (aioesphomeapi's
+`bluetooth_device_set_connection_params`, `set_connection_params` in bleak-esphome), for example a shorter
+interval during a transfer or a longer one to save the peripheral's battery. BlueZ has no D-Bus call for
+this. Its management interface has one (`Load Connection Parameters`), but that only applies to later
+connections and replaces the list `bluetoothd` keeps there. So the proxy sends the HCI LE Connection Update
+command itself on a raw HCI socket, as `hcitool lecup` does: it looks up the connection handle with the
+`HCIGETCONNINFO` ioctl, sends the command and answers once the controller's Command Status arrives, as an
+ESP32 does after `esp_ble_gap_update_conn_params`. The completion event, with the parameters the peripheral
+accepted, comes some connection events later and is only logged. The kernel keeps owning the connection and
+sees the controller's events as for its own commands.
+
+Sending HCI commands on a raw socket needs `CAP_NET_RAW` (the init script and the systemd unit run the proxy
+as root). Without it, or when the controller refuses the parameters, Home Assistant gets error 0x85; a device
+that is not connected through the proxy gets -1, like on an ESP32. The feature is advertised regardless, since
+whether the command will be allowed is only known when it is sent.
 
 ## Notes
 

@@ -192,7 +192,30 @@ func (*Adapter) Unpair(addr uint64) error {
 	return nil
 }
 
-// live is the latest connection to FakeAddr, for Unpair.
+var _ ble.ConnParamsSetter = (*Adapter)(nil)
+
+// SetConnParams accepts parameters within the ranges of the Bluetooth Core spec for a live connection to
+// FakeAddr, and refuses others as a controller would.
+func (*Adapter) SetConnParams(addr uint64, p ble.ConnParams) error {
+	live.Lock()
+	c := live.conn
+	live.Unlock()
+	if addr != FakeAddr || c == nil {
+		return ble.ErrNotConnected
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return ble.ErrNotConnected
+	}
+	if p.MinInterval < 6 || p.MaxInterval > 3200 || p.MinInterval > p.MaxInterval || p.Latency > 499 ||
+		p.Timeout < 10 || p.Timeout > 3200 || uint32(p.Timeout)*4 <= (1+uint32(p.Latency))*uint32(p.MaxInterval) {
+		return errors.New("invalid connection parameters")
+	}
+	return nil
+}
+
+// live is the latest connection to FakeAddr, for Unpair and SetConnParams.
 var live struct {
 	sync.Mutex
 	conn *conn

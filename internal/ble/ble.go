@@ -115,6 +115,19 @@ type Adapter interface {
 	Unpair(addr uint64) error
 }
 
+// ConnParams are LE connection parameters in the units of the HCI LE Connection Update command: intervals in
+// 1.25 ms, supervision timeout in 10 ms, latency in connection events the peripheral may skip.
+type ConnParams struct {
+	MinInterval, MaxInterval, Latency, Timeout uint16
+}
+
+// ConnParamsSetter is implemented by adapters that can change the parameters of a live connection.
+type ConnParamsSetter interface {
+	// SetConnParams asks the controller to update the connection to addr and returns once the controller
+	// has accepted or refused the request; the new parameters take effect some connection events later.
+	SetConnParams(addr uint64, p ConnParams) error
+}
+
 // ErrNotConnected is returned for requests on a closed connection.
 var ErrNotConnected = errors.New("not connected")
 
