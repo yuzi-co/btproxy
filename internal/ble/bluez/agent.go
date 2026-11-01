@@ -23,12 +23,13 @@ const (
 
 // RegisterAgent registers a "Just Works" pairing agent (NoInputNoOutput) and asks BlueZ to make it the default.
 // Pairing works without an agent too, but BlueZ then refuses requests that need a confirmation. If another
-// program holds the default agent, ours stays registered and still serves the pairings the proxy starts.
+// program holds the default agent, ours stays registered and still serves the pairings the proxy starts. The
+// agent serves every adapter of the process, so with several, only one of them registers it.
 func (a *Adapter) RegisterAgent(log *logx.Logger) error {
 	a.mu.Lock()
 	a.agentLog = log // registered again when bluetoothd restarts
 	a.mu.Unlock()
-	ag := &agent{a: a, log: log}
+	ag := &agent{log: log}
 	// A method table rather than Export: Export looks methods up by reflection, which stops the linker from
 	// dropping unused methods anywhere in the program and adds about 700 KB to the binary.
 	methods := map[string]any{
@@ -52,20 +53,17 @@ func (a *Adapter) RegisterAgent(log *logx.Logger) error {
 	return nil
 }
 
-// agent implements org.bluez.Agent1. It answers only for devices connected through the proxy, so a default
-// agent that accepts everything does not let any device in range pair with the host.
+// agent implements org.bluez.Agent1. It answers only for devices connected through the proxy, on any of its
+// adapters, so a default agent that accepts everything does not let any device in range pair with the host.
+// One agent serves the process: register it through one adapter only (see RegisterAgent).
 type agent struct {
-	a   *Adapter
 	log *logx.Logger
 }
 
 var errRejected = dbus.NewError("org.bluez.Error.Rejected", nil)
 
 func (g *agent) allow(dev dbus.ObjectPath, what string) *dbus.Error {
-	g.a.mu.Lock()
-	_, ours := g.a.conns[dev]
-	g.a.mu.Unlock()
-	if !ours {
+	if !opened.connected(dev) {
 		g.log.Warn("agent: rejected, device not connected through the proxy", "request", what, "device", dev)
 		return errRejected
 	}

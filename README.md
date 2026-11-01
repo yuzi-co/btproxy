@@ -88,7 +88,8 @@ user). For devices BlueZ has not seen yet, connecting uses `ConnectDevice`, whic
 btproxy -name btproxy-bedroom -area Bedroom
 ```
 
-Flags: `-name`, `-friendly-name`, `-area`, `-listen` (`:6053`), `-adapter` (`hci0`), `-connections` (3),
+Flags: `-name`, `-friendly-name`, `-area`, `-listen` (`:6053`), `-adapter` (`hci0`; a comma-separated list for
+[several adapters](#several-adapters)), `-connections` (3 per adapter),
 `-mac` (unique id reported to HA; default: the first network interface's MAC), `-mdns` (`true`), `-mdns-iface`
 (comma-separated interfaces to advertise on; default: all up interfaces with IPv4), `-backend` (`bluez` or
 `fake`), `-agent` (`true`: register a BlueZ pairing agent), `-scan-mode` (`active` or `passive`; default
@@ -103,6 +104,25 @@ ESPHome, see [Scanning](#scanning)),
 Home Assistant discovers the proxy over mDNS and offers it under Settings, Devices & services. Without mDNS
 (`-mdns=false`, or a network that does not pass multicast), add it by hand: Add integration, ESPHome, host and
 port 6053.
+
+### Several adapters
+
+`-adapter hci0,hci1` serves each adapter as a device of its own, since Home Assistant counts each ESPHome
+device as one Bluetooth scanner with its own connection slots. The first adapter is served exactly as with one
+adapter: `-name`, `-mac` (or the network interface's MAC) and the `-listen` port. Each further adapter gets
+`-<adapter>` appended to the name (`btproxy-gw-hci1`), its own Bluetooth address as the unique id, the next
+port (6054, 6055, ...) and an mDNS record of its own, so adding a second adapter leaves the first one's Home
+Assistant entry alone. `-listen :6053,:7053` gives every adapter its address instead. `-connections`,
+`-scan-mode`, `-area` and the encryption key apply to every adapter.
+
+The adapters share the process, but each has its own D-Bus connection, scanner supervisor, HCI monitor socket
+(filtered in the kernel to its controller index), scan pause on connect and advertisement monitors. What
+concerns `bluetoothd` as a whole is shared: one pairing agent accepts pairings for devices connected through
+any adapter, and `-bluetoothd-restart` runs at most once per 10 minutes for all adapters together; the others
+recover from a restart as from any other. An adapter other than the first that cannot be opened at start is
+logged and left out, so a missing USB stick does not take the others down; restart the proxy once it is back.
+The first one failing still stops the proxy. The log stream API clients subscribe to carries the lines of every
+adapter, tagged with `node` and `adapter`.
 
 ## mDNS
 

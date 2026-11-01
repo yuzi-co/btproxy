@@ -57,20 +57,19 @@ type scanState struct {
 	pauseOnConnect bool
 
 	// The supervisor's own.
-	armed       bool
-	armedMode   ble.ScanMode
-	armedEpoch  int
-	armedMons   bool        // monitors registered next to active discovery (see dupFilterOff)
-	quietMons   atomic.Bool // the monitors registered match nothing (see quiet); read by the monitor objects
-	lastErr     string
-	seen        int       // adverts when reconcile last looked
-	quietSince  time.Time // when seen last changed or the scan was armed
-	strikes     int       // stalls and unanswered calls since bluetoothd last answered, or the last restart
-	lastRestart time.Time
-	lastStrike  time.Time
-	lastPing    time.Time    // when bluetoothd was last checked; zero forces a check
-	unanswered  atomic.Int32 // calls from connections that bluetoothd did not answer, for the supervisor to count
-	pausedAt    time.Time    // when scanning was stopped for a connect; zero when not paused
+	armed      bool
+	armedMode  ble.ScanMode
+	armedEpoch int
+	armedMons  bool        // monitors registered next to active discovery (see dupFilterOff)
+	quietMons  atomic.Bool // the monitors registered match nothing (see quiet); read by the monitor objects
+	lastErr    string
+	seen       int       // adverts when reconcile last looked
+	quietSince time.Time // when seen last changed or the scan was armed
+	strikes    int       // stalls and unanswered calls since bluetoothd last answered, or the last restart
+	lastStrike time.Time
+	lastPing   time.Time    // when bluetoothd was last checked; zero forces a check
+	unanswered atomic.Int32 // calls from connections that bluetoothd did not answer, for the supervisor to count
+	pausedAt   time.Time    // when scanning was stopped for a connect; zero when not paused
 }
 
 func (a *Adapter) initScan() error {
@@ -298,20 +297,18 @@ func (a *Adapter) stalled(want bool) bool {
 }
 
 // strike counts a stall or a call bluetoothd did not answer. After restartAfter in a row, each within
-// restartEvery of the one before, it restarts bluetoothd with restartCmd, at most once per restartEvery; the
-// recovery from a bluetoothd restart does the rest.
+// restartEvery of the one before, it restarts bluetoothd with restartCmd, at most once per restartEvery for
+// all adapters together (see bluetoothdRestarts); the recovery from a bluetoothd restart does the rest.
 func (a *Adapter) strike() {
 	if time.Since(a.lastStrike) > restartEvery { // strikes far apart are unrelated
 		a.strikes = 0
 	}
 	a.lastStrike = time.Now()
 	a.strikes++
-	if a.restartCmd == "" || a.strikes < restartAfter ||
-		(!a.lastRestart.IsZero() && time.Since(a.lastRestart) < restartEvery) {
+	if a.restartCmd == "" || a.strikes < restartAfter || !bluetoothdRestarts.claim() {
 		return
 	}
 	a.strikes = 0
-	a.lastRestart = time.Now()
 	a.log.Warn("bluetoothd not responding, restarting it", "cmd", a.restartCmd)
 	// os.StartProcess rather than os/exec, which adds 128 KB to the binary. The command's output goes to
 	// ours, so nothing waits on a pipe that a daemon it starts may keep open.
@@ -330,6 +327,27 @@ func (a *Adapter) strike() {
 	if err != nil {
 		a.log.Warn("bluetoothd restart failed", "err", err)
 	}
+}
+
+// bluetoothdRestarts spaces bluetoothd restarts across the adapters of the process. There is one bluetoothd:
+// a restart one adapter's supervisor asks for is a restart for all of them, and the others recover from it
+// through NameOwnerChanged as from any restart.
+var bluetoothdRestarts restartGate
+
+type restartGate struct {
+	mu   sync.Mutex
+	last time.Time
+}
+
+// claim tells whether a restart may happen now, at most one per restartEvery, and if so records it.
+func (g *restartGate) claim() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.last.IsZero() && time.Since(g.last) < restartEvery {
+		return false
+	}
+	g.last = time.Now()
+	return true
 }
 
 func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
