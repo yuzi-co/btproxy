@@ -33,7 +33,7 @@ type Config struct {
 	Port int      // API port
 	TXT  []string // key=value pairs
 	// Ifaces are the interface names to serve. Empty means every up, multicast, non-loopback one with IPv4,
-	// except, on Windows, the virtual ones (see netif.Virtual) while any other is left.
+	// except the virtual ones (see netif.Virtual) while any other is left.
 	Ifaces []string
 }
 

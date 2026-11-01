@@ -320,9 +320,14 @@ Wintun, Tailscale, ZeroTier, AnyConnect, GlobalProtect, Fortinet) or by having n
 adapters (Hyper-V, VirtualBox, VMware, Docker, WSL), adapters with a hypervisor's MAC prefix and adapters with
 a locally administered MAC are skipped only when they have no default gateway: the host's adapter on a Hyper-V
 external switch, a Windows VM's own NIC and Wi-Fi with a random MAC all have one and are the LAN. If that would
-leave no interface, all are served. Linux keeps every up interface with IPv4: bridges such as `br-lan`, VLAN
-devices and macvlans there often have locally administered MACs and are the interfaces to serve, and a Linux
-VM's own NIC has a hypervisor's prefix, so neither test is safe there; use `-mdns-iface`.
+leave no interface, all are served.
+
+On Linux the proxy goes by interface name only, leaving out container, VM and VPN plumbing: `veth*`, `docker*`,
+Docker's `br-` plus 12 hex digits, `podman*`, `cni*`, `flannel*`, `cali*`, `virbr*`, `vnet*`, `lxcbr*`,
+`lxdbr*`, `tun*` and `tap*`. MACs are no guide there: bridges such as `br-lan`, VLAN devices and macvlans often
+have locally administered MACs and are the interfaces to serve, and a Linux VM's own NIC has a hypervisor's
+prefix. In a container the proxy needs the host's network anyway (the kernel allows Bluetooth sockets only in
+the initial network namespace), so it sees these interfaces just as on the host.
 
 It shares port 5353 with other responders: the socket sets `SO_REUSEADDR` and `SO_REUSEPORT`, which Linux
 accepts next to OpenWrt's `umdns` (`SO_REUSEADDR`) and `avahi-daemon`. Multicast reaches every socket; a

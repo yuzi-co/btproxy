@@ -81,3 +81,33 @@ func VirtualReason(a Adapter) string {
 	}
 	return ""
 }
+
+// virtualPrefixes are Linux interface name prefixes of container, VM and VPN plumbing.
+var virtualPrefixes = []struct{ prefix, reason string }{
+	{"veth", "container veth"},
+	{"docker", "Docker bridge"},
+	{"podman", "Podman bridge"},
+	{"cni", "CNI bridge"},
+	{"flannel", "Kubernetes overlay"},
+	{"cali", "Kubernetes overlay"},
+	{"virbr", "libvirt bridge"},
+	{"vnet", "libvirt VM tap"},
+	{"lxcbr", "LXC bridge"},
+	{"lxdbr", "LXD bridge"},
+	{"tun", "VPN tunnel"},
+	{"tap", "VPN tap"},
+}
+
+// VirtualName returns why an interface name looks like container, VM or VPN plumbing, or "". Docker's own
+// networks are br- and 12 hex digits, so br-lan and other bridges named by hand are kept.
+func VirtualName(name string) string {
+	for _, p := range virtualPrefixes {
+		if strings.HasPrefix(name, p.prefix) {
+			return p.reason
+		}
+	}
+	if h, ok := strings.CutPrefix(name, "br-"); ok && len(h) == 12 && strings.Trim(h, "0123456789abcdef") == "" {
+		return "Docker network bridge"
+	}
+	return ""
+}

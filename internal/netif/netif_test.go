@@ -69,3 +69,16 @@ func TestVirtualReason(t *testing.T) {
 		}
 	}
 }
+
+func TestVirtualName(t *testing.T) {
+	for name, virtual := range map[string]bool{
+		"br-lan": false, "br-iot": false, "eth0": false, "eth0.10": false, "wlan0": false, "end0": false,
+		"enp6s18": false, "br0": false, "macvlan0": false,
+		"docker0": true, "veth1a2b3c4": true, "br-3f2a1b4c5d6e": true, "virbr0": true, "vnet3": true,
+		"cni0": true, "flannel.1": true, "cali12ab": true, "podman0": true, "lxcbr0": true, "tun0": true, "tap0": true,
+	} {
+		if got := VirtualName(name) != ""; got != virtual {
+			t.Errorf("VirtualName(%q) = %q, want virtual=%v", name, VirtualName(name), virtual)
+		}
+	}
+}
