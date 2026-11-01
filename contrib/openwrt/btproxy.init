@@ -12,12 +12,12 @@ FRIENDLY_NAME="OpenWrt Bluetooth proxy"
 AREA=
 # Settings file, flat JSON of flag values ({"connections": "3"}); the settings page saves it. Missing is empty.
 CONFIG=/etc/btproxy.json
-# Settings page address, such as :8080; empty turns it off. Anywhere but 127.0.0.1 it needs a password (any
-# user name): echo 'a long password' > /etc/btproxy.uipass && chmod 600 /etc/btproxy.uipass
+# Settings page address, such as :8080; empty turns it off. It needs a password (any user name):
+# (umask 077; echo 'a long password' > /etc/btproxy.uipass)
 UI=
 UI_PASSWORD_FILE=/etc/btproxy.uipass
 # API encryption key (base64 of 32 bytes, like ESPHome's api: encryption: key:). The API is encrypted when this
-# file exists; create it with: head -c 32 /dev/urandom | base64 > /etc/btproxy.key && chmod 600 /etc/btproxy.key
+# file exists; create it with: (umask 077; head -c 32 /dev/urandom | base64 > /etc/btproxy.key)
 # (generate the key elsewhere if busybox has no base64). A file keeps the key out of ps, unlike -encryption-key.
 KEY_FILE=/etc/btproxy.key
 

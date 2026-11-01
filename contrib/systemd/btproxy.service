@@ -5,13 +5,33 @@ After=bluetooth.service network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/btproxy -name btproxy-%H -area "" -bluetoothd-restart "systemctl restart bluetooth"
-# API encryption: put the key (base64 of 32 bytes, like ESPHome's api: encryption: key:) in /etc/btproxy.key,
-# chmod 600, uncomment these two lines and remove the ExecStart above. The credential keeps the key out of ps and
-# of systemctl show, unlike -encryption-key or Environment=.
+# API encryption: put the key (base64 of 32 bytes, like ESPHome's api: encryption: key:) in /etc/btproxy.key:
+#   (umask 077; head -c 32 /dev/urandom | base64 > /etc/btproxy.key)
+# then uncomment these two lines and remove the ExecStart above. The credential keeps the key out of ps and of
+# systemctl show, unlike -encryption-key or Environment=.
 #LoadCredential=btproxy.key:/etc/btproxy.key
 #ExecStart=/usr/local/bin/btproxy -name btproxy-%H -area "" -bluetoothd-restart "systemctl restart bluetooth" -encryption-key-file %d/btproxy.key
 Restart=always
 RestartSec=5
+
+# Runs as root for D-Bus access to BlueZ, CAP_NET_RAW and -bluetoothd-restart; the rest is taken away. A settings
+# file the settings page saves also needs its directory here: ReadWritePaths=/etc/btproxy
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# AF_UNIX: D-Bus. AF_NETLINK: network interfaces, for mDNS. AF_BLUETOOTH: HCI monitor, connection parameters.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_BLUETOOTH
 
 [Install]
 WantedBy=multi-user.target
