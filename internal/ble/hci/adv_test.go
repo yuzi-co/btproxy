@@ -130,9 +130,18 @@ func TestParseSkips(t *testing.T) {
 	}
 }
 
+// keep returns an emit function that appends copies of the advertisements to got, since their data is only
+// valid during the call.
+func keep(got *[]ble.Advert) func(ble.Advert) {
+	return func(a ble.Advert) {
+		a.Data = bytes.Clone(a.Data)
+		*got = append(*got, a)
+	}
+}
+
 func TestDecoderPassive(t *testing.T) {
 	var got []ble.Advert
-	d := decoder{emit: func(a ble.Advert) { got = append(got, a) }}
+	d := decoder{emit: keep(&got)}
 	now := time.Unix(1000, 0)
 	d.event(unhex(t, evAdvInd), now)
 	d.event(unhex(t, evScanRsp), now)
@@ -143,7 +152,7 @@ func TestDecoderPassive(t *testing.T) {
 
 func TestDecoderActive(t *testing.T) {
 	var got []ble.Advert
-	d := decoder{emit: func(a ble.Advert) { got = append(got, a) }, active: true}
+	d := decoder{emit: keep(&got), active: true}
 	now := time.Unix(1000, 0)
 
 	// Advertisement and scan response are reported together, as an ESP32 does.
@@ -205,7 +214,7 @@ func TestDecoderActive(t *testing.T) {
 
 func TestDecoderFragments(t *testing.T) {
 	var got []ble.Advert
-	d := decoder{emit: func(a ble.Advert) { got = append(got, a) }}
+	d := decoder{emit: keep(&got)}
 	now := time.Unix(1000, 0)
 	mfr := append([]byte{48, 0xff}, make([]byte, 47)...)
 	svc := append([]byte{48, 0x16}, make([]byte, 47)...)

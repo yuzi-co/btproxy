@@ -1,7 +1,13 @@
 package api
 
 import (
+	"bufio"
+	"bytes"
+	"io"
+	"log/slog"
+	"net"
 	"testing"
+	"time"
 
 	"btproxy/internal/ble"
 )
@@ -73,5 +79,84 @@ func TestConnParamsMessages(t *testing.T) {
 	}
 	if fs, _ := fields(encConnParamsResult(1, 0)); len(fs) != 1 {
 		t.Errorf("success carries an error field: %+v", fs)
+	}
+}
+
+// TestAppendRawAdvert checks the one-pass encoding against sub-messages built one by one, for zero fields,
+// negative and positive RSSI and the largest data.
+func TestAppendRawAdvert(t *testing.T) {
+	ads := []ble.Advert{
+		{Addr: 0xF09E4A123456, AddrType: ble.AddrRandom, RSSI: -67, Data: []byte{2, 1, 6}},
+		{},
+		{Addr: 1, RSSI: 20, Data: bytes.Repeat([]byte{0xff}, 62)},
+		{Addr: 0xFFFFFFFFFFFF, RSSI: -128, AddrType: ble.AddrRandom},
+	}
+	var got []byte
+	var want enc
+	for _, a := range ads {
+		got = appendRawAdvert(got, a)
+		var s enc
+		s.uint(1, a.Addr)
+		s.sint(2, int64(a.RSSI))
+		s.uint(3, uint64(a.AddrType))
+		s.bytes(4, a.Data)
+		want.msg(1, s.b)
+		if len(s.b)+2 > advEntrySize {
+			t.Errorf("entry of %d bytes exceeds advEntrySize", len(s.b)+2)
+		}
+	}
+	if !bytes.Equal(got, want.b) {
+		t.Fatalf("got  %x\nwant %x", got, want.b)
+	}
+}
+
+// TestAdvertDataCopied reuses an advertisement's data buffer after the callback, as backends may: the batch
+// must keep what the callback saw.
+func TestAdvertDataCopied(t *testing.T) {
+	s := NewServer(Config{Name: "test"}, testAdapter{}, nil)
+	data := []byte{2, 1, 6}
+	s.onAdvert(ble.Advert{Addr: 1, Data: data})
+	copy(data, []byte{9, 9, 9})
+	s.mu.Lock() // the batch's timer runs
+	defer s.mu.Unlock()
+	if want := appendRawAdvert(nil, ble.Advert{Addr: 1, Data: []byte{2, 1, 6}}); !bytes.Equal(s.pending, want) {
+		t.Fatalf("batch %x, want %x", s.pending, want)
+	}
+}
+
+// TestAdvertBatching checks ESPHome's batching: a full batch goes at once, a partial one advFlushInterval
+// after its first advertisement.
+func TestAdvertBatching(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	s := NewServer(Config{Name: "test"}, testAdapter{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c := newClient(s, a, s.log)
+	defer c.closeQueue()
+	c.advSubscribed = true
+	s.clients[c] = true
+	r := bufio.NewReader(b)
+	next := func() (int, time.Time) {
+		t.Helper()
+		b.SetReadDeadline(time.Now().Add(2 * time.Second))
+		f, err := ReadFrame(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs, err := fields(f.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(fs), time.Now()
+	}
+	start := time.Now()
+	for i := range advBatchSize + 1 {
+		s.onAdvert(ble.Advert{Addr: uint64(i + 1)})
+	}
+	if n, _ := next(); n != advBatchSize {
+		t.Fatalf("first batch of %d", n)
+	}
+	n, at := next()
+	if n != 1 || at.Sub(start) < advFlushInterval {
+		t.Fatalf("second batch of %d after %v", n, at.Sub(start))
 	}
 }

@@ -69,6 +69,15 @@ CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldfl
 
 The binaries are static, about 4 to 5 MB (5.0 MB for mipsle).
 
+`-tags nonoise` leaves out API encryption (Noise, ChaCha20-Poly1305, X25519), which makes the mipsle binary
+256 KB smaller (4.8 MB). Such a build stops at start with an error when given an encryption key
+(`-encryption-key`, `-encryption-key-file` or `$BTPROXY_ENCRYPTION_KEY`). The router build uses it while
+encryption is off there:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -tags nonoise -trimpath -ldflags="-s -w" -o dist/btproxy-mipsle ./cmd/btproxy
+```
+
 ## Run
 
 Needs `bluetoothd` and the system D-Bus, and permission to use the adapter (root, or a D-Bus policy for the
@@ -267,6 +276,11 @@ whether the command will be allowed is only known when it is sent.
   device itself, so connections work in passive mode too.
 - There is no idle timeout on API clients: Home Assistant does not ping while advertisements flow, so dead peers
   are found with TCP keepalive (30 s idle, then 3 probes 10 s apart).
+- Each API client has its own send queue (256 messages) and writer, so a client that stops reading never holds
+  up Bluetooth events or other clients. Advertisement batches and log lines are dropped for a client once half
+  its queue is waiting; anything else (GATT responses, notifications, connection changes) that finds the queue
+  full closes the client, as ESPHome drops a client that cannot keep up, since the stream would no longer be
+  consistent. A write that takes over 10 s closes the client too.
 
 ## Logs
 
@@ -279,9 +293,9 @@ ESPHome's ERROR, WARN, INFO and DEBUG. Home Assistant subscribes at the level it
 and writes the lines to its own log.
 
 A subscription with `dump_config` gets one CONFIG line with the proxy's settings (name, versions, MAC, backend,
-adapter, scan mode, connections in use). Logging never waits for a client: each subscriber has a queue of 64
-lines, and when a slow client lets it fill up, further lines are dropped for that client and it gets a warning
-with the count once it catches up.
+adapter, scan mode, connections in use). Logging never waits for a client: lines wait in a queue of 64 per
+subscriber, then in the client's send queue, and when a slow client lets those fill up, further lines are
+dropped for that client and it gets a warning with the count once it catches up.
 
 ## Deploy
 

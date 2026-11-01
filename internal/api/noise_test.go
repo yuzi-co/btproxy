@@ -1,3 +1,5 @@
+//go:build !nonoise
+
 package api
 
 import (
@@ -221,5 +223,30 @@ func TestPlaintextNoiseClient(t *testing.T) {
 	got, _ := io.ReadAll(c)
 	if !bytes.HasPrefix(got, []byte("\x00Bad indicator byte")) {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// TestNoiseQueueOrder queues messages of varying size faster than the writer sends them: the writer, which
+// encrypts several into one write, must keep them in order, or the client's nonces would not match.
+func TestNoiseQueueOrder(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	c := newClient(&Server{cfg: Config{EncryptionKey: testPSK}}, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.wmu.Lock()
+	c.sendC = newNoiseCipher(testPSK)
+	c.wmu.Unlock()
+	const n = outQueue // no more, or the queue could overflow
+	go func() {
+		for i := range n {
+			c.send(uint32(i%500), bytes.Repeat([]byte{byte(i)}, i%300))
+		}
+		c.closeQueue()
+	}()
+	nc := &noiseClient{t: t, c: b, r: bufio.NewReader(b), recv: newNoiseCipher(testPSK)}
+	for i := range n {
+		typ, p := nc.read()
+		if int(typ) != i%500 || len(p) != i%300 || len(p) > 0 && p[0] != byte(i) {
+			t.Fatalf("message %d: type %d, %d bytes", i, typ, len(p))
+		}
 	}
 }

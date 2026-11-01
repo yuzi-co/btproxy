@@ -120,7 +120,8 @@ type held struct {
 // response's RSSI; everything else is reported as it arrives. The decoder does the same, except that a held
 // advertisement whose response does not come within holdFor, or that a newer one from the same device
 // replaces, is reported alone instead of being dropped. Its memory is fixed: holdSlots held advertisements
-// and fragSlots fragmented extended advertisements in progress.
+// and fragSlots fragmented extended advertisements in progress. Advertisements are passed to emit with their
+// data in the decoder's own buffers, as ble.Advert allows, so decoding allocates nothing.
 type decoder struct {
 	emit   func(ble.Advert)
 	active bool // the scan is active, so scan responses come
@@ -128,6 +129,7 @@ type decoder struct {
 	held  [holdSlots]held
 	frags [fragSlots]uint64 // keys of devices whose extended advertisement continues in the next report
 	fragN int
+	buf   [maxData]byte // data of the advertisement being emitted
 }
 
 // event handles one HCI event received at now.
@@ -158,7 +160,7 @@ func (d *decoder) report(r report, now time.Time) {
 			prev = h.ad.Data
 			h.key = 0
 		}
-		ad.Data = appendAD(appendAD(make([]byte, 0, len(prev)+len(r.data)), prev), r.data)
+		ad.Data = appendAD(appendAD(d.buf[:0], prev), r.data)
 	case d.active && r.scannable:
 		if h := d.find(k); h != nil {
 			d.release(h)
@@ -168,7 +170,7 @@ func (d *decoder) report(r report, now time.Time) {
 		h.ad.Data = appendAD(h.data[:0], r.data)
 		return
 	default:
-		ad.Data = appendAD(make([]byte, 0, len(r.data)), r.data)
+		ad.Data = appendAD(d.buf[:0], r.data)
 	}
 	d.emit(ad)
 }
@@ -211,12 +213,11 @@ func (d *decoder) slot() *held {
 	return oldest
 }
 
-// release reports a held advertisement alone and frees its slot.
+// release reports a held advertisement alone and frees its slot. Its data stays in the slot until emit
+// returns, since nothing takes the slot before then.
 func (d *decoder) release(h *held) {
-	ad := h.ad
-	ad.Data = append([]byte(nil), h.ad.Data...)
 	h.key = 0
-	d.emit(ad)
+	d.emit(h.ad)
 }
 
 // expire releases the advertisements whose scan response is overdue. Called for every event and, while no
