@@ -295,6 +295,8 @@ func (s *Server) disconnect(addr uint64) {
 	if bc != nil && bc.conn != nil {
 		if err := bc.conn.Disconnect(); err != nil {
 			s.log.Warn("disconnect", "addr", ble.FormatMAC(addr), "err", err)
+		} else {
+			s.log.Info("disconnected on request", "addr", ble.FormatMAC(addr))
 		}
 	}
 	s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, false, 0, 0))
