@@ -1,90 +1,57 @@
 # btproxy
 
 An ESPHome-compatible Bluetooth proxy for Linux and Windows, written in Go. Home Assistant adds it through the
-ESPHome integration (port 6053) the same way it adds an ESP32 proxy, then scans and connects to BLE devices
-through the host's Bluetooth adapter. On Linux it talks to BlueZ over D-Bus, on Windows to the WinRT Bluetooth
-LE APIs; either way other programs can use the adapter at the same time.
+ESPHome integration (port 6053) like an ESP32 proxy, then scans and connects to BLE devices through the host's
+adapter: BlueZ over D-Bus on Linux, WinRT on Windows. Other programs can use the adapter at the same time.
 
-Status: in daily use since 2026-10-31 on an OpenWrt 23.05 router (MT7620A, mipsle, 128 MB RAM) with a Realtek
-RTL8761B USB stick, and since 2026-11-01 on a Windows 11 desktop with an Intel adapter in the same room. Both
-serve Home Assistant 2026.11 with advertisements for device tracking and keep bonded connections to a Tion
-breezer, which Home Assistant routes through whichever proxy hears it better. The fake backend passes an
-end-to-end test with `aioesphomeapi` (Home Assistant's client library).
+Status: in use since 2026-10-31 on an OpenWrt 23.05 router (MT7620A, mipsle, 128 MB RAM, RTL8761B USB stick)
+and since 2026-11-01 on Windows 11 (Intel adapter), with Home Assistant 2026.11. The fake backend passes an
+end-to-end test with `aioesphomeapi`.
 
-## What it supports
+## Features
 
-Both backends:
-
-- Advertisements batched like ESPHome, with an optional allow/deny filter by address, OUI, service UUID or
-  company id (see [Advertisements](#advertisements) and [Advertisement filter](#advertisement-filter)).
-- Active connections: connect, service discovery, read and write of characteristics and descriptors,
-  notifications, disconnect, connection slot reporting, cache clearing. Up to `-connections` (default 3).
-- A connect that fails at once on the radio is retried before Home Assistant hears of it (`-connect-retries`),
-  and scanning pauses while a connection is being made, as on an ESP32 (see [Scanning](#scanning)).
-- Pairing and unpairing on request from Home Assistant ("Just Works" only, see [Bonded devices](#bonded-devices)).
-- Connection parameter changes on a live connection (see [Connection parameters](#connection-parameters)).
-- Active and passive scanning, scanner state and mode reporting, and mode changes from Home Assistant (see
-  [Scanning](#scanning)).
-- Log streaming to Home Assistant (the ESPHome entry's option to subscribe to the device's logs) and to
-  `esphome logs`, formatted like an ESPHome device's (see [Logs](#logs)).
-- Diagnostic sensors in Home Assistant: connection attempts and success rate, advertisement rate,
-  uptime, memory and more (see [Sensors](#sensors)).
-- API encryption (Noise, as ESPHome's `api: encryption: key:`), off by default (see [Encryption](#encryption)).
-- mDNS discovery that leaves out container, VM and VPN interfaces (see [mDNS](#mdns)).
-- A settings file and an optional password-protected settings page (see [Settings page](#settings-page)).
-
-Linux (BlueZ):
-
-- True raw advertisements from the controller's HCI events when the proxy may open the kernel's HCI monitor,
-  otherwise rebuilt from BlueZ's parsed properties.
-- Exact connection parameters (interval, latency, supervision timeout), sent as an HCI command.
-- Several adapters in one process, each served as its own device (see [Several adapters](#several-adapters)).
-- Recovery without a restart when `bluetoothd` restarts, the adapter disappears and returns, or someone powers
-  it off. The proxy reports the connections as dropped, powers the adapter on, resumes scanning and, after a
-  `bluetoothd` restart, registers the pairing agent again. It also detects a `bluetoothd` that hangs (see
-  [Scanning](#scanning)) and restarts it if `-bluetoothd-restart` is set.
-
-Windows (WinRT, see [Windows](#windows)):
-
-- Advertisements rebuilt from the sections Windows parses, extended advertisements included.
-- Connection parameters through Windows 11's presets (throughput, balanced, power).
-- A tray icon with status, Start with Windows, the settings page and the log; a log file instead of a console.
+- Advertisements batched like ESPHome, with an optional [filter](#advertisement-filter).
+- Connections with GATT read, write and notify, slot reporting and cache clearing; radio-level connect failures
+  are retried and scanning pauses while connecting, as on an ESP32 ([Scanning](#scanning)).
+- Pairing and unpairing from Home Assistant ([Bonded devices](#bonded-devices)).
+- [Connection parameter](#connection-parameters) changes: exact on Linux, presets on Windows 11.
+- Active and passive scanning, mode changes from Home Assistant.
+- [Log streaming](#logs), diagnostic [sensors](#sensors), optional [encryption](#encryption).
+- [mDNS](#mdns) discovery that skips container, VM and VPN interfaces.
+- A settings file and an optional password-protected [settings page](#settings-page).
+- Linux: raw advertisements from the HCI monitor, [several adapters](#several-adapters), recovery from
+  `bluetoothd` restarts, hangs and adapter loss.
+- Windows: tray icon, Start with Windows, log file ([Windows](#windows)).
 
 Not supported: setting the encryption key from Home Assistant, IPv6 mDNS, running as a Windows service.
 
 ## Compared with other proxies
 
-As of 2026-11, against ESPHome's `bluetooth_proxy` on an ESP32 and [denvera/bt-proxy](https://github.com/denvera/bt-proxy)
-(Python and bleak on Linux, ESPHome API 1.10). "?" means not checked.
+As of 2026-11, against ESPHome's `bluetooth_proxy` on an ESP32 and
+[denvera/bt-proxy](https://github.com/denvera/bt-proxy) (Python and bleak, ESPHome API 1.10). All three make
+GATT connections and discover over mDNS. "?" means not checked.
 
 | Feature | btproxy | ESPHome ESP32 | denvera/bt-proxy |
 |---|---|---|---|
-| Runs on | Linux with BlueZ, Windows 10 2004+ and 11; one static binary (about 4 MB) | ESP32 | Linux with BlueZ, Python |
-| Advertisements | Linux: true raw from the HCI monitor, rebuilt from BlueZ as fallback; Windows: rebuilt | true raw | rebuilt by bleak |
-| Passive scanning, scanner state and mode | yes (passive on Linux needs `bluetoothd --experimental`) | yes | yes |
-| Connections, GATT read/write/notify | yes | yes | yes |
-| Retry of connects that fail on the radio | yes | ? | ? |
-| Pairing and unpairing | yes (Just Works) | yes | no |
+| Runs on | Linux (BlueZ), Windows 10 2004+ and 11; static binary, about 4 MB | ESP32 | Linux (BlueZ), Python |
+| Advertisements | Linux: raw from HCI monitor, else rebuilt; Windows: rebuilt | raw | rebuilt by bleak |
+| Passive scanning | Linux needs `bluetoothd --experimental` | yes | yes |
+| Retry of radio connect failures | yes | ? | ? |
+| Pairing, unpairing | yes (Just Works) | yes | no |
 | Cache clearing | yes, bonds kept | yes | reported, nothing cleared |
-| Connection parameters | Linux: exact (HCI LE Connection Update); Windows 11: nearest preset | yes | no |
-| API encryption (Noise) | yes, off by default | yes | no |
-| Log streaming to Home Assistant | yes | yes | ? |
-| Diagnostic sensors in Home Assistant | yes, proxy statistics | general ones (uptime, Wi-Fi) if added in YAML | ? |
+| Connection parameters | Linux: exact; Windows 11: nearest preset | yes | no |
+| API encryption | yes, off by default | yes | no |
+| Diagnostic sensors | proxy statistics | general ones if added in YAML | ? |
 | Advertisement filter | allow/deny lists | ? | ? |
-| Several adapters | Linux: yes, one device each | n/a | ? |
-| Settings | flags, a settings file and an optional web page; Windows tray | YAML, compiled in | ? |
-| mDNS discovery | yes (IPv4) | yes | yes |
-| Recovery from `bluetoothd` restarts and hangs | yes, optional restart command | n/a | restarts yes, hangs ? |
-| Hardware cost | a Linux box or Windows PC you already have | an ESP32 board, a few euros | a Linux box you already have |
-| Shares the adapter with other programs | yes, through BlueZ or Windows | n/a | yes, through BlueZ |
+| Several adapters | Linux: one device each | n/a | ? |
+| Settings | flags, file, web page; Windows tray | YAML, compiled in | ? |
+| Recovers from `bluetoothd` restarts, hangs | yes | n/a | restarts yes, hangs ? |
 
-Shelly Gen2+ devices, the Ruuvi Gateway and Theengs / OpenMQTTGateway also relay advertisements to Home
-Assistant, but cannot make connections.
+Shelly Gen2+, the Ruuvi Gateway and Theengs / OpenMQTTGateway relay advertisements but cannot connect.
 
-An ESP32 is still the better proxy where you have USB power and nothing else: it is cheap, and its radio
-handles BLE alone. btproxy makes sense where a Linux machine or a Windows PC with a Bluetooth adapter already
-sits in the right room. On the router above, the USB stick sits next to the router's own 2.4 GHz radio, and many connection
-attempts fail at the radio level (HCI reason 0x3e), not in the software.
+An ESP32 is the better proxy where you only have USB power: cheap, and its radio does BLE alone. btproxy fits
+where a Linux box or Windows PC with an adapter already sits in the right room. On the router above the stick
+sits next to the router's 2.4 GHz radio, and many connects fail at the radio level (HCI reason 0x3e).
 
 ## Build
 
@@ -95,522 +62,295 @@ CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldfl
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H windowsgui" -o dist/btproxy.exe ./cmd/btproxy
 ```
 
-The binaries are static, 3.6 to 4.1 MB as of 2026-11-01: arm64 and armv7 3.6 MB, amd64 3.8 MB, mipsle 4.1 MB,
-Windows 3.7 MB. `-H windowsgui` builds the Windows binary without a console, with the tray icon and a log file
-(see [Windows](#windows)).
+Sizes as of 2026-11-01: arm64 and armv7 3.6 MiB, amd64 3.8 MiB, mipsle 4.1 MiB, Windows 3.7 MiB. Without
+`-H windowsgui` the Windows binary is a console program that logs like on Linux, with no tray.
 
-`-tags nonoise` leaves out API encryption (Noise, ChaCha20-Poly1305, X25519), which makes the mipsle binary
-192 KB smaller (3.9 MB). Such a build stops at start with an error when given an encryption key
-(`-encryption-key`, `-encryption-key-file` or `$BTPROXY_ENCRYPTION_KEY`). The router build uses it while
-encryption is off there:
+`-tags nonoise` leaves out API encryption (192 KiB less on mipsle, 3.9 MiB); such a build refuses to start when
+given a key. The router uses it while encryption is off:
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -tags nonoise -trimpath -ldflags="-s -w" -o dist/btproxy-mipsle ./cmd/btproxy
 ```
 
+Generated code: `go generate ./internal/ble/winrt/gen` (WinRT bindings), `go generate ./cmd/btproxy` (icon).
+
 ## Run
 
-On Linux it needs `bluetoothd` and the system D-Bus, and permission to use the adapter (root, or a D-Bus
-policy for the user). For devices BlueZ has not seen yet, connecting uses `ConnectDevice`, which needs
-`bluetoothd --experimental`; devices in range are normally already known from scanning. In a container it needs
-the host's network (the kernel allows Bluetooth sockets only in the initial network namespace) and the host's
-D-Bus socket. On Windows it needs nothing but the binary and a Bluetooth LE adapter (see [Windows](#windows)).
+Linux needs `bluetoothd`, the system D-Bus and permission to use the adapter (root, or a D-Bus policy); raw
+advertisements and connection parameters need `CAP_NET_RAW`. Connecting to a device BlueZ has not seen uses
+`ConnectDevice`, which needs `bluetoothd --experimental` (devices in range are normally known from scanning). In
+a container it needs the host network (Bluetooth sockets only work in the initial network namespace) and the
+host's D-Bus socket. Windows needs only the binary and an LE adapter.
 
 ```sh
 btproxy -name btproxy-bedroom -area Bedroom
 ```
 
-Flags: `-name`, `-friendly-name`, `-area`, `-listen` (`:6053`), `-adapter` (`hci0`; a comma-separated list for
-[several adapters](#several-adapters)), `-connections` (3 per adapter),
-`-mac` (unique id reported to HA; default: the first network interface whose MAC is neither locally
-administered nor a hypervisor's), `-mdns` (`true`), `-mdns-iface` (comma-separated interfaces to advertise on;
-default: all up interfaces with IPv4 except container, VM and VPN ones, see [mDNS](#mdns)), `-backend` (`bluez`,
-`winrt` or `fake`; `winrt` is the default on Windows, see [Windows](#windows)), `-agent` (`true`: register a BlueZ pairing agent), `-scan-mode` (`active` or `passive`; default
-`active`, like ESPHome), `-stall-timeout` (`3m`: restart active scanning after this long without
-advertisements; `0` disables), `-bluetoothd-restart` (shell command that restarts `bluetoothd` when it hangs,
-for example `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"`; default: none),
-`-raw-adverts` (`auto`, `on` or `off`: where advertisements come from, see [Advertisements](#advertisements);
-default `auto`), `-scan-pause-on-connect` (`true`: stop scanning while a connection is being made, like
-ESPHome, see [Scanning](#scanning)), `-connect-retries` (2: retry a connect that fails at once with HCI reason
-0x3e this many times before reporting the failure, see [Scanning](#scanning) and, for Windows,
-[Windows](#windows); `0` disables),
-`-adv-allow`, `-adv-deny` and `-adv-deny-random` (see [Advertisement filter](#advertisement-filter)),
-`-encryption-key` and `-encryption-key-file` (see [Encryption](#encryption)), `-debug`, `-config`, `-ui`,
-`-ui-password` and `-ui-password-file` (see [Settings page](#settings-page)); on Windows also `-tray` and
-`-log-file` (see [Windows](#windows)).
+Home Assistant discovers it over mDNS. Otherwise add it by hand: Add integration, ESPHome, host, port 6053.
 
-Home Assistant discovers the proxy over mDNS and offers it under Settings, Devices & services. Without mDNS
-(`-mdns=false`, or a network that does not pass multicast), add it by hand: Add integration, ESPHome, host and
-port 6053.
+| Flag | Default | Meaning |
+|---|---|---|
+| `-name` | `btproxy-<hostname>` | node name |
+| `-friendly-name` | the name | |
+| `-area` | | suggested area |
+| `-listen` | `:6053` | API address; see [several adapters](#several-adapters) |
+| `-backend` | `bluez`, `winrt` on Windows | `bluez`, `winrt` or `fake` |
+| `-adapter` | `hci0` | adapter, or comma-separated list (bluez) |
+| `-connections` | 3 | connection slots per adapter |
+| `-mac` | first interface MAC that is neither locally administered nor a hypervisor's | unique id Home Assistant keys the device on |
+| `-mdns` | `true` | advertise over mDNS |
+| `-mdns-iface` | all up IPv4 interfaces except container, VM, VPN | comma-separated, see [mDNS](#mdns) |
+| `-scan-mode` | `active` | `active` or `passive` |
+| `-raw-adverts` | `auto` | `auto`, `on`, `off`: use the HCI monitor (bluez), see [Advertisements](#advertisements) |
+| `-scan-pause-on-connect` | `true` | stop scanning while connecting |
+| `-connect-retries` | 2 | retries of a connect that fails at once on the radio; `0` disables |
+| `-stall-timeout` | `3m` | restart active scanning after this long without advertisements; `0` disables (bluez) |
+| `-bluetoothd-restart` | | command run when `bluetoothd` hangs, such as `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"` |
+| `-agent` | `true` | register a BlueZ pairing agent |
+| `-adv-allow`, `-adv-deny`, `-adv-deny-random` | | see [Advertisement filter](#advertisement-filter) |
+| `-encryption-key`, `-encryption-key-file` | | see [Encryption](#encryption); also `$BTPROXY_ENCRYPTION_KEY` |
+| `-config` | Windows: `%LOCALAPPDATA%\btproxy\config.json` | settings file |
+| `-ui` | Windows: 127.0.0.1, free port | settings page address |
+| `-ui-password`, `-ui-password-file` | | settings page password; also `$BTPROXY_UI_PASSWORD` |
+| `-debug` | `false` | debug logging |
+| `-tray` | on when there is no console | Windows tray icon |
+| `-log-file` | | also log to this file (Windows) |
 
 ### Several adapters
 
-`-adapter hci0,hci1` serves each adapter as a device of its own, since Home Assistant counts each ESPHome
-device as one Bluetooth scanner with its own connection slots. The first adapter is served exactly as with one
-adapter: `-name`, `-mac` (or the network interface's MAC) and the `-listen` port. Each further adapter gets
-`-<adapter>` appended to the name (`btproxy-gw-hci1`), its own Bluetooth address as the unique id, the next
-port (6054, 6055, ...) and an mDNS record of its own, so adding a second adapter leaves the first one's Home
-Assistant entry alone. `-listen :6053,:7053` gives every adapter its address instead. `-connections`,
-`-scan-mode`, `-area` and the encryption key apply to every adapter.
+`-adapter hci0,hci1` serves each adapter as its own ESPHome device (Home Assistant counts each as one scanner
+with its own slots). The first is served as if alone. Each further one gets `-<adapter>` appended to the name
+(`btproxy-gw-hci1`), its Bluetooth address as unique id, the next port (6054, ...) and its own mDNS record, so
+the first one's Home Assistant entry is unaffected. `-listen :6053,:7053` sets each address. `-connections`,
+`-scan-mode`, `-area` and the key apply to all.
 
-The adapters share the process, but each has its own D-Bus connection, scanner supervisor, HCI monitor socket
-(filtered in the kernel to its controller index), scan pause on connect and advertisement monitors. What
-concerns `bluetoothd` as a whole is shared: one pairing agent accepts pairings for devices connected through
-any adapter, and `-bluetoothd-restart` runs at most once per 10 minutes for all adapters together; the others
-recover from a restart as from any other. An adapter other than the first that cannot be opened at start is
-logged and left out, so a missing USB stick does not take the others down; restart the proxy once it is back.
-The first one failing still stops the proxy. The log stream API clients subscribe to carries the lines of every
-adapter, tagged with `node` and `adapter`.
+One pairing agent serves all adapters; `-bluetoothd-restart` runs at most once per 10 minutes for all. A
+further adapter that cannot be opened at start is logged and skipped (restart the proxy once it is back); the
+first one failing stops the proxy. Log lines are tagged with `node` and `adapter`.
 
 ## Settings page
 
-`-config FILE` names a settings file: a flat JSON object of flag values, such as
-`{"friendly-name": "Garage", "connections": "3", "mdns": "false"}` (numbers and booleans may also be written
-bare). It is read at start; flags given on the command line override it. A setting the file has wrong (an unknown
-name, a value the flag rejects) is logged and the others still apply. Without `-config` there is no file, except
-on Windows, where it is `%LOCALAPPDATA%\btproxy\config.json`.
+`-config FILE` is a flat JSON object of flag values, such as `{"friendly-name": "Garage", "connections": 3}`,
+read at start. Command-line flags override it; a bad entry is logged and the rest apply.
 
-`-ui ADDRESS` serves a settings page there, for example `-ui :8080`. It shows the status (clients,
-connections, advertisement rate, scanner state, the last warning or error) and a form for the settings that
-matter for the backend in use: name, friendly name, area, MAC (the detected one as placeholder), listen
-address, mDNS and its interfaces, encryption key (masked, with buttons to show it and to generate a new one),
-connection slots, scan mode, the advertisement filter, debug logging and, with the bluez backend, the adapters,
-the pairing agent, raw advertisements, scan pause, stall timeout and connect retries. Settings given on the
-command line are shown locked, with a note. `-bluetoothd-restart` is shown but never editable on the page, since
-it is a shell command run as the proxy's user; change it in the file or on the command line. Saving validates
-every value with the parsers the flags use and writes the file, keeping only values that differ from the
-defaults; when something changed, the proxy restarts to apply it, withdrawing its mDNS records first as on
-SIGTERM. On Linux the restart replaces the process image (`exec`) with the same command line, so the PID stays
-and procd or systemd see nothing; on Windows a new process starts and waits for the old one to exit. The page
-reloads itself once the proxy is back.
+`-ui ADDRESS` (such as `:8080`) serves the status (clients, connections, advertisement rate, scanner state, last
+warning or error) and a form for the settings relevant to the backend. Settings given on the command line show
+as locked; `-bluetoothd-restart` is never editable there. Saving validates, writes only non-default values and,
+if anything changed, restarts the proxy (Linux: `exec` with the same PID, invisible to procd or systemd;
+Windows: a new process).
 
-Anywhere but a loopback address the page needs a password: `-ui-password-file FILE` (preferred),
-`$BTPROXY_UI_PASSWORD` or `-ui-password`, checked with HTTP Basic authentication (any user name) in constant
-time, with a one-second delay after a wrong one. btproxy refuses to start with `-ui` on another address without
-a password. Without a password the page only answers requests whose Host is `localhost` or a loopback address,
-against DNS rebinding. Forms carry a per-process token that saving checks, and cross-origin posts are refused.
-The page sets a strict Content-Security-Policy and loads nothing from elsewhere. It is plain HTTP: on a network
-you do not trust, keep it on 127.0.0.1 and reach it through SSH (`ssh -L 8080:127.0.0.1:8080 router`).
+- On a non-loopback address a password is required, or btproxy refuses to start: `-ui-password-file`
+  (preferred), `$BTPROXY_UI_PASSWORD` or `-ui-password`. HTTP Basic, any user name, one-second delay after a
+  wrong one.
+- Without a password it answers only Host `localhost` or loopback (against DNS rebinding).
+- Per-process form token, cross-origin posts refused, strict Content-Security-Policy, nothing external.
+- Plain HTTP: on an untrusted network keep it on 127.0.0.1 and use SSH (`ssh -L 8080:127.0.0.1:8080 router`).
 
-The server is a small HTTP/1.1 implementation (`internal/ui`) rather than `net/http`, which would add about
-4 MB to the router build: one request per connection, no chunked bodies, 8 KB of headers, 16 KB of body, 10 s
-for the whole exchange and 8 connections at a time. It adds 64 KB to the mipsle build (3,997,887 to
-4,063,423 bytes with `-tags nonoise`), whether or not `-ui` is given.
+The server is a minimal HTTP/1.1 implementation (`net/http` would add about 4 MB; this adds 64 KB, with or
+without `-ui`): one request per connection, 16 KB body, 10 s per exchange, 8 connections.
 
 ## Windows
 
-The `winrt` backend runs btproxy on Windows 10 (version 2004 or later) and Windows 11 through the WinRT
-Bluetooth LE APIs, the ones Bleak uses. It is pure Go (`CGO_ENABLED=0`); the bindings are generated into
-`internal/ble/winrt/gen` (`go generate ./internal/ble/winrt/gen` regenerates them).
+Windows 11 (tested) and Windows 10 2004+ (untested), pure Go over WinRT. Uses the default adapter, which must support LE and the central
+role; `-adapter`, `-agent`, `-stall-timeout`, `-bluetoothd-restart` and `-raw-adverts` have no effect.
 
-```sh
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H windowsgui" -o dist/btproxy.exe ./cmd/btproxy
-```
+- Tray menu: status, Start with Windows, Settings..., Open log, Quit. Quit, logoff and shutdown withdraw mDNS.
+- Start with Windows writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\btproxy` without flags, so
+  settings go in the settings file.
+- The settings page is on by default (127.0.0.1, free port; `-ui ""` turns it off). The tray opens it with a
+  random URL token that becomes an HttpOnly, SameSite=Strict cookie, so other local users and sites cannot
+  use it.
+- Without a console, logs go to `%LOCALAPPDATA%\btproxy\btproxy.log` (rotated at 1 MB to `btproxy.log.1`,
+  crash traces included); start errors show a message box.
+- One instance per listen address; a second one says so and exits.
+- Home Assistant needs TCP 6053 in and, for discovery, UDP 5353; Windows Firewall asks on first start.
+- On a laptop that switches between Ethernet and Wi-Fi, set a fixed `-mac`.
 
-The binary is about 3.7 MB. Built with `-H windowsgui` it has no console window: started from Explorer, a
-shortcut or at logon it runs in the background with a tray icon. Without `-H windowsgui` it is a console
-program that logs to the console, as on Linux (`btproxy.exe -name btproxy-office` from a terminal).
+Tested on Windows 11 (Intel): scanning, mode changes, connecting, discovery, reads, notification on/off, MTU
+247, cache clearing, disconnect. Not yet tried against a device: writes, notification delivery, pairing,
+unpairing a bonded device, link loss, radio off and on.
 
-The tray icon's tooltip shows the node name and API port; its menu shows the status (clients, connections,
-advertisements per second, or a Bluetooth error when scanning stopped), and has Start with Windows,
-Settings..., Open log and Quit. Quit withdraws the mDNS records and exits, as SIGTERM does on Linux; logging off
-or shutting down Windows does the same. `-tray` turns the icon on or off; by default it is on when the process
-has no console.
+Differences from BlueZ:
 
-Start with Windows writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\btproxy`, the quoted path of
-the executable without flags, and removes it when unticked; the tick shows whether the value exists. Settings
-therefore belong in the settings file, which the started proxy reads.
-
-Settings... opens the [settings page](#settings-page) in the default browser. On Windows it is on by default,
-on 127.0.0.1 with a free port (`-ui` changes that, `-ui ""` turns it off). The tray opens it with a random token
-in the URL, which the page swaps for a cookie (HttpOnly, SameSite=Strict), so other local users and web sites
-cannot use it. Settings are kept in `%LOCALAPPDATA%\btproxy\config.json`; the Start with Windows box is on the
-page too. When the proxy restarts after saving, the page keeps its port and token.
-
-Without a console, logs go to `%LOCALAPPDATA%\btproxy\btproxy.log`; at 1 MB the file moves to `btproxy.log.1`
-(replacing the older one) and a new one starts. A crash's stack trace lands there too. `-log-file PATH` logs to
-a file also when there is a console. Open log opens the file with the program associated with `.log`. If
-btproxy stops on an error at start (no Bluetooth adapter, port in use), a message box says why.
-
-Only one btproxy runs per listen address (a named mutex): a second one, such as a manual start while the one
-started at logon runs, says so in a message box (or in the log without a tray) and exits.
-
-The icon is drawn by `cmd/btproxy/gen_icon.go` (`go generate ./cmd/btproxy`) into `btproxy.ico`. It uses the default Bluetooth adapter, which must support LE and the central role;
-`-adapter` and the BlueZ flags (`-agent`, `-stall-timeout`, `-bluetoothd-restart`, `-raw-adverts`) have no
-effect. Listening on all interfaces makes Windows Firewall ask on the first
-start; Home Assistant needs TCP 6053 in and, for discovery, UDP 5353. The default `-mac` is the first network
-interface whose MAC is neither locally administered nor a hypervisor's (Hyper-V, VMware, VirtualBox, Xen,
-Parallels). Home Assistant keys the device on it, so on a laptop that moves between Ethernet and Wi-Fi set
-`-mac` to a fixed value.
-
-Checked on Windows 11 with an Intel Wireless Bluetooth adapter: active and passive scanning, mode changes from
-the client, scanner state, RSSI and address type; connecting, service discovery, reading characteristics and
-descriptors, turning notifications on and off by request, MTU (247 after Windows' own exchange), cache
-clearing, unpairing a device that was not paired, and disconnecting. Writes (including CCCD writes),
-notification delivery, pairing, unpairing a bonded device, link loss and recovery after the radio goes off are
-implemented but were not tried against a device.
-
-Differences from the BlueZ backend and an ESP32:
-
-- Advertisements are rebuilt from the data sections WinRT parses out of each packet, in their original order,
-  so the bytes match what was on air. Advertisement and scan response arrive as separate entries, as from an
-  ESP32. Extended advertisements (Bluetooth 5) are reported too: the watcher asks for them
-  (`AllowExtendedAdvertisements`, Windows 10 2004 and later), and Windows hands them over reassembled. As with
-  the HCI monitor on Linux, an entry keeps the AD structures that fit in 62 bytes, in order, and anonymous
-  advertisements (no address) are skipped. The ESPHome API has no field for the primary and secondary PHY,
-  and the bindings' Windows metadata predates the event properties that carry them, so they are not read.
-- Windows owns the connections. btproxy holds a GATT session and the service objects; the link drops a few
-  seconds after it lets go of them, and not at all while another program or Windows itself (a paired keyboard,
-  for example) uses the device. Services Windows keeps for itself, such as HID, are listed without
-  characteristics.
-- Windows only connects to devices it has seen advertising (or has paired), so connecting fails with "device
-  not found" otherwise. Home Assistant scans all the time, so this only matters right after a start.
-- Characteristic handles are reported as value handles, like an ESP32 and the BlueZ backend, so Home
-  Assistant's GATT cache stays valid across proxies.
-- Writes to a CCCD go through Windows' configuration call, which is also what has notifications delivered.
-- Pairing accepts Just Works, passkey display and numeric comparison without asking; pairing that needs a
-  passkey typed in fails.
-- Cache clearing makes the next service discovery for the device bypass the Windows GATT cache, which also
-  refreshes that cache. Bonds are kept.
-- A connect that fails at once on the radio is retried, as with BlueZ (`-connect-retries`, 2 by default). Windows
-  has no connect call that fails: it keeps trying to connect while a GATT session asks for the link, so a
-  device out of range runs into the 30 s limit, which is not retried. A link that comes up and fails in its
-  first connection events (what BlueZ reports as HCI reason 0x3e) shows up as the first service discovery
-  answering Unreachable, discovery failing with `ERROR_GEN_FAILURE` or `ERROR_DEVICE_NOT_AVAILABLE`, or the
-  link being down again once discovery is done. The proxy then closes the device and session objects and
-  tries again after 500 ms with new ones, unless the attempt took longer than 5 s, the next would start more
-  than 8 s after the first, or the connect was withdrawn. The 30 s limit for the link to come up covers all
-  attempts. Not found, access denied, cancelled operations, ATT errors and timeouts fail at once.
-- Connection parameters: Windows 11 offers three presets instead of free values, which the proxy picks from
-  for a client's request, see [Connection parameters](#connection-parameters). On Windows 10 the feature is
-  not advertised.
-- Scanning pauses while connecting (`-scan-pause-on-connect`, on by default), as with BlueZ: from the connect
-  call until the services are resolved or the connect fails, the advertisement watcher is stopped and the
-  scanner reported idle, then a new watcher starts. Overlapping connects share the pause, which ends after 60 s
-  at the latest. Watchers of other programs (another btproxy, for one) keep the radio scanning. A watcher
-  that cannot start again is retried every 5 s, and the proxy checks every 10 s that the running watcher has
-  not stopped or aborted without telling, which it then replaces the same way.
+- Advertisements are rebuilt from WinRT's parsed sections in original order, so bytes match the air. Scan
+  responses arrive as separate entries, as from an ESP32. Extended advertisements are included; PHYs are not
+  reported.
+- Windows owns connections: the link drops a few seconds after the proxy lets go, and stays up while another
+  program or Windows uses the device. Services Windows keeps (such as HID) have no characteristics.
+- Windows connects only to devices it has seen advertising or paired ("device not found" right after a start).
+- Pairing accepts Just Works, passkey display and numeric comparison; passkey entry fails. Windows keeps the
+  bond.
+- Connect retries: an out-of-range device hits the 30 s limit (not retried). A link that fails in its first
+  connection events (Unreachable, `ERROR_GEN_FAILURE`, `ERROR_DEVICE_NOT_AVAILABLE`, or down after discovery)
+  is retried after 500 ms, unless the attempt took over 5 s or the retry would start over 8 s after the first.
+  Not found, access denied, cancelled, ATT errors and timeouts fail at once.
+- Other programs' watchers keep the radio scanning during the scan pause. A stopped watcher is restarted
+  (checked every 10 s, retried every 5 s).
 
 ### As a Windows service (not implemented)
 
-btproxy runs per user, started at logon. Running it as a service (before logon, without a session) is
-untested, because installing a service needs an elevated prompt, and so there is no `-service` flag yet.
-What is known:
+Untested, since it needs an elevated prompt to install. Microsoft documents session 0 services as
+[advertisement watcher users](https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.advertisement.bluetoothleadvertisementwatcher.start)
+(stop scanning on `PBT_APMSUSPEND`); GATT, pairing and connection parameters from session 0 are undocumented.
+Bonds are machine-wide (`bthserv`), so user-session pairings should carry over. A service would need: no tray,
+so a log file and `-ui-password`; settings and log in `%ProgramData%\btproxy`; a `Global\` single-instance
+mutex instead of `Local\`.
 
-- Microsoft's documentation of `BluetoothLEAdvertisementWatcher.Start` names session 0 services as watcher
-  users: whether a watcher gets advertisements during Modern Standby "depends on various factors such as
-  whether your app is running in an AppContainer, whether it's a session 0 service", and it suggests that such
-  services stop scanning on `PBT_APMSUSPEND` and resume afterwards
-  ([docs](https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.advertisement.bluetoothleadvertisementwatcher.start)).
-  So scanning from a service is an intended use. Nothing found documents GATT sessions, pairing or connection
-  parameter requests from session 0 either way.
-- Bonds are machine-wide (kept by `bthserv`, under `HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Keys`),
-  so a device paired from a user's session should stay usable from a service, and the reverse.
-  btproxy pairs through `DeviceInformationCustomPairing`, which needs no UI.
-- What would change for btproxy: no tray (session 0 has no desktop), so logs always go to a file and the
-  settings page needs `-ui-password` (the tray's token link is gone); `%LOCALAPPDATA%` of LocalSystem is
-  `C:\Windows\System32\config\systemprofile\AppData\Local`, so settings and log belong in
-  `%ProgramData%\btproxy`; the single-instance mutex is `Local\`, per session, so it would not stop the tray
-  build in a user session from starting next to the service (the port would, with a less clear message), and
-  should become `Global\`.
-
-Proposed design, to be tested on a machine where an elevated prompt is fine: `-service install` (elevated)
-creates service `btproxy` with `golang.org/x/sys/windows/svc/mgr`: the executable path plus `-config
-%ProgramData%\btproxy\config.json`, automatic (delayed) start, a dependency on `bthserv`, restart on failure,
-and LocalSystem, or better a virtual account (`NT SERVICE\btproxy`) if WinRT Bluetooth works under it. It
-would also add the firewall rule for TCP 6053 and UDP 5353, which a service never gets prompted for.
-`-service uninstall` removes both. `-service run` (what the service starts) runs the proxy under
-`svc.Run`, answers Stop and Shutdown the way Quit does (withdraw mDNS, exit), and on suspend and resume stops
-and restarts the watcher as Microsoft suggests. To test: scanning and its state after a reboot before logon,
-connecting, notifications, pairing and unpairing, connection parameter presets, and sleep and resume, first as
-LocalSystem and then as a virtual account.
+Proposed `-service install|uninstall|run`: service `btproxy`, delayed auto start, depends on `bthserv`, restart
+on failure, LocalSystem or a virtual account, `-config %ProgramData%\btproxy\config.json`, firewall rule for TCP
+6053 and UDP 5353; Stop and Shutdown act like Quit; the watcher stops on suspend. To test as both accounts:
+scanning before logon, connecting, notifications, pairing, connection parameters, sleep and resume.
 
 ## mDNS
 
-btproxy advertises itself like an ESPHome device: `_esphomelib._tcp` service `<name>` on host `<name>.local`
-(`-name` reduced to a DNS label), with the TXT keys ESPHome's mdns component sends and Home Assistant reads:
-`friendly_name`, `version` (the ESPHome version btproxy reports), `mac` (the `-mac` value, lower case without
-colons), `platform` (the Go OS: `linux`, `windows`), `board` (the Go architecture), `network=ethernet`, `project_name` and
-`project_version`. With an encryption key, `api_encryption=Noise_NNpsk0_25519_ChaChaPoly_SHA256` too, which
-tells Home Assistant to ask for the key when it discovers the proxy.
+btproxy advertises `_esphomelib._tcp` as `<name>.local` with ESPHome's TXT keys, plus `api_encryption` when it
+has a key, so Home Assistant asks for it. Home Assistant uses `mac` as the unique id: an entry added by IP is
+matched, not duplicated, and a new address is picked up once the connection is lost.
 
-Home Assistant uses `mac` as the config entry's unique id, the same id DeviceInfo gives, so an entry added
-earlier by IP is matched rather than duplicated. When the address changes, the next announcement updates the
-entry's host, as long as Home Assistant has lost the connection by then (it keeps a working connection and
-ignores the announcement otherwise).
+The responder is built in, IPv4 only. It announces at start and on address changes (checked every 30 s), sends
+goodbyes on SIGINT/SIGTERM, answers with the querying interface's address and ignores other subnets. On a router
+with VLANs use `-mdns-iface br-lan`. Without it, these are skipped (logged; if none would remain, all are
+served):
 
-The responder is built in (IPv4 only). It announces three times at start, again when an interface address
-changes (checked every 30 s), and sends goodbye packets on SIGINT or SIGTERM. Each query is answered with the
-addresses of the interface it came from; queries from other subnets are ignored. On a router with several VLANs,
-restrict it with `-mdns-iface br-lan` so the proxy is not advertised on WAN or guest networks.
+- Windows: VPN and tunnel adapters by driver (TAP-Windows, OpenVPN, WireGuard, Wintun, Tailscale, ZeroTier,
+  AnyConnect, GlobalProtect, Fortinet) or with no MAC. Hypervisor and container adapters (Hyper-V, VirtualBox,
+  VMware, Docker, WSL), hypervisor MAC prefixes and locally administered MACs only without a default gateway.
+- Linux: by name: `veth*`, `docker*`, `br-<12 hex>`, `podman*`, `cni*`, `flannel*`, `cali*`, `virbr*`, `vnet*`,
+  `lxcbr*`, `lxdbr*`, `tun*`, `tap*`.
 
-Without `-mdns-iface`, the proxy leaves out container, VM and VPN interfaces, logs which ones it skipped and
-why, and serves all interfaces if that would leave none. How it tells them apart differs by system.
-
-On Windows, virtual interfaces are up with IPv4 on any machine with Hyper-V or WSL (`vEthernet (Default
-Switch)`, `vEthernet (WSL)`). VPN and tunnel adapters are skipped by their driver's name (TAP-Windows, OpenVPN, WireGuard,
-Wintun, Tailscale, ZeroTier, AnyConnect, GlobalProtect, Fortinet) or by having no MAC. Hypervisor and container
-adapters (Hyper-V, VirtualBox, VMware, Docker, WSL), adapters with a hypervisor's MAC prefix and adapters with
-a locally administered MAC are skipped only when they have no default gateway: the host's adapter on a Hyper-V
-external switch, a Windows VM's own NIC and Wi-Fi with a random MAC all have one and are the LAN.
-
-On Linux (and other systems) the proxy goes by interface name only, leaving out `veth*`, `docker*`,
-Docker's `br-` plus 12 hex digits, `podman*`, `cni*`, `flannel*`, `cali*`, `virbr*`, `vnet*`, `lxcbr*`,
-`lxdbr*`, `tun*` and `tap*`. MACs are no guide there: bridges such as `br-lan`, VLAN devices and macvlans often
-have locally administered MACs and are the interfaces to serve, and a Linux VM's own NIC has a hypervisor's
-prefix. In a container the proxy needs the host's network anyway (the kernel allows Bluetooth sockets only in
-the initial network namespace), so it sees these interfaces just as on the host.
-
-It shares port 5353 with other responders: the socket sets `SO_REUSEADDR` and `SO_REUSEPORT`, which Linux
-accepts next to OpenWrt's `umdns` (`SO_REUSEADDR`) and `avahi-daemon`. Multicast reaches every socket; a
-unicast packet to port 5353 reaches only one of them, which only matters for queriers that send unicast to
-5353 instead of the group. Keep `-name` different from the host name, since `umdns` already answers for
-`<hostname>.local` (the default, `btproxy-<hostname>`, is).
+Port 5353 is shared with `umdns` and `avahi-daemon` (`SO_REUSEADDR`, `SO_REUSEPORT`); unicast to 5353 reaches
+only one socket. Keep `-name` different from the host name, which `umdns` already answers for.
 
 ## Advertisements
 
-With `-raw-adverts auto` (the default) or `on`, the proxy opens the kernel's HCI monitor channel, the read-only
-socket `btmon` uses, and takes advertisements from the controller's LE Advertising Report and LE Extended
-Advertising Report events. Home Assistant then gets the bytes that were on the air: field order, address type,
-AD types BlueZ does not parse, and every report the controller passes up, including repeats BlueZ would have
-dropped as unchanged. `bluetoothd` still runs the controller. It starts and stops scanning and makes the
-connections, and the monitor only listens. Without the monitor (`-raw-adverts off`, or `auto` when it cannot be
-opened), the proxy rebuilds advertisements from BlueZ's parsed properties (see [Notes](#notes)).
+With `-raw-adverts auto` (default) or `on`, advertising reports come from the kernel's HCI monitor (read-only,
+like `btmon`, filtered to the `-adapter` controller), so Home Assistant gets the bytes from the air, including
+AD types BlueZ does not parse and repeats it would drop. `auto` falls back to rebuilding from BlueZ's properties
+when the socket cannot be opened, reading fails, or it is silent while BlueZ reports 30 advertisements; `on`
+refuses to start without it. The log names the source. Rebuilt advertisements have a different field order and
+`UUIDs` can include services learnt by connecting.
 
-The monitor needs `CAP_NET_RAW` (root has it) and a kernel with Bluetooth sockets, which any kernel that runs
-BlueZ has. `auto` falls back to BlueZ's properties when the socket cannot be opened, when reading it fails, and
-when it delivers nothing while BlueZ reports 30 advertisements. `on` refuses to start without the monitor, but
-still falls back on later failures. The log says which source is in use. Once the monitor has delivered an
-advertisement, the proxy stops receiving BlueZ's property signals for devices it is not connected to, which
-BlueZ sends for every advertisement it processes and which cost more CPU to decode than the advertisement
-itself. It follows only the devices it connects to, and receives every device's signals again after a
-fallback.
+While the monitor works, the proxy ignores BlueZ device signals except for connected devices, and with
+`--experimental` has `bluetoothd` stop reporting devices (unless the controller matches monitor patterns
+itself), to save CPU. A fallback undoes both.
 
-From then on, with `bluetoothd --experimental`, the proxy also has `bluetoothd` stop reporting devices at
-all, which spares `bluetoothd`, `dbus-daemon` and the proxy a D-Bus message and often a new `Device` object
-for every advertisement. Passive scanning registers a single advertisement monitor whose pattern matches no
-real advertisement. The kernel keeps scanning passively with the controller's duplicate filter off, and
-`bluetoothd`, which matches the patterns itself, drops every report. Active discovery gets an RSSI threshold
-of 20 dBm, which no advertisement reaches, so the kernel drops every result before `bluetoothd` sees it. The
-HCI monitor sees every report either way. Devices `bluetoothd` has no object for are connected with
-`ConnectDevice`, and bonded devices keep their objects. The real monitors and the plain discovery filter come
-back on a fallback. On controllers that match monitor patterns themselves (`SupportedFeatures` lists
-`controller-patterns`), `bluetoothd` keeps reporting devices, as a monitor that matches nothing would hide every
-advertisement from the HCI monitor too.
+As on an ESP32, a scannable device's advertisement is held for its scan response and sent with it as one entry
+(the response's RSSI), or alone after 200 ms or a new advertisement. Entries are capped at 62 bytes (whole AD
+structures; first fragment of extended advertisements). Anonymous advertisements and reports without RSSI are
+skipped.
 
-The proxy reads only the
-`-adapter` controller (`hciN` is controller index N), and a socket filter in the kernel passes it only
-advertising reports, so connection traffic does not wake it up.
-
-The proxy forwards reports the way an ESP32 proxy does. During active scanning, an ESP32 holds the
-advertisement of a scannable device until the scan response arrives, then sends both as one entry with the data
-concatenated and the response's RSSI. The proxy does the same, but sends a held advertisement alone if no
-response follows within 200 ms or the device advertises again first. Other advertisements go out at once. An
-entry carries at most 62 bytes. Longer extended advertisements keep the AD structures that fit, and the proxy
-reads only their first fragment. It skips anonymous advertisements and reports without RSSI. It reports
-address types as public or random, and for a private address the controller resolved, the identity address's
-type.
-
-The controller decides how many advertisements reach the monitor. For active discovery the kernel turns the
-controller's duplicate filter on, so it may report a device about once per scan (controllers differ in what
-counts as a duplicate). The kernel turns the filter off while an advertisement monitor is registered. So with
-the HCI monitor in use, the proxy also registers its advertisement monitors during active scanning, when
-`bluetoothd` has the monitor API (`--experimental`, see [Scanning](#scanning)), and asks BlueZ for discovery
-without `DuplicateData`, which it no longer needs. Passive scanning has no scan responses either way.
-
-Unlike `bluetoothd`, the monitor does not resolve private addresses. A bonded device that uses resolvable
-private addresses shows up under its current random address, not its identity address, unless the controller
-resolves it.
+With active discovery the controller's duplicate filter may report a device about once per scan. With the HCI
+monitor the proxy also registers advertisement monitors during active scanning (needs `--experimental`), which
+turns the filter off. The monitor does not resolve private addresses: a bonded device using them shows under its
+current random address unless the controller resolves it.
 
 ### Advertisement filter
 
-To cut API traffic, the proxy can forward only some advertisements. `-adv-allow` and `-adv-deny` take
-comma-separated entries: an address (`AA:BB:CC:DD:EE:FF`), an OUI (`58:2B:DB`) or another prefix with a
-trailing `*` (`58:2B:*`), a service UUID in the UUID lists or the service data (`uuid:fe95`, a 32-bit one,
-or the 36-character form), or the company id of manufacturer data (`mfr:0x004c` or `mfr:76`). Deny wins over
-allow, and an empty allow list allows everything. `-adv-deny-random` drops advertisements from private random
-addresses, resolvable and non-resolvable (random static addresses and addresses the controller resolved stay).
-That removes most phones, AirTags and similar trackers, and with them phone presence: iBeacons sent by a phone
-app and Home Assistant's Private BLE Device integration rely on such addresses.
+`-adv-allow` and `-adv-deny` take comma-separated entries: an address (`AA:BB:CC:DD:EE:FF`), an OUI
+(`58:2B:DB`) or prefix (`58:2B:*`), a service UUID in UUID lists or service data (`uuid:fe95`, 32-bit or
+36-character), or a manufacturer company id (`mfr:0x004c`, `mfr:76`). Deny wins; an empty allow list allows all.
+`-adv-deny-random` drops private random addresses (random static and controller-resolved stay): most phones and
+trackers, but also phone presence (iBeacon apps, Private BLE Device).
 
-The filter runs on the finished advertisement (with its scan response), before it is encoded, and allocates
-nothing. The scan watchdogs still see every advertisement. Connections are not filtered, but Home Assistant
-connects through the proxy that has heard the device, so a device that should connect through this proxy (a
-bonded one, for example) must not be filtered out. The filter shows in the log at start and in the
-configuration dump.
+Only forwarding is filtered, not scan watchdogs or connections. Home Assistant connects through a proxy that
+heard the device, so do not filter out devices that should connect through this one, such as bonded ones.
 
 ## Encryption
 
-Without a key the API is plaintext, like an ESPHome node without `api: encryption:`. With a key, the proxy
-accepts only encrypted clients: Noise_NNpsk0_25519_ChaChaPoly_SHA256 with the key as the pre-shared key, the
-protocol ESPHome uses. The key is the same kind as ESPHome's, 32 random bytes in base64, for example from
-`head -c 32 /dev/urandom | base64`. Give it in one of three ways:
+Without a key the API is plaintext. With one, only Noise (Noise_NNpsk0_25519_ChaChaPoly_SHA256, as ESPHome)
+clients are accepted. The key is 32 random bytes in base64 (`head -c 32 /dev/urandom | base64`):
 
-- `-encryption-key-file /etc/btproxy.key`: a file holding the key (surrounding whitespace is ignored). Keep it
-  readable by root only.
-- `-encryption-key <key>`: simplest, but any local user can read it with `ps`.
-- the environment variable `BTPROXY_ENCRYPTION_KEY`, used only when neither flag is set.
+- `-encryption-key-file /etc/btproxy.key`: preferred; make it root-readable only.
+- `-encryption-key <key>`: visible to local users in `ps`.
+- `$BTPROXY_ENCRYPTION_KEY`: used only when neither flag is set.
 
-Setting both flags, or a key that is not base64 of 32 bytes, stops the proxy at start.
-
-The init script and the systemd unit in [contrib](contrib) show how to pass the file. Home Assistant needs the
-same key. For a new proxy it asks during setup. For a proxy added earlier without encryption, the next
-connection fails with "requires encryption", and Home Assistant starts a reauthentication that asks for the key.
-
-The proxy answers clients the way ESPHome does. It refuses a client with another key with "Handshake MAC
-failure", which Home Assistant reports as a wrong key. A plaintext client gets the reply that makes Home
-Assistant report that encryption is required. Without a key, the proxy tells an encrypted client that the
-device uses plaintext.
-
-Home Assistant can also offer to set a key on a plaintext ESPHome device (`NoiseEncryptionSetKeyRequest`). The
-proxy refuses, because it does not store a key itself. It claims `api_encryption_supported` in its device info
-only when it already runs with a key.
+Both flags, or an invalid key, stop the proxy at start. See [contrib](contrib) for the init script and unit.
+Home Assistant asks for the key during setup, or on reauthentication for a proxy added without one. A wrong key
+shows as "Handshake MAC failure". The proxy refuses Home Assistant's offer to set a key, as it does not store
+one.
 
 ## Scanning
 
-`-scan-mode` is the configured mode Home Assistant reads back. Home Assistant can switch the mode at run time
-(its auto mode keeps a proxy passive and opens short active windows). The state reports carry the mode actually
-in use, which is active whenever passive scanning is unavailable. States: running, idle (no subscriber, or
-paused for a connect), failed (`bluetoothd` or the adapter is gone, scanning could not start, `bluetoothd` did
-not answer, or scanning stalled; retried every 10 s), stopped (the adapter is powered off and could not be powered on).
+Home Assistant can switch `-scan-mode` at run time. Reported states carry the mode in use (active when passive
+is unavailable): running, idle (no subscriber or paused for a connect), failed (retried every 10 s), stopped
+(adapter off and cannot be powered on).
 
-`bluetoothd` can hang while keeping its D-Bus name. With BlueZ 5.66 and an RTL8761B it hung several times a
-night: first a disconnect went unanswered, then everything else, `StartDiscovery` included. Every call the
-proxy makes that `bluetoothd` should answer at once gives up after 10 s, which counts as a failure, and so
-does a disconnect that is not answered within 30 s. GATT operations, connecting and pairing keep their own
-30 s limits. The proxy also reads one adapter property every minute as a health check, since advertisements
-from the HCI monitor keep arriving while `bluetoothd` hangs. In active mode a watchdog also stops and restarts
-discovery when no advertisement at all has arrived for `-stall-timeout` (3 minutes), reporting failed in
-between. It does not run in passive mode, where BlueZ reports a device only when its advertisement changes and
-long silences are normal.
+Passive scanning uses BlueZ advertisement monitors: BlueZ 5.56+, kernel 5.10+ and `bluetoothd --experimental`
+(`-E`); otherwise the proxy scans actively and retries passive after a `bluetoothd` restart. OpenWrt's
+`bluez-daemon` starts `bluetoothd -n`: change `/etc/init.d/bluetoothd` to
+`procd_set_param command "$PROG" -n -E` (also enables `ConnectDevice`) and list it in `/etc/sysupgrade.conf`;
+a package upgrade overwrites it.
 
-After two stalls or unanswered calls, each within 10 minutes of the one before (and, without the HCI monitor,
-no advertisement in between), the proxy runs the `-bluetoothd-restart` command (through `/bin/sh -c`, at most
-once every 10 minutes, killed after 30 s). The usual recovery after a `bluetoothd` restart then brings
-scanning back. The init script and the systemd unit in [contrib](contrib) set the command. Without the
-command, the proxy keeps retrying and reporting failed. Disconnects that take longer than 5 s are logged.
+Passive scanning has no scan responses. Without the HCI monitor it also:
 
-Active scanning is BlueZ discovery (`StartDiscovery`, LE only, duplicate data on). Passive scanning registers
-advertisement monitors (`AdvertisementMonitorManager1`), with which the kernel scans passively and BlueZ
-updates the devices that match. This API needs BlueZ 5.56 or later, a kernel with advertisement monitor
-support (5.10 or later), and `bluetoothd --experimental` (`-E`). Even current BlueZ registers the monitor
-manager only in experimental mode. OpenWrt's `bluez-daemon` init script starts `bluetoothd -n` without it, so
-there the proxy falls back to active scanning. To fix that, change the command in `/etc/init.d/bluetoothd` to
-`procd_set_param command "$PROG" -n -E` (which also enables `ConnectDevice`) and list the file in
-`/etc/sysupgrade.conf`. A `bluez-daemon` package upgrade overwrites the file. After `bluetoothd` restarts, the
-proxy tries passive scanning again.
+- sees only advertisements matching three monitors (BlueZ 5.66 overflows with over 7 patterns): common Flags,
+  common manufacturer ids (Apple, Microsoft, Samsung, Google, Ruuvi, Govee, SwitchBot) and common service data
+  (Xiaomi, BTHome, SwitchBot, environmental sensing, Google, Tile);
+- reports a device only when its content changes or RSSI moves 8 dB, so prefer active for presence.
 
-Passive scanning has limits that active scanning does not. The first two apply only to advertisements rebuilt
-from BlueZ's properties. The HCI monitor sees every advertisement in range that the controller reports, unless
-the controller filters monitor patterns itself (Microsoft's HCI extension, which some Intel and Realtek
-controllers have). How often it reports a device depends on the kernel's duplicate filter for passive scans,
-which 5.15 turns off while monitors are registered and 6.x leaves on.
+With the monitor it sees every report, unless the controller filters monitor patterns itself (Microsoft HCI
+extension on some Intel and Realtek). Kernel 5.15 turns the duplicate filter off for passive scans, 6.x does not.
 
-- BlueZ has no match-all monitor, and 5.66 overflows a buffer for monitors with more than 7 patterns, so the
-  proxy registers three: common Flags values, manufacturer data of common company ids (Apple, Microsoft,
-  Samsung, Google, Ruuvi, Govee, SwitchBot) and common 16-bit service data (Xiaomi, BTHome, SwitchBot,
-  environmental sensing, Google, Tile). Advertisements without Flags that match none of these are not seen.
-- Without discovery, BlueZ reports a device only when its advertisement content changes or its RSSI moves by
-  8 dB or more, so unchanged beacons arrive far less often and RSSI is coarse. Prefer active scanning for
-  presence detection.
-- No scan responses, so names and other scan-response data of active-only devices are missing.
+### Hangs and recovery
 
-Scanning pauses while the proxy connects, as an ESP32's does (`-scan-pause-on-connect`, on by default). From
-the connect call until the services are resolved or the connect fails, the proxy stops discovery and
-unregisters its advertisement monitors, the one that matches nothing included, and reports the scanner as
-idle; then it starts them again, which takes a few D-Bus calls. The kernel stops scanning to send LE Create
-Connection, but as soon as the link is up it scans again if a monitor is registered or discovery runs. With
-an RTL8761B, about half the connects failed that way: the controller went back to scanning right when the
-first connection events had to get through, and the link failed with HCI reason 0x3e (connection failed to
-be established). Overlapping connects share one pause, which ends after 60 s at the latest, and the stall
-watchdog does not count it. The pause cannot stop scanning the kernel does for its own reasons: while another
-connect still waits for its device (the kernel then scans with a 60 ms window every 60 ms), or for a bonded
-device `bluetoothd` reconnects to automatically. Pairing a connected device does not pause scanning, as on an
-ESP32.
+`bluetoothd` can hang while keeping its D-Bus name (BlueZ 5.66 with an RTL8761B: several times a night). The
+proxy detects it by: D-Bus calls timing out after 10 s (disconnects after 30 s; GATT, connect and pair have their
+own 30 s limits), a health-check property read every minute, and in active mode no advertisement for
+`-stall-timeout` (which restarts discovery).
 
-Some connects still fail that way, within about half a second (`bluetoothd` reports
-`le-connection-abort-by-local`, sometimes an error without a message). The proxy retries those after 200 ms,
-with scanning still paused, up to `-connect-retries` times (2 by default) before it reports the failure to
-Home Assistant. It does not retry a failure that took longer than 3 s (a timeout), any other error, or once
-the connect is withdrawn, and starts no retry more than 5 s after the first attempt. Each retry is logged at
-debug level, and a connect that needed one logs `connected after retries` at info.
+After two stalls or timeouts, each within 10 minutes of the previous (and, without the HCI monitor, no
+advertisement in between), it runs `-bluetoothd-restart` via `/bin/sh -c` (at most every 10 minutes, killed
+after 30 s); the contrib scripts set it. Without it the proxy keeps retrying and reporting failed. After a
+restart, adapter loss or power-off, it reports connections dropped, powers the adapter on, resumes scanning and
+registers the agent again.
 
-The Windows backend pauses scanning and retries connects too, with its own rules for which failures count as
-radio ones (see [Windows](#windows)).
+### Scan pause and connect retries
+
+With `-scan-pause-on-connect`, from the connect call until services are resolved or it fails, the proxy stops
+scanning and reports idle. Otherwise the kernel resumes scanning once the link is up; with an RTL8761B about
+half the connects then failed with HCI reason 0x3e. Overlapping connects share one pause, capped at 60 s. It
+cannot stop scanning the kernel does for another pending connect or a `bluetoothd` auto-reconnect. Pairing does
+not pause scanning. Windows pauses the same way.
+
+Connects that still fail within about half a second (`le-connection-abort-by-local`, or an error without
+message) are retried after 200 ms, still paused, up to `-connect-retries` times. Not retried: failures after
+3 s, other errors, withdrawn connects, and retries more than 5 s after the first attempt. A retried connect logs
+`connected after retries`.
 
 ## Connection parameters
 
-Home Assistant integrations can ask for other connection parameters on a connected device (aioesphomeapi's
-`bluetooth_device_set_connection_params`, `set_connection_params` in bleak-esphome), for example a shorter
-interval during a transfer or a longer one to save the peripheral's battery. BlueZ has no D-Bus call for
-this. Its management interface has one (`Load Connection Parameters`), but that only applies to later
-connections and replaces the list `bluetoothd` keeps there. So the proxy sends the HCI LE Connection Update
-command itself on a raw HCI socket, as `hcitool lecup` does: it looks up the connection handle with the
-`HCIGETCONNINFO` ioctl, sends the command and answers once the controller's Command Status arrives, as an
-ESP32 does after `esp_ble_gap_update_conn_params`. The completion event, with the parameters the peripheral
-accepted, comes some connection events later and is only logged. The kernel keeps owning the connection and
-processes the controller's events as if it had sent the command.
+Integrations can request other parameters on a live connection (aioesphomeapi
+`bluetooth_device_set_connection_params`).
 
-Sending HCI commands on a raw socket needs `CAP_NET_RAW` (the init script and the systemd unit run the proxy
-as root). Without it, or when the controller refuses the parameters, Home Assistant gets error 0x85; a device
-that is not connected through the proxy gets -1, like on an ESP32. The feature is advertised regardless, since
-whether the command will be allowed is only known when it is sent.
-
-On Windows, apps cannot send the command either. Windows 11 (build 22000 and later) takes a preset instead,
-through `BluetoothLEDevice.RequestPreferredConnectionParameters`: ThroughputOptimized, Balanced or
-PowerOptimized. Build 26300 reports them as intervals of 15 ms, 30 to 60 ms and 90 to 180 ms, latency 0 and
-supervision timeouts of 2, 4 and 6 s. The proxy picks the preset whose interval range overlaps the requested one,
-or else is nearest to it on a log scale, so ESPHome's fast request (7.5 to 11.25 ms) gets ThroughputOptimized
-and a slow one PowerOptimized; latency and timeout come with the preset. The request stays in effect until the
-next one or the disconnect, and Windows weighs it against other apps' requests for the same device. The answer
-comes once Windows accepted the request; the debug log shows the preset and the parameters in use at that
-moment. The proxy looks the presets up at start and advertises the feature only when they exist, so not on
-Windows 10.
+- Linux: the proxy sends HCI LE Connection Update on a raw socket (like `hcitool lecup`) and answers on Command
+  Status. Needs `CAP_NET_RAW`; without it, or if the controller refuses, Home Assistant gets error 0x85, and a
+  device not connected through the proxy gets -1.
+- Windows 11 (build 22000+): one of three presets, reported by build 26300 as ThroughputOptimized 15 ms,
+  Balanced 30 to 60 ms, PowerOptimized 90 to 180 ms (latency 0, timeouts 2, 4, 6 s). The proxy picks the preset
+  overlapping the request, else the nearest on a log scale. It holds until the next request or disconnect, and
+  Windows weighs it against other apps. Not offered on Windows 10.
 
 ## Notes
 
-- Without the HCI monitor (see [Advertisements](#advertisements)): BlueZ exposes advertisements only in parsed
-  form (name, manufacturer data, service data, UUIDs, flags, TX power), so the raw AD structures are rebuilt
-  from those and capped at 62 bytes. Field order differs from the air, which does not matter because Home
-  Assistant parses the fields. `UUIDs` can include services BlueZ learnt
-  by connecting.
-- Attribute handles come from BlueZ's object paths (`service000a/char000b/desc000d`). BlueZ names a
-  characteristic after its declaration handle; the proxy reports the value handle after it (`0x000c` here), as an
-  ESP32 does, because Home Assistant shares one GATT cache per device between proxies.
-- BlueZ owns the CCCD descriptors, so a write to one turns notifications on or off with
-  `StartNotify`/`StopNotify` instead.
-- Connecting does not depend on the proxy's scan: for `Device1.Connect` and `ConnectDevice` the kernel scans
-  for the device itself, so connections work in passive mode too, and with the scan paused (see
-  [Scanning](#scanning)).
-- There is no idle timeout on API clients: Home Assistant does not ping while advertisements flow, so dead peers
-  are found with TCP keepalive (30 s idle, then 3 probes 10 s apart).
-- Each API client has its own send queue (256 messages) and writer, so a client that stops reading never holds
-  up Bluetooth events or other clients. Advertisement batches and log lines are dropped for a client once half
-  its queue is waiting; anything else (GATT responses, notifications, connection changes) that finds the queue
-  full closes the client, as ESPHome drops a client that cannot keep up, since the stream would no longer be
-  consistent. A write that takes over 10 s closes the client too.
+- Characteristic handles are reported as value handles, as on an ESP32, so Home Assistant's GATT cache works
+  across proxies.
+- CCCD writes turn notifications on and off through BlueZ or Windows; cache clearing keeps bonds.
+- Connecting does not depend on the proxy's scan, so it works in passive mode and during the pause.
+- Dead API clients are found with TCP keepalive (30 s idle, 3 probes 10 s apart); there is no idle timeout.
+- Each client has a 256-message send queue. Advertisements and log lines are dropped once it is half full;
+  anything else finding it full closes the client, as does a write over 10 s.
 
 ## Logs
 
-btproxy logs to stderr (`-debug` for debug lines), which OpenWrt's procd and systemd pass to the system log.
-On Windows without a console it logs to a file instead (see [Windows](#windows)).
-Every line also goes to API clients that subscribe to logs, at the level each one asks for, even below
-`-debug`'s threshold: a client subscribed at DEBUG gets debug lines while stderr stays at info. Lines are
-formatted like ESPHome's logger, `[I][server:269]: connected addr=AA:BB:CC:DD:EE:01 mtu=247`, in its ANSI
-colours, with the Go file and line in place of the component tag; levels map error, warn, info and debug to
-ESPHome's ERROR, WARN, INFO and DEBUG. Home Assistant subscribes at the level its ESPHome integration logs at
-and writes the lines to its own log.
-
-A subscription with `dump_config` gets one CONFIG line with the proxy's settings (name, versions, MAC, backend,
-adapter, scan mode, connections in use). Logging never waits for a client: lines wait in a queue of 64 per
-subscriber, then in the client's send queue, and when a slow client lets those fill up, further lines are
-dropped for that client and it gets a warning with the count once it catches up.
+Logs go to stderr (`-debug` for debug lines), or a file on Windows without a console. API clients that subscribe
+get every line at the level they ask for, even below `-debug`, formatted like ESPHome's logger with the Go file
+and line as tag: `[I][server:269]: connected addr=AA:BB:CC:DD:EE:01 mtu=247`. `dump_config` adds one CONFIG
+line with the settings. A slow client misses lines and then gets a warning with the count.
 
 ## Sensors
 
-The proxy lists its statistics as ESPHome sensors, which Home Assistant shows as diagnostic entities of the
-device. States are sent when Home Assistant subscribes, every 60 s, and when a connection is made, ends or
-fails. Counters start at zero when the proxy starts.
+Diagnostic entities, sent on subscribe, every 60 s and on each connection made, ended or failed. Counters reset
+at start. Entity keys are hashes of the object ids, stable across versions.
 
 | Object id | Unit | What |
 |---|---|---|
@@ -625,63 +365,48 @@ fails. Counters start at zero when the proxy starts.
 | `bluetoothd_restarts` | | restarts by the watchdog (`-bluetoothd-restart`); bluez backend only |
 | `memory` | MiB | resident memory, from `/proc/self/statm`; Linux only |
 
-Entity keys are hashes of the object ids, as ESPHome makes them, so they stay the same across versions.
-
 ## Deploy
 
-OpenWrt (23.05): `opkg install kmod-bluetooth bluez-daemon` plus the firmware for the stick (for example
-`rtl8761bu-firmware`), copy the build for the router's architecture (`dist/btproxy-mipsle` for MT7620/MT7621) to
-`/usr/bin/btproxy`, and [contrib/openwrt/btproxy.init](contrib/openwrt/btproxy.init) to `/etc/init.d/btproxy`.
-For an encrypted API, put the key in `/etc/btproxy.key` (`chmod 600`); the init script passes it when the file
-exists. OpenWrt keeps BlueZ's state in `/var/lib/bluetooth` on tmpfs; link it to a directory on flash (for
-example `/etc/bluetooth/keys`) so bonds survive a reboot, and list `/usr/bin/btproxy`, `/etc/init.d/btproxy`,
-that directory and the key file in `/etc/sysupgrade.conf`.
+OpenWrt 23.05:
 
-The init script passes `-config /etc/btproxy.json`; to edit settings on the [settings page](#settings-page),
-set `UI` in `/etc/init.d/btproxy` (for example `UI=:8080`), put a password in `/etc/btproxy.uipass`
-(`chmod 600`), and set `NAME`, `FRIENDLY_NAME` and `AREA` to `""` for those to be editable rather than locked.
-Then `/etc/init.d/btproxy restart`, and add `/etc/btproxy.json` and `/etc/btproxy.uipass` to
-`/etc/sysupgrade.conf`. An older copy of the init script, without `-config`, makes the page read-only.
+- `opkg install kmod-bluetooth bluez-daemon` and the stick's firmware (such as `rtl8761bu-firmware`).
+- Copy the build (`dist/btproxy-mipsle` for MT7620/MT7621) to `/usr/bin/btproxy` and
+  [contrib/openwrt/btproxy.init](contrib/openwrt/btproxy.init) to `/etc/init.d/btproxy`.
+- Encryption: key in `/etc/btproxy.key` (`chmod 600`); the init script passes it when present.
+- `/var/lib/bluetooth` is on tmpfs: link it to flash (such as `/etc/bluetooth/keys`) so bonds survive a reboot.
+- Settings page: the init script passes `-config /etc/btproxy.json`. Set `UI` in it (such as `UI=:8080`), put a
+  password in `/etc/btproxy.uipass` (`chmod 600`), set `NAME`, `FRIENDLY_NAME` and `AREA` to `""` to make them
+  editable, then `/etc/init.d/btproxy restart`. An older init script without `-config` makes the page read-only.
+- List the binary, init script, bonds directory, key, `/etc/btproxy.json` and `/etc/btproxy.uipass` in
+  `/etc/sysupgrade.conf`.
 
 systemd (Raspberry Pi OS, Debian): copy the binary to `/usr/local/bin/btproxy` and
 [contrib/systemd/btproxy.service](contrib/systemd/btproxy.service) to `/etc/systemd/system/`, then
-`systemctl enable --now btproxy`. The unit wants `bluetooth.service` rather than requiring it, so a
-`bluetoothd` restart leaves the proxy running and it recovers by itself. For an encrypted API, put the key in
-`/etc/btproxy.key` (`chmod 600`) and swap `ExecStart` for the two commented lines in the unit, which hand it to
-the proxy as a systemd credential.
+`systemctl enable --now btproxy`. The unit wants `bluetooth.service` without requiring it, so the proxy survives
+a `bluetoothd` restart. For encryption, put the key in `/etc/btproxy.key` (`chmod 600`) and use the two
+commented `ExecStart` lines, which pass it as a systemd credential.
 
-Windows: copy the `-H windowsgui` build somewhere that stays put (for example `C:\Users\<you>\bin`), start it
-once, allow it through Windows Firewall (an inbound rule for the program, or TCP 6053 and UDP 5353), and tick
-Start with Windows in the tray menu. Settings go in `%LOCALAPPDATA%\btproxy\config.json` or on the settings
-page (see [Windows](#windows)).
+Windows: put the `-H windowsgui` build somewhere permanent, start it, allow it through the firewall (program
+rule, or TCP 6053 and UDP 5353), tick Start with Windows in the tray, and configure on the settings page.
 
 ### Bonded devices
 
-Devices that need an encrypted link (a Tion breezer, for example) must be bonded with the proxy's adapter.
-Home Assistant can pair a connected device through the proxy (an integration asks for it, or the ESPHome
-`bluetooth_device_pair` call): the proxy calls BlueZ's `Device1.Pair`, and a device that is already paired is
-reported as paired without pairing again. The proxy never pairs on its own, so existing bonds are left alone.
+Devices that need an encrypted link (such as a Tion breezer) must be bonded with the proxy's adapter. Home
+Assistant can pair a connected device through the proxy (`bluetooth_device_pair`); an already paired device is
+reported paired. The proxy never pairs on its own.
 
-At start the proxy registers a BlueZ agent with the NoInputNoOutput capability and asks to be the default agent.
-It confirms "Just Works" pairing and service authorization only for devices connected through the proxy, and
-refuses PIN and passkey entry, so devices that need a code cannot be paired this way. If another program holds
-the default agent, the proxy keeps its own registered for the pairings it starts and logs a warning. `-agent=false`
-skips the agent; BlueZ then still pairs devices that need no confirmation.
+On Linux the proxy registers a NoInputNoOutput agent and asks to be the default. It confirms Just Works pairing
+and service authorization only for devices connected through it and refuses PIN and passkey entry. If another
+program is the default agent, the proxy uses its own for the pairings it starts and logs a warning.
+`-agent=false` skips it; BlueZ still pairs devices that need no confirmation. Unpairing calls
+`Adapter1.RemoveDevice`, which also drops the connection and cached services; unpairing an unknown device
+succeeds.
 
-Unpairing calls `Adapter1.RemoveDevice`, because BlueZ has no call that removes only the bond: it also forgets
-the device's cached services and drops its connection, which the proxy reports to Home Assistant after the
-unpairing reply. The device shows up again with its next advertisement. Unpairing a device BlueZ does not
-know succeeds, since there is no bond to remove.
-
-Alternatively, pair once with `bluetoothctl`, or move an existing bond: stop `bluetoothd` on both machines, copy
-`/var/lib/bluetooth/<adapter MAC>/<device MAC>/` (`info` and `attributes`) into the new adapter's directory,
-then start `bluetoothd`. Copy only while `bluetoothd` is stopped, because it rewrites `info` from memory when it
-exits. A bond belongs to one adapter's Bluetooth address, so it can be moved only to an adapter with the same
-address, such as the same stick in another machine.
-
-On Windows the proxy pairs through Windows itself: the same pair request from Home Assistant works, and Windows
-keeps the bond. The Tion breezer here was bonded with the router's stick and the desktop's adapter at the same
-time, each paired while the breezer was in pairing mode.
+To pair outside Home Assistant, use `bluetoothctl`, or move a bond: stop `bluetoothd` on both machines (it
+rewrites `info` on exit), copy `/var/lib/bluetooth/<adapter MAC>/<device MAC>/` to the new adapter's directory,
+start `bluetoothd`. Bonds belong to an adapter address, so this only works for the same adapter (such as the same
+stick in another machine). A device can be bonded to several adapters: the Tion here is bonded to the router's
+stick and the Windows adapter, each paired while in pairing mode.
 
 ## Test
 
@@ -694,6 +419,7 @@ python -m venv .venv && .venv/bin/pip install aioesphomeapi
 .venv/bin/python test/e2e.py 127.0.0.1 16053 "$(cat k)"
 ```
 
-To profile on the target, build with `-tags pprof` (and without `-s -w`, so the profile has symbols). The proxy
-then serves Go's profiler on `127.0.0.1:6060`; reach it over an SSH tunnel and run
-`go tool pprof -seconds 120 http://127.0.0.1:16060/debug/pprof/profile` with the unstripped binary.
+Profiling: build with `-tags pprof` and without `-s -w`. The proxy serves Go's profiler on `127.0.0.1:6060`;
+reach it over an SSH tunnel (`ssh -L 16060:127.0.0.1:6060 root@router`) and run
+`go tool pprof -seconds 120 http://127.0.0.1:16060/debug/pprof/profile`
+with the unstripped binary.
