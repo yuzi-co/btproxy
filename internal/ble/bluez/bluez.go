@@ -50,6 +50,7 @@ type Adapter struct {
 	conns   map[dbus.ObjectPath]*conn
 
 	scanState // see watch.go
+	rawState  // see raw.go
 }
 
 // Options configures the scanner's watchdog (see watch.go).
@@ -59,6 +60,8 @@ type Options struct {
 	// RestartCmd is a shell command that restarts bluetoothd when scanning stalls or bluetoothd stops
 	// answering repeatedly; empty disables it.
 	RestartCmd string
+	// RawAdverts selects where advertisements come from (see raw.go).
+	RawAdverts RawMode
 }
 
 // device caches the Device1 properties an advertisement is rebuilt from.
@@ -118,6 +121,9 @@ func Open(name string, opt Options) (*Adapter, error) {
 	}
 	a.mu.Unlock()
 	if err := a.initScan(); err != nil {
+		return nil, err
+	}
+	if err := a.initRaw(name, opt.RawAdverts); err != nil {
 		return nil, err
 	}
 	go a.dispatch(signals)

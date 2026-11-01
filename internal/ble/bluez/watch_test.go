@@ -37,6 +37,7 @@ type fakeBlueZ struct {
 	registered  int           // monitors BlueZ accepted (read through GetManagedObjects)
 	starts      int           // StartDiscovery calls
 	stops       int           // StopDiscovery calls
+	dupData     bool          // DuplicateData of the last discovery filter
 	wedge       chan struct{} // while set, StartDiscovery waits for it to close, as a wedged bluetoothd does
 }
 
@@ -139,7 +140,12 @@ func (p fakeProps) Set(iface, name string, v dbus.Variant) *dbus.Error {
 
 type fakeAdapterIf struct{ f *fakeBlueZ }
 
-func (fakeAdapterIf) SetDiscoveryFilter(map[string]dbus.Variant) *dbus.Error { return nil }
+func (a fakeAdapterIf) SetDiscoveryFilter(f map[string]dbus.Variant) *dbus.Error {
+	a.f.mu.Lock()
+	a.f.dupData = f["DuplicateData"].Value() == true
+	a.f.mu.Unlock()
+	return nil
+}
 
 func (a fakeAdapterIf) StartDiscovery() *dbus.Error {
 	a.f.mu.Lock()

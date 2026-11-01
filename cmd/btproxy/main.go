@@ -35,6 +35,7 @@ var (
 	useAgent          bool
 	stallTimeout      time.Duration
 	bluetoothdRestart string
+	rawAdverts        string
 )
 
 func main() {
@@ -56,6 +57,8 @@ func main() {
 		"restart active scanning after this long without advertisements, 0 to disable (bluez backend)")
 	flag.StringVar(&bluetoothdRestart, "bluetoothd-restart", "",
 		"shell command that restarts bluetoothd when scanning keeps stalling or it stops answering (bluez backend)")
+	flag.StringVar(&rawAdverts, "raw-adverts", "auto",
+		"read advertisements from the HCI monitor: auto, on or off (bluez backend; needs CAP_NET_RAW)")
 	flag.Parse()
 
 	level := slog.LevelInfo
