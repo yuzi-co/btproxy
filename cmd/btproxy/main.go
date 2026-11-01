@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"btproxy/internal/api"
 	"btproxy/internal/ble"
@@ -29,8 +30,12 @@ var backends = map[string]func(adapter string) (ble.Adapter, error){
 	"fake": func(string) (ble.Adapter, error) { return &fake.Adapter{}, nil },
 }
 
-// useAgent is the -agent flag, read by the bluez backend.
-var useAgent bool
+// Flags read by the bluez backend.
+var (
+	useAgent          bool
+	stallTimeout      time.Duration
+	bluetoothdRestart string
+)
 
 func main() {
 	host, _ := os.Hostname()
@@ -47,6 +52,10 @@ func main() {
 	mdnsIface := flag.String("mdns-iface", "", "comma-separated interfaces to advertise on (default: all with IPv4)")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.BoolVar(&useAgent, "agent", true, "register a BlueZ pairing agent (bluez backend)")
+	flag.DurationVar(&stallTimeout, "stall-timeout", 3*time.Minute,
+		"restart active scanning after this long without advertisements, 0 to disable (bluez backend)")
+	flag.StringVar(&bluetoothdRestart, "bluetoothd-restart", "",
+		"shell command that restarts bluetoothd when scanning keeps stalling or it stops answering (bluez backend)")
 	flag.Parse()
 
 	level := slog.LevelInfo

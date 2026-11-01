@@ -146,7 +146,7 @@ func (a *Adapter) registerMonitors() error {
 	a.mu.Lock()
 	a.monitorUp = true
 	a.mu.Unlock()
-	err := a.obj(a.path).Call(ifMonitorManager+".RegisterMonitor", 0, monitorRoot).Err
+	err := a.call(a.path, ifMonitorManager+".RegisterMonitor", monitorRoot).Err
 	if err != nil {
 		a.mu.Lock()
 		a.monitorUp = false
@@ -159,7 +159,7 @@ func (a *Adapter) unregisterMonitors() {
 	a.mu.Lock()
 	a.monitorUp = false // the Release calls that follow are ours
 	a.mu.Unlock()
-	a.obj(a.path).Call(ifMonitorManager+".UnregisterMonitor", 0, monitorRoot)
+	a.call(a.path, ifMonitorManager+".UnregisterMonitor", monitorRoot)
 }
 
 // monitorReleased handles BlueZ dropping a monitor it had accepted, for example because the kernel refused

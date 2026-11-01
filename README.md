@@ -19,7 +19,8 @@ client library).
   [Scanning](#scanning)).
 - Recovery without a restart when `bluetoothd` restarts, the adapter disappears and returns, or it is powered
   off: connections are reported dropped, then the adapter is powered on, scanning resumes and, after a
-  `bluetoothd` restart, the pairing agent is registered again.
+  `bluetoothd` restart, the pairing agent is registered again. A `bluetoothd` that hangs is detected too (see
+  [Scanning](#scanning)) and, if `-bluetoothd-restart` is set, restarted.
 - Not supported: connection parameter changes, API encryption (Noise), IPv6 mDNS.
 
 ## Build
@@ -46,7 +47,9 @@ Flags: `-name`, `-friendly-name`, `-area`, `-listen` (`:6053`), `-adapter` (`hci
 `-mac` (unique id reported to HA; default: the first network interface's MAC), `-mdns` (`true`), `-mdns-iface`
 (comma-separated interfaces to advertise on; default: all up interfaces with IPv4), `-backend` (`bluez` or
 `fake`), `-agent` (`true`: register a BlueZ pairing agent), `-scan-mode` (`active` or `passive`; default
-`active`, like ESPHome), `-debug`.
+`active`, like ESPHome), `-stall-timeout` (`3m`: restart active scanning after this long without
+advertisements; `0` disables), `-bluetoothd-restart` (shell command that restarts `bluetoothd` when it hangs,
+for example `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"`; default: none), `-debug`.
 
 Home Assistant discovers the proxy over mDNS and offers it under Settings, Devices & services. Without mDNS
 (`-mdns=false`, or a network that does not pass multicast), add it by hand: Add integration, ESPHome, host and
@@ -81,8 +84,19 @@ unicast packet to port 5353 reaches only one of them, which only matters for que
 `-scan-mode` is the configured mode Home Assistant reads back. Home Assistant can switch the mode at run time
 (its auto mode keeps a proxy passive and opens short active windows); the state reports carry the mode really
 in use, which is active whenever passive scanning is unavailable. States: running, idle (no subscriber), failed
-(`bluetoothd` or the adapter is gone, or scanning could not start; retried every 10 s), stopped (the adapter is
-powered off and could not be powered on).
+(`bluetoothd` or the adapter is gone, scanning could not start, `bluetoothd` did not answer, or scanning
+stalled; retried every 10 s), stopped (the adapter is powered off and could not be powered on).
+
+`bluetoothd` can hang while keeping its D-Bus name (seen with BlueZ 5.66 and an RTL8761B: `StartDiscovery`
+never replied). Every call the proxy makes to it that should be answered at once gives up after 10 s, which
+counts as a failure; GATT operations, connecting and pairing keep their own 30 s limits. In active mode a
+watchdog also stops and restarts discovery when no advertisement at all has arrived for `-stall-timeout`
+(3 minutes), reporting failed in between. It does not run in passive mode, where BlueZ reports a device only
+when its advertisement changes and long silences are normal. After two stalls or unanswered calls in a row,
+with no advertisement in between, the proxy runs the `-bluetoothd-restart` command (through `/bin/sh -c`, at
+most once every 10 minutes, killed after 30 s); the recovery from the restart then brings scanning back. The
+init script and the systemd unit in [contrib](contrib) set it. Without the command, the proxy keeps retrying
+and reporting failed.
 
 Active scanning is BlueZ discovery (`StartDiscovery`, LE only, duplicate data on). Passive scanning registers
 advertisement monitors (`AdvertisementMonitorManager1`), with which the kernel scans passively and BlueZ
@@ -132,7 +146,8 @@ directory in `/etc/sysupgrade.conf`.
 
 systemd (Raspberry Pi OS, Debian): copy the binary to `/usr/local/bin/btproxy` and
 [contrib/systemd/btproxy.service](contrib/systemd/btproxy.service) to `/etc/systemd/system/`, then
-`systemctl enable --now btproxy`.
+`systemctl enable --now btproxy`. The unit wants `bluetooth.service` rather than requiring it, so a
+`bluetoothd` restart leaves the proxy running and it recovers by itself.
 
 ### Bonded devices
 

@@ -35,6 +35,10 @@ const (
 	readEchoWindow  = 2 * time.Second // how long a read result may take to show up as a Value change
 )
 
+// callTimeout bounds every call that bluetoothd answers at once (see Adapter.call). Variables, so the tests
+// can shorten them.
+var callTimeout = 10 * time.Second
+
 type Adapter struct {
 	bus  *dbus.Conn
 	path dbus.ObjectPath
@@ -46,6 +50,15 @@ type Adapter struct {
 	conns   map[dbus.ObjectPath]*conn
 
 	scanState // see watch.go
+}
+
+// Options configures the scanner's watchdog (see watch.go).
+type Options struct {
+	// StallTimeout restarts active discovery when it delivers no advertisement for this long; 0 disables it.
+	StallTimeout time.Duration
+	// RestartCmd is a shell command that restarts bluetoothd when scanning stalls or bluetoothd stops
+	// answering repeatedly; empty disables it.
+	RestartCmd string
 }
 
 // device caches the Device1 properties an advertisement is rebuilt from.
@@ -62,7 +75,7 @@ type device struct {
 }
 
 // Open connects to the system bus and the named adapter (hci0).
-func Open(name string) (*Adapter, error) {
+func Open(name string, opt Options) (*Adapter, error) {
 	bus, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("system bus: %w", err)
@@ -71,14 +84,15 @@ func Open(name string) (*Adapter, error) {
 		bus: bus, path: dbus.ObjectPath("/org/bluez/" + name),
 		devices: map[dbus.ObjectPath]*device{}, conns: map[dbus.ObjectPath]*conn{},
 	}
-	v, err := a.obj(a.path).GetProperty(ifAdapter + ".Address")
+	a.stallTimeout, a.restartCmd = opt.StallTimeout, opt.RestartCmd
+	v, err := a.getProperty(a.path, ifAdapter+".Address")
 	if err != nil {
 		return nil, fmt.Errorf("adapter %s: %w", name, err)
 	}
 	if a.mac, err = ble.ParseMAC(v.Value().(string)); err != nil {
 		return nil, err
 	}
-	if err := a.obj(a.path).SetProperty(ifAdapter+".Powered", dbus.MakeVariant(true)); err != nil {
+	if err := a.setProperty(a.path, ifAdapter+".Powered", true); err != nil {
 		return nil, fmt.Errorf("power on %s: %w", name, err)
 	}
 
@@ -112,20 +126,51 @@ func Open(name string) (*Adapter, error) {
 
 func (a *Adapter) obj(p dbus.ObjectPath) dbus.BusObject { return a.bus.Object(busName, p) }
 
+// call makes a method call that bluetoothd answers at once, giving up after callTimeout. A wedged bluetoothd
+// keeps its bus name but never replies, and without a timeout the caller would wait for good. Calls that
+// take long by design (connecting, pairing, GATT operations) have their own contexts instead.
+func (a *Adapter) call(p dbus.ObjectPath, method string, args ...any) *dbus.Call {
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
+	c := a.obj(p).CallWithContext(ctx, method, 0, args...)
+	if errors.Is(c.Err, context.DeadlineExceeded) {
+		c.Err = fmt.Errorf("%s: no reply from bluetoothd in %v: %w", method[strings.LastIndex(method, ".")+1:],
+			callTimeout, c.Err)
+	}
+	return c
+}
+
+// isTimeout tells whether a call failed because bluetoothd did not answer.
+func isTimeout(err error) bool { return errors.Is(err, context.DeadlineExceeded) }
+
+// getProperty and setProperty are BusObject.GetProperty and SetProperty with call's timeout; prop is
+// "interface.Name".
+func (a *Adapter) getProperty(p dbus.ObjectPath, prop string) (dbus.Variant, error) {
+	i := strings.LastIndex(prop, ".")
+	var v dbus.Variant
+	err := a.call(p, ifProps+".Get", prop[:i], prop[i+1:]).Store(&v)
+	return v, err
+}
+
+func (a *Adapter) setProperty(p dbus.ObjectPath, prop string, v any) error {
+	i := strings.LastIndex(prop, ".")
+	return a.call(p, ifProps+".Set", prop[:i], prop[i+1:], dbus.MakeVariant(v)).Err
+}
+
 func (a *Adapter) underAdapter(p dbus.ObjectPath) bool {
 	return strings.HasPrefix(string(p), string(a.path)+"/")
 }
 
 func (a *Adapter) managedObjects() (map[dbus.ObjectPath]map[string]map[string]dbus.Variant, error) {
 	var objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant
-	err := a.bus.Object(busName, "/").Call(ifObjManager+".GetManagedObjects", 0).Store(&objs)
+	err := a.call("/", ifObjManager+".GetManagedObjects").Store(&objs)
 	return objs, err
 }
 
 func (a *Adapter) MAC() uint64 { return a.mac }
 
 func (a *Adapter) startDiscovery() error {
-	err := a.obj(a.path).Call(ifAdapter+".StartDiscovery", 0).Err
+	err := a.call(a.path, ifAdapter+".StartDiscovery").Err
 	var de dbus.Error
 	if errors.As(err, &de) && de.Name == "org.bluez.Error.InProgress" {
 		return nil
@@ -150,11 +195,11 @@ func (a *Adapter) ClearCache(addr uint64) error {
 		return errors.New("device is connected")
 	}
 	for _, prop := range []string{"Paired", "Bonded"} {
-		if v, err := a.obj(p).GetProperty(ifDevice + "." + prop); err == nil && v.Value() == true {
+		if v, err := a.getProperty(p, ifDevice+"."+prop); err == nil && v.Value() == true {
 			return nil
 		}
 	}
-	err := a.obj(a.path).Call(ifAdapter+".RemoveDevice", 0, p).Err
+	err := a.call(a.path, ifAdapter+".RemoveDevice", p).Err
 	var de dbus.Error
 	if errors.As(err, &de) && de.Name == "org.bluez.Error.DoesNotExist" {
 		return nil
@@ -289,8 +334,8 @@ func (a *Adapter) updateDevice(p dbus.ObjectPath, props map[string]dbus.Variant,
 			fresh = true
 		}
 	}
-	if emit && fresh && a.scanFn != nil && d.rssi != 0 && d.addr != 0 {
-		a.scanFn(ble.Advert{Addr: d.addr, AddrType: d.addrType, RSSI: int8(d.rssi), Data: d.adData()})
+	if emit && fresh {
+		a.emit(d)
 	}
 }
 
@@ -372,7 +417,7 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		a.mu.Lock()
 		delete(a.conns, p)
 		a.mu.Unlock()
-		a.obj(p).Call(ifDevice+".Disconnect", 0)
+		a.call(p, ifDevice+".Disconnect")
 		return nil, err
 	}
 
@@ -394,7 +439,7 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		return fail(fmt.Errorf("connect: %w", err))
 	}
 
-	v, err := a.obj(p).GetProperty(ifDevice + ".ServicesResolved")
+	v, err := a.getProperty(p, ifDevice+".ServicesResolved")
 	if err == nil && v.Value() == true {
 		c.markResolved()
 	}

@@ -6,8 +6,10 @@ import (
 	"bufio"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +17,12 @@ import (
 
 	"btproxy/internal/ble"
 )
+
+func init() {
+	// Before any adapter exists: the supervisors of earlier tests keep running and read these.
+	scanRetry = 50 * time.Millisecond
+	callTimeout = 300 * time.Millisecond
+}
 
 // fakeBlueZ is a minimal org.bluez on a private bus: one adapter, discovery and, if monitors is set, the
 // advertisement monitor manager. Each instance is one bluetoothd run; closing it is bluetoothd exiting.
@@ -26,7 +34,10 @@ type fakeBlueZ struct {
 	mu          sync.Mutex
 	powered     bool
 	discovering bool
-	registered  int // monitors BlueZ accepted (read through GetManagedObjects)
+	registered  int           // monitors BlueZ accepted (read through GetManagedObjects)
+	starts      int           // StartDiscovery calls
+	stops       int           // StopDiscovery calls
+	wedge       chan struct{} // while set, StartDiscovery waits for it to close, as a wedged bluetoothd does
 }
 
 const fakeAdapter = dbus.ObjectPath("/org/bluez/hci0")
@@ -47,7 +58,36 @@ func startFakeBlueZ(t *testing.T, addr string, monitors bool) *fakeBlueZ {
 	if r, err := bus.RequestName(busName, dbus.NameFlagDoNotQueue); err != nil || r != dbus.RequestNameReplyPrimaryOwner {
 		t.Fatalf("request name: %v %v", r, err)
 	}
+	// Like bluetoothd, announce the adapter after taking the name.
+	bus.Emit("/", ifObjManager+".InterfacesAdded", fakeAdapter, map[string]map[string]dbus.Variant{ifAdapter: {
+		"Address": dbus.MakeVariant("00:11:22:33:44:55"), "Powered": dbus.MakeVariant(true)}})
 	return f
+}
+
+func (f *fakeBlueZ) calls() (starts, stops int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.starts, f.stops
+}
+
+// setWedged makes StartDiscovery stop answering, or answer again (the calls waiting so far reply then, too
+// late for the caller).
+func (f *fakeBlueZ) setWedged(on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if on && f.wedge == nil {
+		f.wedge = make(chan struct{})
+	} else if !on && f.wedge != nil {
+		close(f.wedge)
+		f.wedge = nil
+	}
+}
+
+// advertise reports an advertisement from one device, as BlueZ does during discovery.
+func (f *fakeBlueZ) advertise() {
+	f.bus.Emit(fakeAdapter+"/dev_AA_BB_CC_DD_EE_FF", ifProps+".PropertiesChanged", ifDevice,
+		map[string]dbus.Variant{"Address": dbus.MakeVariant("AA:BB:CC:DD:EE:FF"),
+			"RSSI": dbus.MakeVariant(int16(-60))}, []string{})
 }
 
 func (f *fakeBlueZ) state() (powered, discovering bool, registered int) {
@@ -103,6 +143,13 @@ func (fakeAdapterIf) SetDiscoveryFilter(map[string]dbus.Variant) *dbus.Error { r
 
 func (a fakeAdapterIf) StartDiscovery() *dbus.Error {
 	a.f.mu.Lock()
+	a.f.starts++
+	wedge := a.f.wedge
+	a.f.mu.Unlock()
+	if wedge != nil {
+		<-wedge
+	}
+	a.f.mu.Lock()
 	defer a.f.mu.Unlock()
 	if !a.f.powered {
 		return dbus.NewError("org.bluez.Error.NotReady", nil)
@@ -114,6 +161,7 @@ func (a fakeAdapterIf) StartDiscovery() *dbus.Error {
 func (a fakeAdapterIf) StopDiscovery() *dbus.Error {
 	a.f.mu.Lock()
 	a.f.discovering = false
+	a.f.stops++
 	a.f.mu.Unlock()
 	return nil
 }
@@ -189,7 +237,7 @@ func statusIs(a *Adapter, state ble.ScanState, mode ble.ScanMode) func() bool {
 func TestRecovery(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, true)
-	a, err := Open("hci0")
+	a, err := Open("hci0", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +268,10 @@ func TestRecovery(t *testing.T) {
 	if _, disc, _ := bz.state(); !disc {
 		t.Fatal("not discovering after fallback")
 	}
+	time.Sleep(5 * scanRetry) // the bluetoothd start and the adapter's appearance must not both restart it
+	if starts, stops := bz.calls(); starts != 1 || stops != 0 {
+		t.Fatalf("after bluetoothd came back: %d StartDiscovery, %d StopDiscovery calls", starts, stops)
+	}
 
 	bz.bus.Close()
 	waitFor(t, "failed again", func() bool { return a.ScanStatus().State == ble.ScanFailed })
@@ -230,6 +282,83 @@ func TestRecovery(t *testing.T) {
 	waitFor(t, "idle", statusIs(a, ble.ScanIdle, ble.ScanPassive))
 	if _, disc, reg := bz.state(); disc || reg != 0 {
 		t.Fatalf("after stop: discovering %v, %d monitors registered", disc, reg)
+	}
+	bz.bus.Close()
+}
+
+// TestUnanswered has StartDiscovery go unanswered, as with a wedged bluetoothd: the scanner fails within the
+// call timeout instead of starting for ever, runs the restart command, at most once per restartEvery, and
+// runs again once StartDiscovery is answered.
+func TestUnanswered(t *testing.T) {
+	addr := startBus(t)
+	bz := startFakeBlueZ(t, addr, false)
+	bz.setWedged(true)
+	marker := filepath.Join(t.TempDir(), "restarts")
+	restarts := func() int {
+		b, _ := os.ReadFile(marker)
+		return strings.Count(string(b), "\n")
+	}
+	a, err := Open("hci0", Options{RestartCmd: "echo restart >> '" + marker + "'"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetScanMode(ble.ScanActive)
+	start := time.Now()
+	stop, _ := a.Scan(func(ble.Advert) {})
+	defer stop()
+
+	waitFor(t, "failed", statusIs(a, ble.ScanFailed, ble.ScanActive))
+	if d := time.Since(start); d > callTimeout+time.Second {
+		t.Fatalf("failed only after %v", d)
+	}
+	waitFor(t, "restart command", func() bool { return restarts() == 1 })
+	n, _ := bz.calls()
+	waitFor(t, "more unanswered starts", func() bool { s, _ := bz.calls(); return s >= n+2*restartAfter })
+	if r := restarts(); r != 1 {
+		t.Fatalf("restart command ran %d times within restartEvery", r)
+	}
+
+	bz.setWedged(false)
+	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bz.bus.Close()
+}
+
+// TestStall stops advertisements during active discovery: the scanner reports a failure and restarts
+// discovery, while a steady flow of advertisements leaves it alone.
+func TestStall(t *testing.T) {
+	addr := startBus(t)
+	bz := startFakeBlueZ(t, addr, false)
+	a, err := Open("hci0", Options{StallTimeout: 400 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failures atomic.Int32
+	a.OnScanStatus(func(st ble.ScanStatus) {
+		if st.State == ble.ScanFailed {
+			failures.Add(1)
+		}
+	})
+	a.SetScanMode(ble.ScanActive)
+	var got atomic.Int32
+	stop, _ := a.Scan(func(ble.Advert) { got.Add(1) })
+	defer stop()
+	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
+
+	for i := 0; i < 10; i++ {
+		bz.advertise()
+		time.Sleep(100 * time.Millisecond)
+	}
+	if got.Load() == 0 {
+		t.Fatal("no advertisements delivered")
+	}
+	if starts, stops := bz.calls(); starts != 1 || stops != 0 || failures.Load() != 0 {
+		t.Fatalf("while advertisements flowed: %d starts, %d stops, %d failures", starts, stops, failures.Load())
+	}
+
+	waitFor(t, "discovery restarted", func() bool { s, st := bz.calls(); return s >= 2 && st >= 1 })
+	waitFor(t, "running again", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	if failures.Load() == 0 {
+		t.Fatal("stall not reported as a failure")
 	}
 	bz.bus.Close()
 }

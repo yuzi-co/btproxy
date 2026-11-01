@@ -1,11 +1,10 @@
 [Unit]
 Description=btproxy, ESPHome-compatible Bluetooth proxy
-Requires=bluetooth.service
+Wants=bluetooth.service network-online.target
 After=bluetooth.service network-online.target
-Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/btproxy -name btproxy-%H -area ""
+ExecStart=/usr/local/bin/btproxy -name btproxy-%H -area "" -bluetoothd-restart "systemctl restart bluetooth"
 Restart=always
 RestartSec=5
 

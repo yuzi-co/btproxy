@@ -5,6 +5,7 @@ package bluez
 import (
 	"errors"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -13,9 +14,17 @@ import (
 	"btproxy/internal/ble"
 )
 
-// scanRetry is how often the supervisor retries when the adapter cannot scan (powered off, scan start
-// refused); recovery from a bluetoothd restart or an adapter coming back is driven by signals instead.
-const scanRetry = 10 * time.Second
+// Timings, variables so the tests can shorten them. scanRetry is how often the supervisor retries when the
+// adapter cannot scan (powered off, scan start refused or unanswered) and checks for a stalled scan; recovery
+// from a bluetoothd restart or an adapter coming back is driven by signals instead.
+var (
+	scanRetry      = 10 * time.Second
+	restartEvery   = 10 * time.Minute // at most one bluetoothd restart this often
+	restartTimeout = 30 * time.Second
+)
+
+// restartAfter is how many stalls or unanswered calls in a row make the supervisor restart bluetoothd.
+const restartAfter = 2
 
 // scanState is the scanner part of Adapter. One goroutine, supervise, makes every scan-related D-Bus call,
 // so mode switches, recovery and scan start and stop never race. Fields are guarded by Adapter.mu except
@@ -27,18 +36,27 @@ type scanState struct {
 	status   ble.ScanStatus
 	statusFn func(ble.ScanStatus)
 
-	gone      bool // bluetoothd or the adapter is not on the bus
-	off       bool // the adapter is powered off
-	epoch     int  // bumped whenever BlueZ may have dropped our discovery session or monitor
-	noMonitor bool // the monitor API is missing or failed: scan actively until bluetoothd restarts
-	monitorUp bool // the monitor is (being) registered; a Release then means BlueZ dropped it
+	gone      bool         // bluetoothd or the adapter is not on the bus
+	off       bool         // the adapter is powered off
+	epoch     int          // bumped whenever BlueZ may have dropped our discovery session or monitor
+	noMonitor bool         // the monitor API is missing or failed: scan actively until bluetoothd restarts
+	monitorUp bool         // the monitor is (being) registered; a Release then means BlueZ dropped it
 	agentLog  *slog.Logger // set once RegisterAgent was called
+	adverts   int          // advertisements delivered, for the stall watchdog
+
+	// Set by Open.
+	stallTimeout time.Duration
+	restartCmd   string
 
 	// The supervisor's own.
-	armed      bool
-	armedMode  ble.ScanMode
-	armedEpoch int
-	lastErr    string
+	armed       bool
+	armedMode   ble.ScanMode
+	armedEpoch  int
+	lastErr     string
+	seen        int       // adverts when reconcile last looked
+	quietSince  time.Time // when seen last changed or the scan was armed
+	strikes     int       // stalls and unanswered calls since the last advertisement or restart
+	lastRestart time.Time
 }
 
 func (a *Adapter) initScan() error {
@@ -141,11 +159,12 @@ func (a *Adapter) supervise() {
 }
 
 // reconcile brings the scanner to the wanted state: powers the adapter on, (re)starts discovery or the
-// monitor when the mode changed or BlueZ lost them, stops scanning when nobody listens.
+// monitor when the mode changed or BlueZ lost them, stops scanning when nobody listens, and restarts
+// discovery that has stalled.
 func (a *Adapter) reconcile() {
 	a.mu.Lock()
 	want := a.scanFn != nil
-	gone, off, epoch := a.gone, a.off, a.epoch
+	gone, off, epoch, adverts := a.gone, a.off, a.epoch, a.adverts
 	a.mu.Unlock()
 	mode := a.effectiveMode()
 	idle := func(fail ble.ScanState) {
@@ -155,6 +174,9 @@ func (a *Adapter) reconcile() {
 			a.setStatus(ble.ScanIdle, mode)
 		}
 	}
+	if adverts != a.seen {
+		a.seen, a.quietSince, a.strikes = adverts, time.Now(), 0
+	}
 
 	if gone {
 		a.armed = false
@@ -162,16 +184,28 @@ func (a *Adapter) reconcile() {
 		return
 	}
 	if off {
-		if err := a.obj(a.path).SetProperty(ifAdapter+".Powered", dbus.MakeVariant(true)); err != nil {
+		if err := a.setProperty(a.path, ifAdapter+".Powered", true); err != nil {
 			a.fail("power on", err)
 			a.armed = false
-			idle(ble.ScanStopped)
+			if isTimeout(err) {
+				idle(ble.ScanFailed)
+				a.strike()
+			} else {
+				idle(ble.ScanStopped)
+			}
 			return
 		}
 		a.log.Info("adapter powered on again")
 		a.mu.Lock()
 		a.off = false
 		a.mu.Unlock()
+	}
+	if a.stalled(want) {
+		a.log.Warn("no advertisements, restarting discovery", "for", time.Since(a.quietSince).Round(time.Second))
+		a.disarm()
+		a.setStatus(ble.ScanFailed, mode)
+		a.strike()
+		return // armed again on the next tick
 	}
 	if a.armed && (!want || a.armedMode != mode || a.armedEpoch != epoch) {
 		a.disarm()
@@ -180,6 +214,9 @@ func (a *Adapter) reconcile() {
 		if err := a.arm(mode, epoch); err != nil {
 			a.fail("start scan", err)
 			a.setStatus(ble.ScanFailed, mode)
+			if isTimeout(err) {
+				a.strike()
+			}
 			return
 		}
 		mode = a.armedMode
@@ -196,16 +233,55 @@ func (a *Adapter) fail(what string, err error) {
 	}
 }
 
+// stalled tells whether active discovery has delivered no advertisement for stallTimeout, which happens when
+// bluetoothd or the controller wedges without dropping the discovery session. Passive scanning is left alone:
+// BlueZ reports a device there only when its advertisement changes, so long silences are normal.
+func (a *Adapter) stalled(want bool) bool {
+	return want && a.armed && a.armedMode == ble.ScanActive && a.stallTimeout > 0 &&
+		time.Since(a.quietSince) >= a.stallTimeout
+}
+
+// strike counts a stall or a call bluetoothd did not answer. After restartAfter in a row it restarts
+// bluetoothd with restartCmd, at most once per restartEvery; the recovery from a bluetoothd restart does the
+// rest.
+func (a *Adapter) strike() {
+	a.strikes++
+	if a.restartCmd == "" || a.strikes < restartAfter ||
+		(!a.lastRestart.IsZero() && time.Since(a.lastRestart) < restartEvery) {
+		return
+	}
+	a.strikes = 0
+	a.lastRestart = time.Now()
+	a.log.Warn("bluetoothd not responding, restarting it", "cmd", a.restartCmd)
+	// os.StartProcess rather than os/exec, which adds 128 KB to the binary. The command's output goes to
+	// ours, so nothing waits on a pipe that a daemon it starts may keep open.
+	p, err := os.StartProcess("/bin/sh", []string{"sh", "-c", a.restartCmd},
+		&os.ProcAttr{Files: []*os.File{nil, os.Stderr, os.Stderr}})
+	if err != nil {
+		a.log.Warn("bluetoothd restart failed", "err", err)
+		return
+	}
+	t := time.AfterFunc(restartTimeout, func() { p.Kill() })
+	st, err := p.Wait()
+	t.Stop()
+	if err == nil && !st.Success() {
+		err = errors.New(st.String())
+	}
+	if err != nil {
+		a.log.Warn("bluetoothd restart failed", "err", err)
+	}
+}
+
 func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 	if mode == ble.ScanPassive {
 		err := a.registerMonitors()
 		if err == nil {
-			a.armed, a.armedMode, a.armedEpoch = true, ble.ScanPassive, epoch
+			a.armed, a.armedMode, a.armedEpoch, a.quietSince = true, ble.ScanPassive, epoch, time.Now()
 			a.log.Info("scanning passively")
 			return nil
 		}
 		var de dbus.Error
-		if errors.As(err, &de) && (de.Name == "org.freedesktop.DBus.Error.ServiceUnknown" ||
+		if isTimeout(err) || errors.As(err, &de) && (de.Name == "org.freedesktop.DBus.Error.ServiceUnknown" ||
 			de.Name == "org.freedesktop.DBus.Error.NoReply") {
 			return err // bluetoothd is gone or stuck, which says nothing about the monitor API
 		}
@@ -215,13 +291,13 @@ func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 		a.mu.Unlock()
 	}
 	filter := map[string]any{"Transport": "le", "DuplicateData": true}
-	if err := a.obj(a.path).Call(ifAdapter+".SetDiscoveryFilter", 0, filter).Err; err != nil {
+	if err := a.call(a.path, ifAdapter+".SetDiscoveryFilter", filter).Err; err != nil {
 		return err
 	}
 	if err := a.startDiscovery(); err != nil {
 		return err
 	}
-	a.armed, a.armedMode, a.armedEpoch = true, ble.ScanActive, epoch
+	a.armed, a.armedMode, a.armedEpoch, a.quietSince = true, ble.ScanActive, epoch, time.Now()
 	a.log.Info("scanning actively")
 	return nil
 }
@@ -231,7 +307,7 @@ func (a *Adapter) disarm() {
 	if a.armedMode == ble.ScanPassive {
 		a.unregisterMonitors()
 	} else {
-		a.obj(a.path).Call(ifAdapter+".StopDiscovery", 0)
+		a.call(a.path, ifAdapter+".StopDiscovery")
 	}
 	a.armed = false
 }
@@ -239,6 +315,7 @@ func (a *Adapter) disarm() {
 // emit reports a device's cached advertisement. Called with a.mu held.
 func (a *Adapter) emit(d *device) {
 	if a.scanFn != nil && d.rssi != 0 && d.addr != 0 {
+		a.adverts++
 		a.scanFn(ble.Advert{Addr: d.addr, AddrType: d.addrType, RSSI: int8(d.rssi), Data: d.adData()})
 	}
 }
@@ -300,7 +377,9 @@ func (a *Adapter) watch(s *dbus.Signal) {
 			on, _ := v.Value().(bool)
 			a.mu.Lock()
 			a.off = !on
-			a.epoch++ // powering off ends discovery sessions
+			if !on {
+				a.epoch++ // powering off ends discovery sessions; powering on has none to restart
+			}
 			a.mu.Unlock()
 			if !on {
 				a.log.Warn("adapter powered off")
@@ -337,7 +416,7 @@ func (a *Adapter) lost(why string, daemon bool) {
 // found checks whether the adapter is back after bluetoothd started or the adapter object appeared, reloads
 // the device cache and lets the supervisor power it on and restart scanning.
 func (a *Adapter) found() {
-	v, err := a.obj(a.path).GetProperty(ifAdapter + ".Powered")
+	v, err := a.getProperty(a.path, ifAdapter+".Powered")
 	if err != nil {
 		return // not there yet: InterfacesAdded follows when it is
 	}
@@ -349,7 +428,11 @@ func (a *Adapter) found() {
 	wasGone := a.gone
 	a.gone = false
 	a.off = v.Value() != true
-	a.epoch++
+	if wasGone {
+		// Once only: a bluetoothd start brings both NameOwnerChanged and InterfacesAdded, and a second bump
+		// made the supervisor stop the scan it had just started and start it again.
+		a.epoch++
+	}
 	for p, ifs := range objs {
 		if props, ok := ifs[ifDevice]; ok && a.underAdapter(p) && a.devices[p] == nil {
 			a.updateDevice(p, props, false)

@@ -39,12 +39,11 @@ func (a *Adapter) RegisterAgent(log *slog.Logger) error {
 	if err := a.bus.ExportMethodTable(methods, agentPath, ifAgent); err != nil {
 		return fmt.Errorf("export agent: %w", err)
 	}
-	mgr := a.obj("/org/bluez")
-	if err := mgr.Call(ifAgentManager+".RegisterAgent", 0, agentPath, "NoInputNoOutput").Err; err != nil {
+	if err := a.call("/org/bluez", ifAgentManager+".RegisterAgent", agentPath, "NoInputNoOutput").Err; err != nil {
 		a.bus.ExportMethodTable(nil, agentPath, ifAgent)
 		return fmt.Errorf("register agent: %w", err)
 	}
-	if err := mgr.Call(ifAgentManager+".RequestDefaultAgent", 0, agentPath).Err; err != nil {
+	if err := a.call("/org/bluez", ifAgentManager+".RequestDefaultAgent", agentPath).Err; err != nil {
 		log.Warn("pairing agent registered, but not as the default agent", "err", err)
 		return nil
 	}
@@ -118,7 +117,7 @@ func (g *agent) Cancel() *dbus.Error {
 // Pair bonds with the connected device through Device1.Pair. A device that is already paired is reported as
 // paired without pairing again, as ESPHome does.
 func (c *conn) Pair() error {
-	if v, err := c.a.obj(c.path).GetProperty(ifDevice + ".Paired"); err == nil && v.Value() == true {
+	if v, err := c.a.getProperty(c.path, ifDevice+".Paired"); err == nil && v.Value() == true {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), pairTimeout)
@@ -129,7 +128,7 @@ func (c *conn) Pair() error {
 		return nil
 	}
 	if ctx.Err() != nil {
-		c.a.obj(c.path).Call(ifDevice+".CancelPairing", 0)
+		c.a.call(c.path, ifDevice+".CancelPairing")
 	}
 	return err
 }
@@ -137,7 +136,7 @@ func (c *conn) Pair() error {
 // Unpair removes the device from BlueZ, which deletes its bond and drops any connection to it: BlueZ has no
 // call that removes only the bond. A device BlueZ does not know has no bond to remove.
 func (a *Adapter) Unpair(addr uint64) error {
-	err := a.obj(a.path).Call(ifAdapter+".RemoveDevice", 0, a.devicePath(addr)).Err
+	err := a.call(a.path, ifAdapter+".RemoveDevice", a.devicePath(addr)).Err
 	var de dbus.Error
 	if errors.As(err, &de) && de.Name == "org.bluez.Error.DoesNotExist" {
 		return nil
