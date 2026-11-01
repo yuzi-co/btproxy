@@ -37,6 +37,7 @@ const handshakeTimeout = 30 * time.Second
 const (
 	advBatchSize     = 16
 	advFlushInterval = 100 * time.Millisecond
+	advEntrySize     = 80 // an encoded advertisement with 62 bytes of data, to size a batch's buffer
 )
 
 // Server accepts API clients and shares one Bluetooth adapter among them.
@@ -49,7 +50,8 @@ type Server struct {
 	clients  map[*client]bool
 	conns    map[uint64]*btConn
 	stopScan func()
-	pending  []ble.Advert
+	pending  []byte // the advertisements of the batch being collected, encoded
+	pendingN int    // and their number
 
 	scanKick chan struct{} // scanner status changed: tell the subscribers
 }
@@ -115,21 +117,20 @@ func (s *Server) featureFlags() uint32 {
 	return f
 }
 
-// subscribers returns the clients that receive advertisements.
-func (s *Server) advSubscribers() []*client {
-	var out []*client
+// advSubscribed reports whether any client receives advertisements. Called with s.mu held.
+func (s *Server) advSubscribed() bool {
 	for c := range s.clients {
 		if c.advSubscribed {
-			out = append(out, c)
+			return true
 		}
 	}
-	return out
+	return false
 }
 
 // updateScan starts scanning when the first client subscribes to advertisements and stops after the last
 // one leaves. Called with s.mu held.
 func (s *Server) updateScan() {
-	want := len(s.advSubscribers()) > 0
+	want := s.advSubscribed()
 	switch {
 	case want && s.stopScan == nil:
 		stop, err := s.adapter.Scan(s.onAdvert)
@@ -142,40 +143,45 @@ func (s *Server) updateScan() {
 	case !want && s.stopScan != nil:
 		s.stopScan()
 		s.stopScan = nil
-		s.pending = nil
+		s.pending, s.pendingN = nil, 0
 		s.log.Info("scanning stopped")
 	}
 }
 
+// onAdvert encodes an advertisement into the batch being collected, copying its data, which is only valid
+// during the call.
 func (s *Server) onAdvert(a ble.Advert) {
 	s.mu.Lock()
-	s.pending = append(s.pending, a)
-	full := len(s.pending) >= advBatchSize
-	s.mu.Unlock()
-	if full {
+	defer s.mu.Unlock()
+	if s.pending == nil {
+		s.pending = make([]byte, 0, advBatchSize*advEntrySize)
+	}
+	s.pending = appendRawAdvert(s.pending, a)
+	if s.pendingN++; s.pendingN >= advBatchSize {
 		s.flush()
 	}
 }
 
 func (s *Server) flushLoop() {
 	for range time.Tick(advFlushInterval) {
+		s.mu.Lock()
 		s.flush()
+		s.mu.Unlock()
 	}
 }
 
+// flush queues the batch for the subscribers, which share it: it is not changed after this. The next batch
+// gets a new buffer. Called with s.mu held; queueing never blocks.
 func (s *Server) flush() {
-	s.mu.Lock()
-	ads := s.pending
-	s.pending = nil
-	subs := s.advSubscribers()
-	s.mu.Unlock()
-	for len(ads) > 0 {
-		n := min(len(ads), advBatchSize)
-		msg := encRawAdvertisements(ads[:n])
-		for _, c := range subs {
+	if s.pendingN == 0 {
+		return
+	}
+	msg := s.pending
+	s.pending, s.pendingN = nil, 0
+	for c := range s.clients {
+		if c.advSubscribed {
 			c.sendDroppable(msgBTRawAdvertisementsResponse, msg)
 		}
-		ads = ads[n:]
 	}
 }
 

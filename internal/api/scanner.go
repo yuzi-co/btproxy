@@ -37,10 +37,11 @@ func (s *Server) scannerState() []byte {
 func (s *Server) sendScannerState() {
 	msg := s.scannerState()
 	s.mu.Lock()
-	subs := s.advSubscribers()
-	s.mu.Unlock()
-	for _, c := range subs {
-		c.send(msgBTScannerStateResponse, msg)
+	defer s.mu.Unlock()
+	for c := range s.clients {
+		if c.advSubscribed {
+			c.send(msgBTScannerStateResponse, msg)
+		}
 	}
 }
 

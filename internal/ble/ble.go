@@ -15,7 +15,8 @@ const (
 )
 
 // Advert is one received advertisement. Data holds the raw AD structures (advertisement plus scan response),
-// at most 62 bytes.
+// at most 62 bytes. Data is only valid during the call to the scan callback that receives it: backends may
+// reuse the buffer for the next advertisement, so a callback that keeps the data copies it.
 type Advert struct {
 	Addr     uint64
 	AddrType uint32
@@ -105,7 +106,7 @@ type Events struct {
 type Adapter interface {
 	// MAC is the controller address, used as the proxy's Bluetooth MAC in device info.
 	MAC() uint64
-	// Scan delivers advertisements until stop is called.
+	// Scan delivers advertisements until stop is called. fn must not keep Advert.Data after it returns.
 	Scan(fn func(Advert)) (stop func(), err error)
 	Connect(addr uint64, addrType uint32, ev Events) (Conn, error)
 	// ClearCache forgets the services the stack has cached for a device. Bonds are kept.

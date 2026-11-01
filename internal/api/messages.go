@@ -135,16 +135,29 @@ func encCapabilities(flags uint32, btMAC string) []byte {
 	return e.b
 }
 
-func encRawAdvertisements(ads []ble.Advert) []byte {
-	var e enc
-	for _, a := range ads {
-		var s enc
-		s.uint(1, a.Addr)
-		s.sint(2, int64(a.RSSI))
-		s.uint(3, uint64(a.AddrType))
-		s.bytes(4, a.Data)
-		e.msg(1, s.b)
+// appendRawAdvert appends one advertisement to a BluetoothLERawAdvertisementsResponse being built in b. The
+// entry's size is worked out first, so it is encoded in one pass, in place.
+func appendRawAdvert(b []byte, a ble.Advert) []byte {
+	rssi := protowire.EncodeZigZag(int64(a.RSSI))
+	n := 0
+	if a.Addr != 0 {
+		n += protowire.SizeTag(1) + protowire.SizeVarint(a.Addr)
 	}
+	if rssi != 0 {
+		n += protowire.SizeTag(2) + protowire.SizeVarint(rssi)
+	}
+	if a.AddrType != 0 {
+		n += protowire.SizeTag(3) + protowire.SizeVarint(uint64(a.AddrType))
+	}
+	if len(a.Data) > 0 {
+		n += protowire.SizeTag(4) + protowire.SizeBytes(len(a.Data))
+	}
+	b = protowire.AppendTag(b, 1, protowire.BytesType)
+	e := enc{protowire.AppendVarint(b, uint64(n))}
+	e.uint(1, a.Addr)
+	e.sint(2, int64(a.RSSI))
+	e.uint(3, uint64(a.AddrType))
+	e.bytes(4, a.Data)
 	return e.b
 }
 
