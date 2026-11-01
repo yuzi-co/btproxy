@@ -469,17 +469,11 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
-	var err error
-	if known {
-		err = a.obj(p).CallWithContext(ctx, ifDevice+".Connect", 0).Err
-	} else {
-		// BlueZ has not seen the device: ConnectDevice (needs bluetoothd --experimental) creates and connects it.
-		t := "public"
-		if addrType == ble.AddrRandom {
-			t = "random"
-		}
-		err = a.obj(a.path).CallWithContext(ctx, ifAdapter+".ConnectDevice", 0,
-			map[string]any{"Address": ble.FormatMAC(addr), "AddressType": t}).Err
+	err := a.connect(ctx, p, addr, addrType, known)
+	var de dbus.Error
+	if errors.As(err, &de) && (known && noObject(de.Name) || !known && de.Name == "org.bluez.Error.AlreadyExists") {
+		// BlueZ removed the device or created it just now, before the signal saying so arrived.
+		err = a.connect(ctx, p, addr, addrType, !known)
 	}
 	cancel()
 	if err != nil {
@@ -509,6 +503,32 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		return fail(errors.New("link lost while connecting"))
 	}
 	return c, nil
+}
+
+// connect connects a device BlueZ has an object for through Device1.Connect. For one it has none for, which
+// is most devices once bluetoothd reports none (see Adapter.quiet), ConnectDevice (needs bluetoothd
+// --experimental) creates and connects it.
+func (a *Adapter) connect(ctx context.Context, p dbus.ObjectPath, addr uint64, addrType uint32, known bool) error {
+	if known {
+		return a.obj(p).CallWithContext(ctx, ifDevice+".Connect", 0).Err
+	}
+	t := "public"
+	if addrType == ble.AddrRandom {
+		t = "random"
+	}
+	return a.obj(a.path).CallWithContext(ctx, ifAdapter+".ConnectDevice", 0,
+		map[string]any{"Address": ble.FormatMAC(addr), "AddressType": t}).Err
+}
+
+// noObject tells whether an error says that the object called does not exist, as libdbus (UnknownObject, or
+// UnknownMethod from a parent's fallback) or godbus (NoSuchObject) put it.
+func noObject(name string) bool {
+	switch name {
+	case "org.freedesktop.DBus.Error.UnknownObject", "org.freedesktop.DBus.Error.UnknownMethod",
+		"org.freedesktop.DBus.Error.UnknownInterface", "org.freedesktop.DBus.Error.NoSuchObject":
+		return true
+	}
+	return false
 }
 
 // conn is one connected device. GATT objects are looked up by the handle encoded in their D-Bus path

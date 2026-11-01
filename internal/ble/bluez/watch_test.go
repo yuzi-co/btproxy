@@ -30,6 +30,7 @@ type fakeBlueZ struct {
 	t        *testing.T
 	bus      *dbus.Conn
 	monitors bool
+	offload  bool // the controller matches monitor patterns ("controller-patterns")
 
 	mu          sync.Mutex
 	powered     bool
@@ -41,6 +42,9 @@ type fakeBlueZ struct {
 	wedge       chan struct{}            // while set, StartDiscovery waits for it to close, as a wedged bluetoothd does
 	devices     map[dbus.ObjectPath]bool // announced with InterfacesAdded
 	connectFail bool                     // Device1.Connect fails
+	rssi        int16                    // RSSI threshold of the last discovery filter, 0 for none
+	quietMons   bool                     // the monitors registered match nothing
+	connects    []string                 // Device1.Connect and Adapter1.ConnectDevice calls, by method
 }
 
 const fakeAdapter = dbus.ObjectPath("/org/bluez/hci0")
@@ -152,6 +156,13 @@ func (p fakeProps) Get(iface, name string) (dbus.Variant, *dbus.Error) {
 		return dbus.MakeVariant("00:11:22:33:44:55"), nil
 	case "Powered":
 		return dbus.MakeVariant(p.f.powered), nil
+	case "SupportedFeatures":
+		if p.f.offload {
+			return dbus.MakeVariant([]string{"controller-patterns"}), nil
+		}
+		if p.f.monitors {
+			return dbus.MakeVariant([]string{}), nil
+		}
 	}
 	return dbus.Variant{}, dbus.NewError("org.freedesktop.DBus.Error.InvalidArgs", nil)
 }
@@ -168,8 +179,39 @@ type fakeAdapterIf struct{ f *fakeBlueZ }
 func (a fakeAdapterIf) SetDiscoveryFilter(f map[string]dbus.Variant) *dbus.Error {
 	a.f.mu.Lock()
 	a.f.dupData = f["DuplicateData"].Value() == true
+	a.f.rssi, _ = f["RSSI"].Value().(int16)
 	a.f.mu.Unlock()
 	return nil
+}
+
+// ConnectDevice creates and connects a device BlueZ has no object for.
+func (a fakeAdapterIf) ConnectDevice(props map[string]dbus.Variant) (dbus.ObjectPath, *dbus.Error) {
+	addr, _ := props["Address"].Value().(string)
+	p := fakeAdapter + dbus.ObjectPath("/dev_"+strings.ReplaceAll(addr, ":", "_"))
+	a.f.mu.Lock()
+	a.f.connects = append(a.f.connects, "ConnectDevice")
+	known := a.f.devices[p]
+	a.f.mu.Unlock()
+	if known {
+		return "", dbus.NewError("org.bluez.Error.AlreadyExists", nil)
+	}
+	a.f.advertiseFrom(p, -60)
+	d := fakeDeviceIf{a.f, p}
+	return p, d.connected()
+}
+
+// hideDevice creates a device object without announcing it, as when the signal is still on its way.
+func (f *fakeBlueZ) hideDevice(p dbus.ObjectPath) {
+	f.mu.Lock()
+	f.devices[p] = true
+	f.mu.Unlock()
+	f.bus.Export(fakeDeviceIf{f, p}, p, ifDevice)
+}
+
+func (f *fakeBlueZ) connectCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.connects...)
 }
 
 func (a fakeAdapterIf) StartDiscovery() *dbus.Error {
@@ -205,6 +247,13 @@ type fakeDeviceIf struct {
 // Connect announces the connection and its resolved services before replying, as BlueZ does.
 func (d fakeDeviceIf) Connect() *dbus.Error {
 	d.f.mu.Lock()
+	d.f.connects = append(d.f.connects, "Connect")
+	d.f.mu.Unlock()
+	return d.connected()
+}
+
+func (d fakeDeviceIf) connected() *dbus.Error {
+	d.f.mu.Lock()
 	fail := d.f.connectFail
 	d.f.mu.Unlock()
 	if fail {
@@ -229,15 +278,18 @@ func (m fakeMonitorMgr) RegisterMonitor(sender dbus.Sender, root dbus.ObjectPath
 	if err := m.f.bus.Object(string(sender), root).Call(ifObjManager+".GetManagedObjects", 0).Store(&objs); err != nil {
 		return dbus.NewError("org.bluez.Error.Failed", []any{err.Error()})
 	}
-	n := 0
+	n, quiet := 0, true
 	for _, ifs := range objs {
 		var ps []orPattern
 		if p, ok := ifs[ifMonitor]["Patterns"]; ok && p.Store(&ps) == nil && len(ps) > 0 && len(ps) <= 7 {
 			n++
+			for _, p := range ps {
+				quiet = quiet && p.Type == 0xff && strings.HasPrefix(string(p.Content), "\xff\xffbtproxy")
+			}
 		}
 	}
 	m.f.mu.Lock()
-	m.f.registered = n
+	m.f.registered, m.f.quietMons = n, quiet && n > 0
 	m.f.mu.Unlock()
 	return nil
 }
