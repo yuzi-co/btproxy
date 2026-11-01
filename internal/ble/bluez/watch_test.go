@@ -449,6 +449,9 @@ func TestUnanswered(t *testing.T) {
 	if r := restarts(); r != 1 {
 		t.Fatalf("restart command ran %d times within restartEvery", r)
 	}
+	if r := a.Restarts(); r != 1 {
+		t.Fatalf("Restarts() = %d, want 1", r)
+	}
 
 	bz.setWedged(false)
 	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))

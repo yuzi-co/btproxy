@@ -57,6 +57,9 @@ type Server struct {
 	flushT   *time.Timer // armed by the first advertisement of a batch
 
 	scanKick chan struct{} // scanner status changed: tell the subscribers
+
+	stats   stats    // see stats.go
+	sensors []sensor // fixed by NewServer
 }
 
 // btConn is a connection slot. conn is nil while the connection is being made; dropped records a link that
@@ -84,6 +87,7 @@ func NewServer(cfg Config, adapter ble.Adapter, log *logx.Logger) *Server {
 		clients: map[*client]bool{}, conns: map[uint64]*btConn{}, scanKick: make(chan struct{}, 1),
 	}
 	s.initScanner()
+	s.initStats()
 	return s
 }
 
@@ -91,6 +95,7 @@ func NewServer(cfg Config, adapter ble.Adapter, log *logx.Logger) *Server {
 // descriptors, are retried after a pause that doubles from 5 ms to 1 s, as net/http does.
 func (s *Server) Serve(l net.Listener) error {
 	go s.scanStatusLoop()
+	go s.statsLoop()
 	var delay time.Duration
 	for {
 		c, err := l.Accept()
@@ -171,6 +176,7 @@ func (s *Server) onAdvert(a ble.Advert) {
 		s.pending = make([]byte, 0, advBatchSize*advEntrySize)
 	}
 	s.pending = appendRawAdvert(s.pending, a)
+	s.stats.adverts.Add(1)
 	if s.pendingN++; s.pendingN >= advBatchSize {
 		s.flush()
 		return
@@ -201,14 +207,14 @@ func (s *Server) flush() {
 	if s.pendingN == 0 {
 		return
 	}
-	msg := s.pending
+	msg, n := s.pending, s.pendingN
 	s.pending, s.pendingN = nil, 0
 	if s.flushT != nil {
 		s.flushT.Stop()
 	}
 	for c := range s.clients {
-		if c.advSubscribed {
-			c.sendDroppable(msgBTRawAdvertisementsResponse, msg)
+		if c.advSubscribed && !c.sendDroppable(msgBTRawAdvertisementsResponse, msg) {
+			s.stats.advDropped.Add(uint64(n))
 		}
 	}
 }
@@ -234,6 +240,7 @@ func (s *Server) connectionsFree() []byte {
 
 func (s *Server) sendConnectionsFree() {
 	s.broadcast(msgBTConnectionsFreeResponse, s.connectionsFree())
+	s.pushStates() // the connection sensors changed
 }
 
 func (s *Server) connect(addr uint64, addrType uint32) {
@@ -259,6 +266,7 @@ func (s *Server) connect(addr uint64, addrType uint32) {
 
 	log := s.log.With("addr", ble.FormatMAC(addr))
 	log.Info("connecting")
+	s.stats.connTried.Add(1)
 	conn, err := s.adapter.Connect(addr, addrType, ble.Events{
 		Notification: func(h uint16, data []byte) {
 			s.broadcast(msgBTGATTNotifyDataResponse, encAddrHandleData(addr, h, data))
@@ -282,6 +290,7 @@ func (s *Server) connect(addr uint64, addrType uint32) {
 	})
 	if err != nil {
 		log.Warn("connect failed", "err", err)
+		s.recordConnect(false)
 		s.release(addr, slot)
 		s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, false, 0, gattError))
 		s.sendConnectionsFree()
@@ -293,6 +302,7 @@ func (s *Server) connect(addr uint64, addrType uint32) {
 		slot.conn = conn
 	}
 	s.mu.Unlock()
+	s.recordConnect(!dropped)
 	if withdrawn { // disconnect requested, or the last client left, while connecting
 		log.Info("connected after the request was withdrawn, disconnecting")
 		conn.Disconnect()
@@ -307,6 +317,7 @@ func (s *Server) connect(addr uint64, addrType uint32) {
 	}
 	log.Info("connected", "mtu", conn.MTU())
 	s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, true, conn.MTU(), 0))
+	s.pushStates()
 }
 
 // release frees a connection slot unless it has been replaced.
@@ -379,16 +390,17 @@ type client struct {
 	c   net.Conn
 	log *logx.Logger
 
-	wmu           sync.Mutex
-	out           chan outMsg  // to the writer; closed by run when it ends
-	closed        bool         // out is closed; guarded by wmu
-	dead          bool         // a write failed or the queue overflowed, nothing more is queued; guarded by wmu
-	sendC         *noiseCipher // set under wmu when the encrypted handshake is done, then used by the writer only
-	logDrops      atomic.Int64 // log lines dropped since the writer last reported drops
-	recv          *noiseCipher // used by run only
-	advSubscribed bool         // guarded by s.mu
-	apiMajor      uint32
-	apiMinor      uint32 // set by HelloRequest, before any Bluetooth request
+	wmu              sync.Mutex
+	out              chan outMsg  // to the writer; closed by run when it ends
+	closed           bool         // out is closed; guarded by wmu
+	dead             bool         // a write failed or the queue overflowed, nothing more is queued; guarded by wmu
+	sendC            *noiseCipher // set under wmu when the encrypted handshake is done, then used by the writer only
+	logDrops         atomic.Int64 // log lines dropped since the writer last reported drops
+	recv             *noiseCipher // used by run only
+	advSubscribed    bool         // guarded by s.mu
+	statesSubscribed bool         // guarded by s.mu
+	apiMajor         uint32
+	apiMinor         uint32 // set by HelloRequest, before any Bluetooth request
 }
 
 // outMsg is a queued message. Raw ones are sent as they are, without framing or encryption.
@@ -572,9 +584,16 @@ func (c *client) handle(f Frame) bool {
 	case msgDeviceCapabilitiesRequest:
 		c.send(msgDeviceCapabilitiesResponse, encCapabilities(s.featureFlags(), ble.FormatMAC(s.adapter.MAC())))
 	case msgListEntitiesRequest:
-		c.send(msgListEntitiesDoneResponse, nil)
-	case msgSubscribeStatesRequest, msgSubscribeHAServicesRequest, msgSubscribeHAStatesRequest:
-		// Nothing to report: the proxy has no entities or services.
+		c.sendEntities()
+	case msgSubscribeStatesRequest:
+		s.mu.Lock()
+		c.statesSubscribed = true
+		s.mu.Unlock()
+		for _, m := range s.states() {
+			c.send(msgSensorStateResponse, m)
+		}
+	case msgSubscribeHAServicesRequest, msgSubscribeHAStatesRequest:
+		// Nothing to report: the proxy has no services and needs no Home Assistant states.
 	case msgSubscribeLogsRequest:
 		level, dump, err := decSubscribeLogs(f.Payload)
 		if err != nil {

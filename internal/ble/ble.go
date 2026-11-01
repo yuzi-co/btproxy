@@ -129,6 +129,13 @@ type ConnParamsSetter interface {
 	SetConnParams(addr uint64, p ConnParams) error
 }
 
+// RestartCounter is implemented by adapters whose watchdog restarts the Bluetooth stack, for the proxy's
+// diagnostic sensors.
+type RestartCounter interface {
+	// Restarts is how many times the stack was restarted since the adapter was opened.
+	Restarts() uint64
+}
+
 // ErrNotConnected is returned for requests on a closed connection.
 var ErrNotConnected = errors.New("not connected")
 
