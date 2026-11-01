@@ -8,14 +8,21 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/signal"
+	"runtime"
 	"strings"
+	"syscall"
 
 	"btproxy/internal/api"
 	"btproxy/internal/ble"
 	"btproxy/internal/ble/fake"
+	"btproxy/internal/mdns"
 )
 
 var version = "0.1.0"
+
+// esphomeVersion is the ESPHome release btproxy reports itself as (DeviceInfo and mDNS).
+const esphomeVersion = "2026.10.0"
 
 // backends maps -backend names to constructors; bluez registers itself on Linux.
 var backends = map[string]func(adapter string) (ble.Adapter, error){
@@ -32,6 +39,8 @@ func main() {
 	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter (bluez backend)")
 	maxConns := flag.Int("connections", 3, "maximum simultaneous peripheral connections")
 	mac := flag.String("mac", "", "MAC reported as the device's unique id (default: first network interface)")
+	mdnsOn := flag.Bool("mdns", true, "advertise the API over mDNS so Home Assistant discovers it")
+	mdnsIface := flag.String("mdns-iface", "", "comma-separated interfaces to advertise on (default: all with IPv4)")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 
@@ -62,11 +71,49 @@ func main() {
 	}
 	log.Info("btproxy started", "version", version, "listen", l.Addr().String(), "name", *name,
 		"bt_mac", ble.FormatMAC(adapter.MAC()))
+	if *mdnsOn {
+		startMDNS(log, *name, *friendly, *mac, l.Addr().(*net.TCPAddr).Port, *mdnsIface)
+	}
 	srv := api.NewServer(api.Config{
 		Name: *name, FriendlyName: *friendly, MAC: *mac, SuggestedArea: *area,
-		Version: "2026.10.0", ProjectVersion: version, MaxConnections: *maxConns,
+		Version: esphomeVersion, ProjectVersion: version, MaxConnections: *maxConns,
 	}, adapter, log)
 	fatal(log, "serve", "err", srv.Serve(l))
+}
+
+// startMDNS advertises the API like an ESPHome device and, on SIGINT or SIGTERM, withdraws the advertisement
+// before exiting. A failure only disables discovery.
+func startMDNS(log *slog.Logger, name, friendly, mac string, port int, ifaces string) {
+	var names []string
+	for _, n := range strings.Split(ifaces, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			names = append(names, n)
+		}
+	}
+	// TXT keys as ESPHome's mdns component sends them; Home Assistant matches mac (lower case hex, no
+	// separators) against the unique id of the existing entry, which comes from DeviceInfo's MAC.
+	txt := []string{
+		"friendly_name=" + friendly,
+		"version=" + esphomeVersion,
+		"mac=" + strings.ToLower(strings.NewReplacer(":", "", "-", "").Replace(mac)),
+		"platform=linux",
+		"board=" + runtime.GOARCH,
+		"network=ethernet",
+		"project_name=yuzi.btproxy", // as DeviceInfo reports it
+		"project_version=" + version,
+	}
+	r, err := mdns.Start(mdns.Config{Name: mdns.Label(name), Port: port, TXT: txt, Ifaces: names}, log)
+	if err != nil {
+		log.Warn("mdns disabled", "err", err)
+		return
+	}
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		log.Info("stopping", "signal", <-sig)
+		r.Close()
+		os.Exit(0)
+	}()
 }
 
 // hostMAC picks the first up, non-loopback interface with a hardware address; the adapter MAC is the fallback.

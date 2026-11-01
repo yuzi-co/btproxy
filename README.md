@@ -15,7 +15,7 @@ client library).
 - Active connections: connect, service discovery, read and write of characteristics and descriptors,
   notifications, disconnect, connection slot reporting, cache clearing. Up to `-connections` (default 3).
 - Not supported: pairing, passive scanning (BlueZ needs its experimental advertisement monitor API for that,
-  so the scanner always runs active and says so), connection parameter changes, API encryption (Noise), mDNS.
+  so the scanner always runs active and says so), connection parameter changes, API encryption (Noise), IPv6 mDNS.
 
 ## Build
 
@@ -25,7 +25,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" 
 CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldflags="-s -w" -o dist/btproxy-mipsle ./cmd/btproxy
 ```
 
-The binaries are static, about 4 MB (4.4 MB for mipsle).
+The binaries are static, about 4 MB (4.5 MB for mipsle).
 
 ## Run
 
@@ -38,11 +38,37 @@ btproxy -name btproxy-bedroom -area Bedroom
 ```
 
 Flags: `-name`, `-friendly-name`, `-area`, `-listen` (`:6053`), `-adapter` (`hci0`), `-connections` (3),
-`-mac` (unique id reported to HA; default: the first network interface's MAC), `-backend` (`bluez` or `fake`),
-`-debug`.
+`-mac` (unique id reported to HA; default: the first network interface's MAC), `-mdns` (`true`), `-mdns-iface`
+(comma-separated interfaces to advertise on; default: all up interfaces with IPv4), `-backend` (`bluez` or
+`fake`), `-debug`.
 
-In Home Assistant: Settings, Devices & services, Add integration, ESPHome, host and port 6053. There is no mDNS
-yet, so add it by IP.
+Home Assistant discovers the proxy over mDNS and offers it under Settings, Devices & services. Without mDNS
+(`-mdns=false`, or a network that does not pass multicast), add it by hand: Add integration, ESPHome, host and
+port 6053.
+
+## mDNS
+
+btproxy advertises itself like an ESPHome device: `_esphomelib._tcp` service `<name>` on host `<name>.local`
+(`-name` reduced to a DNS label), with the TXT keys ESPHome's mdns component sends and Home Assistant reads:
+`friendly_name`, `version` (the ESPHome version btproxy reports), `mac` (the `-mac` value, lower case without
+colons), `platform=linux`, `board` (the Go architecture), `network=ethernet`, `project_name` and
+`project_version`. There is no `api_encryption`, since the API is plaintext.
+
+Home Assistant uses `mac` as the config entry's unique id, the same id DeviceInfo gives, so an entry added
+earlier by IP is matched rather than duplicated. When the address changes, the next announcement updates the
+entry's host, as long as Home Assistant has lost the connection by then (it keeps a working connection and
+ignores the announcement otherwise).
+
+The responder is built in (IPv4 only). It announces three times at start, again when an interface address
+changes (checked every 30 s), and sends goodbye packets on SIGINT or SIGTERM. Each query is answered with the
+addresses of the interface it came from; queries from other subnets are ignored. On a router with several VLANs,
+restrict it with `-mdns-iface br-lan` so the proxy is not advertised on WAN or guest networks.
+
+It shares port 5353 with other responders: the socket sets `SO_REUSEADDR` and `SO_REUSEPORT`, which Linux
+accepts next to OpenWrt's `umdns` (`SO_REUSEADDR`) and `avahi-daemon`. Multicast reaches every socket; a
+unicast packet to port 5353 reaches only one of them, which only matters for queriers that send unicast to
+5353 instead of the group. Keep `-name` different from the host name, since `umdns` already answers for
+`<hostname>.local` (the default, `btproxy-<hostname>`, is).
 
 ## Notes
 
@@ -83,7 +109,7 @@ exits.
 ## Test
 
 ```sh
-go test ./...                       # the bluez tests need GOOS=linux (or a Linux container)
+go test ./...                       # the bluez and mDNS socket tests need GOOS=linux (or a Linux container)
 go run ./cmd/btproxy -backend fake -listen 127.0.0.1:16053 &
 python -m venv .venv && .venv/bin/pip install aioesphomeapi
 .venv/bin/python test/e2e.py 127.0.0.1 16053
