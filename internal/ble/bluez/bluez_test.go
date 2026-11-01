@@ -93,6 +93,24 @@ func TestBuildGATT(t *testing.T) {
 
 // TestReadEcho checks that the Value change BlueZ emits for our own ReadValue is not forwarded as a
 // notification, whether it is seen during the read or after it, while real notifications still are.
+// Value changes held during a read are capped, keeping the newest.
+func TestHeldValuesCapped(t *testing.T) {
+	const h = 0x0c
+	p := dbus.ObjectPath("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/service000a/char000b")
+	var got []byte
+	c := &conn{notifying: map[uint16]bool{h: true}, reading: map[uint16]int{}, held: map[uint16][][]byte{},
+		echoes: map[uint16][]echo{},
+		ev:     ble.Events{Notification: func(_ uint16, d []byte) { got = append(got, d[0]) }}}
+	c.readStarted(h)
+	for i := range 2 * maxHeldValue {
+		c.valueChanged(p, []byte{byte(i)})
+	}
+	c.readDone(h, nil, false)
+	if len(got) != maxHeldValue || got[len(got)-1] != 2*maxHeldValue-1 {
+		t.Fatalf("%d values, last %d", len(got), got[len(got)-1])
+	}
+}
+
 func TestReadEcho(t *testing.T) {
 	const h = 0x0c
 	p := dbus.ObjectPath("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/service000a/char000b")

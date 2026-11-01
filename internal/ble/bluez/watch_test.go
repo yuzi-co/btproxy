@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -580,4 +581,44 @@ func TestHealthCheck(t *testing.T) {
 	bz.mu.Unlock()
 	close(hung)
 	bz.bus.Close()
+}
+
+// Signals are believed only from the bus daemon and bluetoothd, however they are addressed.
+func TestTrusted(t *testing.T) {
+	a := &Adapter{}
+	for sender, want := range map[string]bool{"org.freedesktop.DBus": true, ":1.5": false, "": false} {
+		if got := a.trusted(&dbus.Signal{Sender: sender}); got != want {
+			t.Errorf("no owner, sender %q: %v", sender, got)
+		}
+	}
+	a.owner = ":1.5"
+	for sender, want := range map[string]bool{"org.freedesktop.DBus": true, ":1.5": true, ":1.6": false, "": false} {
+		if got := a.trusted(&dbus.Signal{Sender: sender}); got != want {
+			t.Errorf("sender %q: %v", sender, got)
+		}
+	}
+}
+
+// The device cache stops growing, and never forgets a connected device.
+func TestMaxDevices(t *testing.T) {
+	const connected = dbus.ObjectPath("/org/bluez/hci0/dev_connected")
+	a := &Adapter{devices: map[dbus.ObjectPath]*device{}, conns: map[dbus.ObjectPath]*conn{connected: {}}}
+	a.updateDevice(connected, nil, false)
+	for i := range 2 * maxDevices {
+		a.updateDevice(dbus.ObjectPath("/org/bluez/hci0/dev_"+strconv.Itoa(i)), nil, false)
+		if len(a.devices) > maxDevices {
+			t.Fatalf("%d devices", len(a.devices))
+		}
+		if a.devices[connected] == nil {
+			t.Fatal("connected device forgotten")
+		}
+	}
+}
+
+// The restart command does not inherit btproxy's secrets.
+func TestRestartEnv(t *testing.T) {
+	got := restartEnv([]string{"PATH=/bin", "BTPROXY_ENCRYPTION_KEY=k", "HOME=/root", "BTPROXY_UI_PASSWORD=p", "BTPROXY_UI_STATE=a t"})
+	if strings.Join(got, " ") != "PATH=/bin HOME=/root" {
+		t.Fatalf("%q", got)
+	}
 }

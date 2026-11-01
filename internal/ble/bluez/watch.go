@@ -5,6 +5,8 @@ package bluez
 import (
 	"errors"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -84,6 +86,11 @@ func (a *Adapter) initScan() error {
 		dbus.WithMatchInterface("org.freedesktop.DBus"), dbus.WithMatchMember("NameOwnerChanged"),
 		dbus.WithMatchArg(0, busName)); err != nil {
 		return err
+	}
+	// dispatch has not started, so NameOwnerChanged cannot overtake this. No owner is an error: bluetoothd is
+	// not running, and NameOwnerChanged will tell.
+	if err := a.bus.BusObject().Call("org.freedesktop.DBus.GetNameOwner", 0, busName).Store(&a.owner); err != nil {
+		a.owner = ""
 	}
 	go a.supervise()
 	return nil
@@ -311,11 +318,11 @@ func (a *Adapter) strike() {
 	}
 	a.strikes = 0
 	a.restarts.Add(1)
-	a.log.Warn("bluetoothd not responding, restarting it", "cmd", a.restartCmd)
+	a.log.Warn("bluetoothd not responding, restarting it")
 	// os.StartProcess rather than os/exec, which adds 128 KB to the binary. The command's output goes to
 	// ours, so nothing waits on a pipe that a daemon it starts may keep open.
 	p, err := os.StartProcess("/bin/sh", []string{"sh", "-c", a.restartCmd},
-		&os.ProcAttr{Files: []*os.File{nil, os.Stderr, os.Stderr}})
+		&os.ProcAttr{Env: restartEnv(os.Environ()), Files: []*os.File{nil, os.Stderr, os.Stderr}})
 	if err != nil {
 		a.log.Warn("bluetoothd restart failed", "err", err)
 		return
@@ -329,6 +336,12 @@ func (a *Adapter) strike() {
 	if err != nil {
 		a.log.Warn("bluetoothd restart failed", "err", err)
 	}
+}
+
+// restartEnv is the environment for the restart command: btproxy's own variables hold the encryption key and
+// the settings page's password and token.
+func restartEnv(env []string) []string {
+	return slices.DeleteFunc(env, func(v string) bool { return strings.HasPrefix(v, "BTPROXY_") })
 }
 
 // Restarts implements ble.RestartCounter: the bluetoothd restarts the supervisor started.
@@ -523,7 +536,11 @@ func (a *Adapter) watch(s *dbus.Signal) {
 		if name, _ := s.Body[0].(string); name != busName {
 			return
 		}
-		if owner, _ := s.Body[2].(string); owner == "" {
+		owner, _ := s.Body[2].(string)
+		a.mu.Lock()
+		a.owner = owner
+		a.mu.Unlock()
+		if owner == "" {
 			a.lost("bluetoothd stopped", true)
 		} else {
 			a.log.Info("bluetoothd started")

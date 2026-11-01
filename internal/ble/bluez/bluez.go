@@ -20,6 +20,13 @@ import (
 	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
+// Limits on what devices in radio range can make the proxy hold. Spoofed random addresses can report any number
+// of devices, and a device can send any number of value changes while a read waits, on a router with 128 MB.
+const (
+	maxDevices   = 4096
+	maxHeldValue = 64 // value changes held per characteristic while a read is in flight
+)
+
 const (
 	busName      = "org.bluez"
 	ifAdapter    = "org.bluez.Adapter1"
@@ -46,9 +53,10 @@ type Adapter struct {
 	mac  uint64
 
 	mu      sync.Mutex
-	devices map[dbus.ObjectPath]*device // advertisement state of every device BlueZ reports
+	devices map[dbus.ObjectPath]*device // advertisement state of the devices BlueZ reports, see maxDevices
 	scanFn  func(ble.Advert)            // nil while not scanning
 	conns   map[dbus.ObjectPath]*conn
+	owner   string // bluetoothd's unique bus name, "" while it is not running; see trusted
 
 	signals    *sigQueue
 	allDevices bool // subscribed to every device's properties (see signals.go)
@@ -282,8 +290,22 @@ func (a *Adapter) dispatch() {
 	}
 }
 
+// trusted tells whether a signal comes from the bus daemon or bluetoothd. Match rules only choose which signals
+// the bus sends us: any local client allowed on the bus can address a signal to us directly.
+func (a *Adapter) trusted(s *dbus.Signal) bool {
+	if s.Sender == "org.freedesktop.DBus" {
+		return true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.owner != "" && s.Sender == a.owner
+}
+
 // handle routes one signal.
 func (a *Adapter) handle(s *dbus.Signal) {
+	if !a.trusted(s) {
+		return
+	}
 	a.watch(s)
 	switch s.Name {
 	case ifProps + ".PropertiesChanged":
@@ -358,6 +380,17 @@ func (a *Adapter) connFor(p dbus.ObjectPath) *conn {
 	return a.conns[dbus.ObjectPath(s[:i])]
 }
 
+// evictDevice forgets one device that is not connected; which one is left to chance, so a flood of new
+// addresses cannot keep a real device out for long. Called with a.mu held.
+func (a *Adapter) evictDevice() {
+	for p := range a.devices {
+		if a.conns[p] == nil {
+			delete(a.devices, p)
+			return
+		}
+	}
+}
+
 // updateDevice merges Device1 properties into the cache and, if asked and scanning, returns an advertisement
 // for the caller to deliver once it has released a.mu (see emit). While raw advertisements flow, the cache
 // is not used for advertisements and its data maps are not rebuilt; they are cleared instead, so a fallback
@@ -365,6 +398,9 @@ func (a *Adapter) connFor(p dbus.ObjectPath) *conn {
 func (a *Adapter) updateDevice(p dbus.ObjectPath, props map[string]dbus.Variant, emit bool) pending {
 	d := a.devices[p]
 	if d == nil {
+		if len(a.devices) >= maxDevices {
+			a.evictDevice()
+		}
 		d = &device{}
 		a.devices[p] = d
 	}
@@ -724,6 +760,9 @@ func (c *conn) valueChanged(p dbus.ObjectPath, data []byte) {
 	defer c.evMu.Unlock()
 	c.mu.Lock()
 	if c.reading[h] > 0 { // may be the read's own result: decide when the read returns
+		if len(c.held[h]) >= maxHeldValue {
+			c.held[h] = c.held[h][1:] // the newest values matter most
+		}
 		c.held[h] = append(c.held[h], data)
 		c.mu.Unlock()
 		return

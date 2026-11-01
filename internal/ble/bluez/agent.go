@@ -81,8 +81,9 @@ func (g *agent) RequestPinCode(dev dbus.ObjectPath) (string, *dbus.Error) {
 	return "", errRejected
 }
 
-func (g *agent) DisplayPinCode(dev dbus.ObjectPath, pin string) *dbus.Error {
-	g.log.Info("agent: PIN code", "device", dev, "pin", pin)
+// DisplayPinCode and DisplayPasskey leave the value out of the log, which API clients can read.
+func (g *agent) DisplayPinCode(dev dbus.ObjectPath, _ string) *dbus.Error {
+	g.log.Info("agent: asked to display a PIN code, which a NoInputNoOutput agent cannot do", "device", dev)
 	return nil
 }
 
@@ -91,8 +92,8 @@ func (g *agent) RequestPasskey(dev dbus.ObjectPath) (uint32, *dbus.Error) {
 	return 0, errRejected
 }
 
-func (g *agent) DisplayPasskey(dev dbus.ObjectPath, passkey uint32, entered uint16) *dbus.Error {
-	g.log.Info("agent: passkey", "device", dev, "passkey", fmt.Sprintf("%06d", passkey), "entered", entered)
+func (g *agent) DisplayPasskey(dev dbus.ObjectPath, _ uint32, entered uint16) *dbus.Error {
+	g.log.Info("agent: asked to display a passkey, which a NoInputNoOutput agent cannot do", "device", dev, "entered", entered)
 	return nil
 }
 
