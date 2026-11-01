@@ -45,9 +45,13 @@ type scanState struct {
 	agentLog  *logx.Logger // set once RegisterAgent was called
 	adverts   int          // advertisements delivered, for the stall watchdog
 
+	connecting   int             // connects in progress, which pause scanning (see pause.go)
+	pauseWaiters []chan struct{} // connects waiting for the supervisor to stop scanning
+
 	// Set by Open.
-	stallTimeout time.Duration
-	restartCmd   string
+	stallTimeout   time.Duration
+	restartCmd     string
+	pauseOnConnect bool
 
 	// The supervisor's own.
 	armed       bool
@@ -60,6 +64,7 @@ type scanState struct {
 	quietSince  time.Time // when seen last changed or the scan was armed
 	strikes     int       // stalls and unanswered calls since the last advertisement or restart
 	lastRestart time.Time
+	pausedAt    time.Time // when scanning was stopped for a connect; zero when not paused
 }
 
 func (a *Adapter) initScan() error {
@@ -168,6 +173,8 @@ func (a *Adapter) reconcile() {
 	if err := a.syncMatches(); err != nil {
 		a.log.Warn("scanner", "op", "D-Bus match rule", "err", err)
 	}
+	paused, waiters := a.takePause()
+	defer release(waiters) // once scanning is stopped, or cannot be
 	a.mu.Lock()
 	want := a.scanFn != nil
 	gone, off, epoch, adverts := a.gone, a.off, a.epoch, a.adverts
@@ -206,6 +213,21 @@ func (a *Adapter) reconcile() {
 		a.off = false
 		a.mu.Unlock()
 	}
+	if paused {
+		// Reported as idle, as an ESP32 does while it connects. The stall watchdog does not run on a
+		// disarmed scan.
+		if a.armed {
+			start := time.Now()
+			a.disarm()
+			a.log.Debug("scanning paused for a connect", "took", time.Since(start).Round(time.Millisecond))
+		}
+		if a.pausedAt.IsZero() {
+			a.pausedAt = time.Now()
+		}
+		a.lastErr = ""
+		a.setStatus(ble.ScanIdle, mode)
+		return
+	}
 	if a.stalled(want) {
 		a.log.Warn("no advertisements, restarting discovery", "for", time.Since(a.quietSince).Round(time.Second))
 		a.disarm()
@@ -217,6 +239,7 @@ func (a *Adapter) reconcile() {
 		a.disarm()
 	}
 	if want && !a.armed {
+		start := time.Now()
 		if err := a.arm(mode, epoch); err != nil {
 			a.fail("start scan", err)
 			a.setStatus(ble.ScanFailed, mode)
@@ -226,7 +249,12 @@ func (a *Adapter) reconcile() {
 			return
 		}
 		mode = a.armedMode
+		if !a.pausedAt.IsZero() {
+			a.log.Debug("scanning resumed after a connect", "paused", start.Sub(a.pausedAt).Round(time.Millisecond),
+				"took", time.Since(start).Round(time.Millisecond))
+		}
 	}
+	a.pausedAt = time.Time{}
 	a.lastErr = ""
 	idle(ble.ScanRunning) // running if wanted, idle otherwise
 }
@@ -280,12 +308,16 @@ func (a *Adapter) strike() {
 
 func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 	quiet := a.quiet()
+	logf := a.log.Info
+	if !a.pausedAt.IsZero() { // after every connect: only worth a line when debugging
+		logf = a.log.Debug
+	}
 	if mode == ble.ScanPassive {
 		err := a.registerMonitors(quiet)
 		if err == nil {
 			a.armed, a.armedMode, a.armedEpoch, a.quietSince = true, ble.ScanPassive, epoch, time.Now()
 			a.rawActive.Store(false)
-			a.log.Info("scanning passively", "bluetoothd_reports_devices", !quiet)
+			logf("scanning passively", "bluetoothd_reports_devices", !quiet)
 			return nil
 		}
 		if unreachable(err) {
@@ -327,7 +359,7 @@ func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 	}
 	a.armed, a.armedMode, a.armedEpoch, a.quietSince = true, ble.ScanActive, epoch, time.Now()
 	a.rawActive.Store(true)
-	a.log.Info("scanning actively", "bluetoothd_reports_devices", !quiet)
+	logf("scanning actively", "bluetoothd_reports_devices", !quiet)
 	return nil
 }
 

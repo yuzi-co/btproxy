@@ -66,6 +66,8 @@ type Options struct {
 	RestartCmd string
 	// RawAdverts selects where advertisements come from (see raw.go).
 	RawAdverts RawMode
+	// PauseOnConnect stops scanning while a connect is in progress (see pause.go).
+	PauseOnConnect bool
 	// Log receives the adapter's log lines; nil discards them.
 	Log *logx.Logger
 }
@@ -98,7 +100,7 @@ func Open(name string, opt Options) (*Adapter, error) {
 		opt.Log = logx.Discard()
 	}
 	a.log = opt.Log.With("adapter", string(a.path))
-	a.stallTimeout, a.restartCmd = opt.StallTimeout, opt.RestartCmd
+	a.stallTimeout, a.restartCmd, a.pauseOnConnect = opt.StallTimeout, opt.RestartCmd, opt.PauseOnConnect
 	v, err := a.getProperty(a.path, ifAdapter+".Address")
 	if err != nil {
 		return nil, fmt.Errorf("adapter %s: %w", name, err)
@@ -462,6 +464,9 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	a.conns[p] = c
 	_, known := a.devices[p]
 	a.mu.Unlock()
+	// Until the services are resolved or the connect fails: the link is most fragile in its first
+	// connection events, and service discovery is a burst of traffic right after.
+	defer a.pauseScan()()
 	fail := func(err error) (ble.Conn, error) {
 		a.mu.Lock()
 		if a.conns[p] == c {

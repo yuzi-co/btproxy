@@ -96,7 +96,8 @@ Flags: `-name`, `-friendly-name`, `-area`, `-listen` (`:6053`), `-adapter` (`hci
 advertisements; `0` disables), `-bluetoothd-restart` (shell command that restarts `bluetoothd` when it hangs,
 for example `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"`; default: none),
 `-raw-adverts` (`auto`, `on` or `off`: where advertisements come from, see [Advertisements](#advertisements);
-default `auto`),
+default `auto`), `-scan-pause-on-connect` (`true`: stop scanning while a connection is being made, like
+ESPHome, see [Scanning](#scanning)),
 `-encryption-key` and `-encryption-key-file` (see [Encryption](#encryption)), `-debug`.
 
 Home Assistant discovers the proxy over mDNS and offers it under Settings, Devices & services. Without mDNS
@@ -214,9 +215,9 @@ only when it already runs with a key.
 
 `-scan-mode` is the configured mode Home Assistant reads back. Home Assistant can switch the mode at run time
 (its auto mode keeps a proxy passive and opens short active windows). The state reports carry the mode actually
-in use, which is active whenever passive scanning is unavailable. States: running, idle (no subscriber), failed
-(`bluetoothd` or the adapter is gone, scanning could not start, `bluetoothd` did not answer, or scanning
-stalled; retried every 10 s), stopped (the adapter is powered off and could not be powered on).
+in use, which is active whenever passive scanning is unavailable. States: running, idle (no subscriber, or
+paused for a connect), failed (`bluetoothd` or the adapter is gone, scanning could not start, `bluetoothd` did
+not answer, or scanning stalled; retried every 10 s), stopped (the adapter is powered off and could not be powered on).
 
 `bluetoothd` can hang while keeping its D-Bus name. With BlueZ 5.66 and an RTL8761B, `StartDiscovery` once
 never replied, and the proxy sat with no advertisements for hours. Every call the proxy makes that
@@ -255,6 +256,19 @@ which 5.15 turns off while monitors are registered and 6.x leaves on.
   presence detection.
 - No scan responses, so names and other scan-response data of active-only devices are missing.
 
+Scanning pauses while the proxy connects, as an ESP32's does (`-scan-pause-on-connect`, on by default). From
+the connect call until the services are resolved or the connect fails, the proxy stops discovery and
+unregisters its advertisement monitors, the one that matches nothing included, and reports the scanner as
+idle; then it starts them again, which takes a few D-Bus calls. The kernel stops scanning to send LE Create
+Connection, but as soon as the link is up it scans again if a monitor is registered or discovery runs. With
+an RTL8761B, about half the connects failed that way: the controller went back to scanning right when the
+first connection events had to get through, and the link failed with HCI reason 0x3e (connection failed to
+be established). Overlapping connects share one pause, which ends after 60 s at the latest, and the stall
+watchdog does not count it. The pause cannot stop scanning the kernel does for its own reasons: while another
+connect still waits for its device (the kernel then scans with a 60 ms window every 60 ms), or for a bonded
+device `bluetoothd` reconnects to automatically. Pairing a connected device does not pause scanning, as on an
+ESP32.
+
 ## Connection parameters
 
 Home Assistant integrations can ask for other connection parameters on a connected device (aioesphomeapi's
@@ -285,9 +299,9 @@ whether the command will be allowed is only known when it is sent.
   ESP32 does, because Home Assistant shares one GATT cache per device between proxies.
 - BlueZ owns the CCCD descriptors, so a write to one turns notifications on or off with
   `StartNotify`/`StopNotify` instead.
-- Discovery keeps running while the proxy connects. ESPHome pauses it, BlueZ does not need that.
-  Connecting does not depend on discovery: for `Device1.Connect` and `ConnectDevice` the kernel scans for the
-  device itself, so connections work in passive mode too.
+- Connecting does not depend on the proxy's scan: for `Device1.Connect` and `ConnectDevice` the kernel scans
+  for the device itself, so connections work in passive mode too, and with the scan paused (see
+  [Scanning](#scanning)).
 - There is no idle timeout on API clients: Home Assistant does not ping while advertisements flow, so dead peers
   are found with TCP keepalive (30 s idle, then 3 probes 10 s apart).
 - Each API client has its own send queue (256 messages) and writer, so a client that stops reading never holds

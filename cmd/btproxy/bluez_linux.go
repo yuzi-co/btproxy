@@ -13,7 +13,7 @@ func init() {
 			return nil, err
 		}
 		a, err := bluez.Open(name, bluez.Options{StallTimeout: stallTimeout, RestartCmd: bluetoothdRestart,
-			RawAdverts: raw, Log: log})
+			RawAdverts: raw, PauseOnConnect: scanPause, Log: log})
 		if err != nil {
 			return nil, err
 		}
