@@ -93,8 +93,8 @@ btproxy -name btproxy-bedroom -area Bedroom
 Flags: `-name`, `-friendly-name`, `-area`, `-listen` (`:6053`), `-adapter` (`hci0`; a comma-separated list for
 [several adapters](#several-adapters)), `-connections` (3 per adapter),
 `-mac` (unique id reported to HA; default: the first network interface's MAC), `-mdns` (`true`), `-mdns-iface`
-(comma-separated interfaces to advertise on; default: all up interfaces with IPv4), `-backend` (`bluez` or
-`fake`), `-agent` (`true`: register a BlueZ pairing agent), `-scan-mode` (`active` or `passive`; default
+(comma-separated interfaces to advertise on; default: all up interfaces with IPv4), `-backend` (`bluez`,
+`winrt` or `fake`; `winrt` is the default on Windows, see [Windows](#windows)), `-agent` (`true`: register a BlueZ pairing agent), `-scan-mode` (`active` or `passive`; default
 `active`, like ESPHome), `-stall-timeout` (`3m`: restart active scanning after this long without
 advertisements; `0` disables), `-bluetoothd-restart` (shell command that restarts `bluetoothd` when it hangs,
 for example `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"`; default: none),
@@ -127,6 +127,52 @@ recover from a restart as from any other. An adapter other than the first that c
 logged and left out, so a missing USB stick does not take the others down; restart the proxy once it is back.
 The first one failing still stops the proxy. The log stream API clients subscribe to carries the lines of every
 adapter, tagged with `node` and `adapter`.
+
+## Windows
+
+The `winrt` backend runs btproxy on Windows 10 (version 2004 or later) and Windows 11 through the WinRT
+Bluetooth LE APIs, the ones Bleak uses. It is pure Go (`CGO_ENABLED=0`); the bindings are generated into
+`internal/ble/winrt/gen` (`go generate ./internal/ble/winrt/gen` regenerates them).
+
+```sh
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/btproxy.exe ./cmd/btproxy
+btproxy.exe -name btproxy-office -mac AA:BB:CC:DD:EE:FF
+```
+
+The binary is about 3.4 MB. It uses the default Bluetooth adapter, which must support LE and the central role;
+`-adapter` and the BlueZ flags (`-agent`, `-stall-timeout`, `-bluetoothd-restart`, `-raw-adverts`,
+`-scan-pause-on-connect`) have no effect. Listening on all interfaces makes Windows Firewall ask on the first
+start; Home Assistant needs TCP 6053 in and, for discovery, UDP 5353. The default `-mac` is the first network
+interface with a MAC, which on a machine with Hyper-V is a virtual adapter: set `-mac` to a fixed value, since
+Home Assistant keys the device on it.
+
+Checked on Windows 11 with an Intel Wireless Bluetooth adapter: active and passive scanning, mode changes from
+the client, scanner state, RSSI and address type; connecting, service discovery, reading characteristics and
+descriptors, turning notifications on and off by request, MTU (247 after Windows' own exchange), cache
+clearing, unpairing a device that was not paired, and disconnecting. Writes (including CCCD writes),
+notification delivery, pairing, unpairing a bonded device, link loss and recovery after the radio goes off are
+implemented but were not tried against a device.
+
+Differences from the BlueZ backend and an ESP32:
+
+- Advertisements are rebuilt from the data sections WinRT parses out of each packet, in their original order,
+  so the bytes match what was on air. Advertisement and scan response arrive as separate entries, as from an
+  ESP32. Extended advertisements are not reported.
+- Windows owns the connections. btproxy holds a GATT session and the service objects; the link drops a few
+  seconds after it lets go of them, and not at all while another program or Windows itself (a paired keyboard,
+  for example) uses the device. Services Windows keeps for itself, such as HID, are listed without
+  characteristics.
+- Windows only connects to devices it has seen advertising (or has paired), so connecting fails with "device
+  not found" otherwise. Home Assistant scans all the time, so this only matters right after a start.
+- Characteristic handles are reported as value handles, like an ESP32 and the BlueZ backend, so Home
+  Assistant's GATT cache stays valid across proxies.
+- Writes to a CCCD go through Windows' configuration call, which is also what has notifications delivered.
+- Pairing accepts Just Works, passkey display and numeric comparison without asking; pairing that needs a
+  passkey typed in fails.
+- Cache clearing makes the next service discovery for the device bypass the Windows GATT cache, which also
+  refreshes that cache. Bonds are kept.
+- Connection parameters cannot be set (Windows offers presets only), so the feature is not advertised. Scanning
+  is not paused while connecting.
 
 ## mDNS
 

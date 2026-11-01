@@ -27,7 +27,10 @@ var version = "0.1.0"
 // esphomeVersion is the ESPHome release btproxy reports itself as (DeviceInfo and mDNS).
 const esphomeVersion = "2026.10.0"
 
-// backends maps -backend names to constructors; bluez registers itself on Linux.
+// defaultBackend is the -backend default; the winrt backend makes itself the default on Windows.
+var defaultBackend = "bluez"
+
+// backends maps -backend names to constructors; bluez registers itself on Linux, winrt on Windows.
 var backends = map[string]func(adapter string, log *logx.Logger) (ble.Adapter, error){
 	"fake": func(name string, _ *logx.Logger) (ble.Adapter, error) {
 		return &fake.Adapter{Addr: fakeAddr(name)}, nil
@@ -50,7 +53,7 @@ func main() {
 	friendly := flag.String("friendly-name", "", "friendly name (default: the node name)")
 	area := flag.String("area", "", "suggested area")
 	listen := flag.String("listen", ":6053", "API listen address; with several adapters, the first of consecutive ports, or a comma-separated list")
-	backend := flag.String("backend", "bluez", "Bluetooth backend: bluez or fake")
+	backend := flag.String("backend", defaultBackend, "Bluetooth backend: bluez, winrt (Windows) or fake")
 	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter, or a comma-separated list served as one device each (bluez backend)")
 	maxConns := flag.Int("connections", 3, "maximum simultaneous peripheral connections")
 	scanMode := flag.String("scan-mode", "active", "scanner mode: active or passive (bluez: needs bluetoothd --experimental, else active)")

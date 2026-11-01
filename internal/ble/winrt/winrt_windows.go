@@ -1,0 +1,341 @@
+package winrt
+
+import (
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+	"unsafe"
+
+	"github.com/saltosystems/winrt-go/windows/foundation"
+
+	"btproxy/internal/ble"
+	"btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
+	"btproxy/internal/ble/winrt/gen/windows/devices/bluetooth/advertisement"
+	"btproxy/internal/logx"
+)
+
+const (
+	callTimeout     = 30 * time.Second // one WinRT operation (lookup, discovery, read, write)
+	connectTimeout  = 30 * time.Second // until Windows reports the link up
+	pairTimeout     = 60 * time.Second
+	scanRetry       = 5 * time.Second // after the watcher stops on its own, e.g. with the radio off
+	mtuSettleWindow = time.Second     // how long a new connection may take to finish its MTU exchange
+)
+
+// Adapter is the default Bluetooth radio of the machine.
+type Adapter struct {
+	log *logx.Logger
+	mac uint64
+
+	mu       sync.Mutex
+	mode     ble.ScanMode
+	status   ble.ScanStatus
+	onStatus func(ble.ScanStatus)
+	scanning bool                             // scanning is wanted
+	fn       atomic.Pointer[func(ble.Advert)] // read without mu: Stop may wait for a running Received handler
+	w        *watcher
+	retry    *time.Timer
+	conns    map[uint64]*conn
+	uncached map[uint64]bool // devices whose next service discovery bypasses the Windows GATT cache
+}
+
+// Open initializes WinRT and opens the default Bluetooth adapter.
+func Open(log *logx.Logger) (*Adapter, error) {
+	initCOM()
+	op, err := bluetooth.BluetoothAdapterGetDefaultAsync()
+	if err != nil {
+		return nil, err
+	}
+	p, err := await(op, bluetooth.SignatureBluetoothAdapter, callTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("default Bluetooth adapter: %w", err)
+	}
+	if p == nil {
+		return nil, errors.New("no Bluetooth adapter")
+	}
+	ad := (*bluetooth.BluetoothAdapter)(p)
+	defer ad.Release()
+	if ok, err := ad.GetIsLowEnergySupported(); err == nil && !ok {
+		return nil, errors.New("the Bluetooth adapter does not support Bluetooth LE")
+	}
+	if ok, err := ad.GetIsCentralRoleSupported(); err == nil && !ok {
+		return nil, errors.New("the Bluetooth adapter cannot connect to peripherals (no central role)")
+	}
+	mac, err := ad.GetBluetoothAddress()
+	if err != nil {
+		return nil, err
+	}
+	return &Adapter{log: log, mac: mac, mode: ble.ScanActive, conns: map[uint64]*conn{},
+		uncached: map[uint64]bool{}}, nil
+}
+
+func (a *Adapter) MAC() uint64 { return a.mac }
+
+// Scan starts an advertisement watcher. Advertisements and scan responses arrive as separate events, each
+// delivered as its own Advert, as an ESP32 reports them.
+func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.scanning {
+		return nil, errors.New("already scanning")
+	}
+	a.scanning = true
+	a.fn.Store(&fn)
+	if err := a.startLocked(); err != nil {
+		a.scanning = false
+		a.fn.Store(nil)
+		a.setStatusLocked(ble.ScanFailed)
+		return nil, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			a.scanning = false
+			a.fn.Store(nil)
+			a.stopLocked()
+			a.setStatusLocked(ble.ScanIdle)
+		})
+	}, nil
+}
+
+func (a *Adapter) SetScanMode(m ble.ScanMode) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if m == a.mode {
+		return
+	}
+	a.mode = m
+	if !a.scanning || a.w == nil {
+		a.setStatusLocked(a.status.State)
+		return
+	}
+	// The scanning mode of a started watcher cannot change: restart it.
+	a.stopLocked()
+	if err := a.startLocked(); err != nil {
+		a.log.Warn("restarting scan in the new mode failed", "err", err)
+		a.failedLocked()
+	}
+}
+
+func (a *Adapter) ScanStatus() ble.ScanStatus {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.status
+}
+
+func (a *Adapter) OnScanStatus(fn func(ble.ScanStatus)) {
+	a.mu.Lock()
+	a.onStatus = fn
+	a.mu.Unlock()
+}
+
+func (a *Adapter) setStatusLocked(s ble.ScanState) {
+	a.status = ble.ScanStatus{State: s, Mode: a.mode}
+	if a.onStatus != nil {
+		a.onStatus(a.status)
+	}
+}
+
+func (a *Adapter) startLocked() error {
+	if a.retry != nil {
+		a.retry.Stop()
+		a.retry = nil
+	}
+	a.setStatusLocked(ble.ScanStarting)
+	w, err := a.newWatcher(a.mode)
+	if err != nil {
+		return err
+	}
+	a.w = w
+	a.setStatusLocked(ble.ScanRunning)
+	return nil
+}
+
+func (a *Adapter) stopLocked() {
+	if a.retry != nil {
+		a.retry.Stop()
+		a.retry = nil
+	}
+	if a.w != nil {
+		a.w.close()
+		a.w = nil
+	}
+}
+
+// failedLocked reports the scanner failed and tries again later while scanning is still wanted.
+func (a *Adapter) failedLocked() {
+	a.stopLocked()
+	a.setStatusLocked(ble.ScanFailed)
+	var t *time.Timer
+	t = time.AfterFunc(scanRetry, func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.retry != t || !a.scanning {
+			return
+		}
+		a.retry = nil
+		if err := a.startLocked(); err != nil {
+			a.log.Debug("scan restart failed", "err", err)
+			a.failedLocked()
+		} else {
+			a.log.Info("scanning again")
+		}
+	})
+	a.retry = t
+}
+
+// watcher is one started BluetoothLEAdvertisementWatcher. A watcher's mode is fixed once it starts, so a mode
+// change replaces it.
+type watcher struct {
+	w                *advertisement.BluetoothLEAdvertisementWatcher
+	recv, stopped    *foundation.TypedEventHandler
+	recvTok, stopTok foundation.EventRegistrationToken
+	mu               sync.Mutex
+	closed           bool
+}
+
+func (a *Adapter) newWatcher(mode ble.ScanMode) (*watcher, error) {
+	ww, err := advertisement.NewBluetoothLEAdvertisementWatcher()
+	if err != nil {
+		return nil, err
+	}
+	w := &watcher{w: ww}
+	sm := advertisement.BluetoothLEScanningModeActive
+	if mode == ble.ScanPassive {
+		sm = advertisement.BluetoothLEScanningModePassive
+	}
+	if err := ww.SetScanningMode(sm); err != nil {
+		ww.Release()
+		return nil, err
+	}
+	w.recv = eventHandler(advertisement.SignatureBluetoothLEAdvertisementWatcher,
+		advertisement.SignatureBluetoothLEAdvertisementReceivedEventArgs, func(_, args unsafe.Pointer) {
+			a.received((*advertisement.BluetoothLEAdvertisementReceivedEventArgs)(args))
+		})
+	w.stopped = eventHandler(advertisement.SignatureBluetoothLEAdvertisementWatcher,
+		advertisement.SignatureBluetoothLEAdvertisementWatcherStoppedEventArgs, func(_, args unsafe.Pointer) {
+			code, _ := (*advertisement.BluetoothLEAdvertisementWatcherStoppedEventArgs)(args).GetError()
+			a.watcherStopped(w, code)
+		})
+	if w.recvTok, err = ww.AddReceived(w.recv); err == nil {
+		if w.stopTok, err = ww.AddStopped(w.stopped); err == nil {
+			err = ww.Start()
+		}
+	}
+	if err != nil {
+		w.close()
+		return nil, err
+	}
+	if st, err := ww.GetStatus(); err == nil && st == advertisement.BluetoothLEAdvertisementWatcherStatusAborted {
+		w.close()
+		return nil, errors.New("watcher aborted at start (Bluetooth off?)")
+	}
+	return w, nil
+}
+
+func (w *watcher) close() {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return
+	}
+	w.closed = true
+	w.mu.Unlock()
+	w.w.Stop()
+	w.w.RemoveReceived(w.recvTok)
+	w.w.RemoveStopped(w.stopTok)
+	w.recv.Release()
+	w.stopped.Release()
+	w.w.Release()
+}
+
+// watcherStopped handles a watcher stopping on its own: the radio went off, or another app took it.
+func (a *Adapter) watcherStopped(w *watcher, code bluetooth.BluetoothError) {
+	w.mu.Lock()
+	ours := w.closed
+	w.mu.Unlock()
+	if ours {
+		return
+	}
+	go func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.w != w {
+			return
+		}
+		a.log.Warn("scanning stopped by Windows, retrying", "bluetooth_error", int(code), "in", scanRetry)
+		a.failedLocked()
+	}()
+}
+
+// received turns one WinRT advertisement event into an Advert. It runs on a WinRT thread.
+func (a *Adapter) received(args *advertisement.BluetoothLEAdvertisementReceivedEventArgs) {
+	fn := a.fn.Load()
+	if fn == nil {
+		return
+	}
+	addr, err := args.GetBluetoothAddress()
+	if err != nil {
+		return
+	}
+	rssi, _ := args.GetRawSignalStrengthInDBm()
+	at := ble.AddrPublic
+	if t, err := args.GetBluetoothAddressType(); err == nil && t == bluetooth.BluetoothAddressTypeRandom {
+		at = ble.AddrRandom
+	}
+	var buf [maxAdvert]byte
+	data := buf[:0]
+	if adv, err := args.GetAdvertisement(); err == nil && adv != nil {
+		data = appendSections(data, adv)
+		adv.Release()
+	}
+	(*fn)(ble.Advert{Addr: addr, AddrType: at, RSSI: int8(max(rssi, -128)), Data: data})
+}
+
+// appendSections rebuilds the raw AD structures of an advertisement from its data sections.
+func appendSections(dst []byte, adv *advertisement.BluetoothLEAdvertisement) []byte {
+	v, err := adv.GetDataSections()
+	if err != nil || v == nil {
+		return dst
+	}
+	defer v.Release()
+	n, _ := v.GetSize()
+	var scratch [maxAdvert]byte
+	for i := range n {
+		p, err := v.GetAt(i)
+		if err != nil || p == nil {
+			continue
+		}
+		s := (*advertisement.BluetoothLEAdvertisementDataSection)(p)
+		typ, err1 := s.GetDataType()
+		b, err2 := s.GetData()
+		if err1 == nil && err2 == nil && b != nil {
+			if d, err := appendBuffer(scratch[:0], b); err == nil {
+				dst = appendAD(dst, typ, d)
+			}
+		}
+		if b != nil {
+			b.Release()
+		}
+		s.Release()
+	}
+	return dst
+}
+
+// ClearCache makes the next service discovery for addr read the services from the device instead of the
+// Windows GATT cache, which also refreshes that cache. Bonds are kept.
+func (a *Adapter) ClearCache(addr uint64) error {
+	a.mu.Lock()
+	a.uncached[addr] = true
+	a.mu.Unlock()
+	return nil
+}
+
+var (
+	_ ble.Adapter     = (*Adapter)(nil)
+	_ ble.ModeScanner = (*Adapter)(nil)
+)
