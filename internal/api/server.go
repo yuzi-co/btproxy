@@ -32,8 +32,18 @@ type Config struct {
 	AdvFilter      *ble.AdvFilter // advertisements to forward; nil forwards all
 }
 
-// handshakeTimeout bounds the encrypted handshake, so a client that opens a connection and stalls is dropped.
-const handshakeTimeout = 30 * time.Second
+// setupTimeout bounds the time from accepting a client to its HelloRequest, including the encrypted handshake,
+// so a client that opens a connection and stalls is dropped. After Hello there is no read deadline.
+const setupTimeout = 30 * time.Second
+
+// Limits on what clients can make the proxy hold. A client over maxClientWorkers is closed; an ordinary one
+// has a few requests waiting for the radio. A GATT request over the queue limits fails with a GATT error.
+const (
+	maxClients        = 16
+	maxClientWorkers  = 32 // device and connection parameter requests running for one client
+	maxGATTQueue      = 256
+	maxGATTQueueBytes = 1 << 20 // of write data, per connection
+)
 
 // advBatchSize and advFlushInterval follow ESPHome's batching of raw advertisements: a batch is sent when it
 // is full or advFlushInterval after its first advertisement.
@@ -62,16 +72,19 @@ type Server struct {
 
 	stats   stats    // see stats.go
 	sensors []sensor // fixed by NewServer
+
+	setupTimeout time.Duration // a field so the tests can shorten it
 }
 
 // btConn is a connection slot. conn is nil while the connection is being made; dropped records a link that
 // went down before that. GATT requests for the connection run one at a time from queue, in arrival order, as
 // ESPHome handles them; queue and running are guarded by Server.mu.
 type btConn struct {
-	conn    ble.Conn
-	dropped bool
-	queue   []gattJob
-	running bool
+	conn       ble.Conn
+	dropped    bool
+	queue      []gattJob
+	queueBytes int // write data in queue
+	running    bool
 }
 
 type gattJob struct {
@@ -87,6 +100,7 @@ func NewServer(cfg Config, adapter ble.Adapter, log *logx.Logger) *Server {
 	s := &Server{
 		cfg: cfg, adapter: adapter, log: log,
 		clients: map[*client]bool{}, conns: map[uint64]*btConn{}, scanKick: make(chan struct{}, 1),
+		setupTimeout: setupTimeout,
 	}
 	s.initScanner()
 	s.initStats()
@@ -99,6 +113,7 @@ func (s *Server) Serve(l net.Listener) error {
 	go s.scanStatusLoop()
 	go s.statsLoop()
 	var delay time.Duration
+	var lastFull time.Time
 	for {
 		c, err := l.Accept()
 		if errors.Is(err, net.ErrClosed) {
@@ -111,6 +126,17 @@ func (s *Server) Serve(l net.Listener) error {
 			continue
 		}
 		delay = 0
+		s.mu.Lock()
+		full := len(s.clients) >= maxClients // only this loop adds clients, so the count cannot grow past the check
+		s.mu.Unlock()
+		if full {
+			if time.Since(lastFull) > time.Minute { // a flood of connections must not flood the log too
+				s.log.Warn("too many clients, refusing connections", "max", maxClients, "from", c.RemoteAddr().String())
+				lastFull = time.Now()
+			}
+			c.Close()
+			continue
+		}
 		if tc, ok := c.(*net.TCPConn); ok {
 			tc.SetNoDelay(true)
 			// Clients only ping while they receive nothing, and a scanning proxy sends all the time, so
@@ -407,6 +433,7 @@ type client struct {
 	dead             bool         // a write failed or the queue overflowed, nothing more is queued; guarded by wmu
 	sendC            *noiseCipher // set under wmu when the encrypted handshake is done, then used by the writer only
 	logDrops         atomic.Int64 // log lines dropped since the writer last reported drops
+	workers          atomic.Int32 // requests running in their own goroutines, see spawn
 	recv             *noiseCipher // used by run only
 	advSubscribed    bool         // guarded by s.mu
 	statesSubscribed bool         // guarded by s.mu
@@ -533,13 +560,12 @@ func (c *client) run() {
 	c.log.Info("client connected")
 	r := bufio.NewReader(c.c)
 	read := ReadFrame
+	c.c.SetReadDeadline(time.Now().Add(c.s.setupTimeout)) // HelloRequest clears it
 	if c.s.cfg.EncryptionKey != nil {
-		c.c.SetReadDeadline(time.Now().Add(handshakeTimeout))
 		if err := c.noiseHandshake(r); err != nil {
 			c.log.Warn("handshake failed", "err", err)
 			return
 		}
-		c.c.SetReadDeadline(time.Time{})
 		c.log.Debug("encrypted session established")
 		read = c.readNoise
 	}
@@ -574,6 +600,7 @@ func (c *client) handle(f Frame) bool {
 			c.log.Warn("bad message", "type", f.Type, "err", err)
 			return false
 		}
+		c.c.SetReadDeadline(time.Time{})
 		c.log.Debug("hello", "api", fmt.Sprintf("%d.%d", c.apiMajor, c.apiMinor))
 		c.send(msgHelloResponse, encHelloResponse("btproxy "+s.cfg.ProjectVersion, s.cfg.Name))
 	case msgDisconnectRequest:
@@ -654,7 +681,10 @@ func (c *client) handle(f Frame) bool {
 			c.log.Warn("bad message", "type", f.Type, "err", err)
 			return false
 		}
-		go s.setConnParams(c, addr, p) // waits for the controller, like a device request
+		// Waits for the controller, like a device request.
+		if !c.spawn(func() { s.setConnParams(c, addr, p) }) {
+			return false
+		}
 	case msgBTDeviceRequest, msgBTGATTGetServicesRequest, msgBTGATTReadRequest, msgBTGATTWriteRequest,
 		msgBTGATTReadDescriptorRequest, msgBTGATTWriteDescriptorRequest, msgBTGATTNotifyRequest:
 		r, err := decRequest(f.Type, f.Payload)
@@ -664,13 +694,30 @@ func (c *client) handle(f Frame) bool {
 		}
 		if f.Type == msgBTDeviceRequest {
 			// Connects and disconnects block on the radio too, but must not wait behind a stuck GATT request.
-			go c.deviceRequest(r)
+			if !c.spawn(func() { c.deviceRequest(r) }) {
+				return false
+			}
 		} else {
 			s.enqueue(gattJob{c: c, typ: f.Type, r: r})
 		}
 	default:
 		c.log.Info("ignoring unsupported message", "type", f.Type)
 	}
+	return true
+}
+
+// spawn runs a request that blocks on the radio in its own goroutine. It reports false, and runs nothing, if
+// the client already has maxClientWorkers running.
+func (c *client) spawn(f func()) bool {
+	if c.workers.Add(1) > maxClientWorkers {
+		c.workers.Add(-1)
+		c.log.Warn("too many requests running, closing the client", "max", maxClientWorkers)
+		return false
+	}
+	go func() {
+		defer c.workers.Add(-1)
+		f()
+	}()
 	return true
 }
 
@@ -698,7 +745,7 @@ func (c *client) deviceRequest(r request) {
 }
 
 // enqueue queues a GATT request on its connection and starts the connection's worker if it is idle. Requests
-// for a device that is not connected fail at once.
+// for a device that is not connected, or that find the queue full, fail at once.
 func (s *Server) enqueue(j gattJob) {
 	s.mu.Lock()
 	bc := s.conns[j.r.addr]
@@ -707,7 +754,14 @@ func (s *Server) enqueue(j gattJob) {
 		j.c.gatt(nil, j.typ, j.r)
 		return
 	}
+	if len(bc.queue) >= maxGATTQueue || bc.queueBytes+len(j.r.data) > maxGATTQueueBytes {
+		s.mu.Unlock()
+		j.c.log.Warn("gatt queue full", "addr", ble.FormatMAC(j.r.addr), "handle", j.r.handle)
+		j.c.send(msgBTGATTErrorResponse, encGATTError(j.r.addr, j.r.handle, gattError))
+		return
+	}
 	bc.queue = append(bc.queue, j)
+	bc.queueBytes += len(j.r.data)
 	start := !bc.running
 	bc.running = true
 	s.mu.Unlock()
@@ -729,6 +783,7 @@ func (s *Server) runQueue(bc *btConn) {
 		j := bc.queue[0]
 		bc.queue[0] = gattJob{}
 		bc.queue = bc.queue[1:]
+		bc.queueBytes -= len(j.r.data)
 		var conn ble.Conn
 		if s.conns[j.r.addr] == bc {
 			conn = bc.conn
