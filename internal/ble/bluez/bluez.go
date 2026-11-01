@@ -142,7 +142,39 @@ func Open(name string, opt Options) (*Adapter, error) {
 		return nil, err
 	}
 	go a.dispatch()
+	opened.add(a)
 	return a, nil
+}
+
+// opened lists the adapters open in the process. BlueZ calls one default agent for pairings on every
+// adapter, so the agent looks for the device among the connections of all of them.
+var opened adapterList
+
+type adapterList struct {
+	mu   sync.Mutex
+	list []*Adapter
+}
+
+func (l *adapterList) add(a *Adapter) {
+	l.mu.Lock()
+	l.list = append(l.list, a)
+	l.mu.Unlock()
+}
+
+// connected tells whether one of the adapters has a connection to the device at p.
+func (l *adapterList) connected(p dbus.ObjectPath) bool {
+	l.mu.Lock()
+	list := l.list
+	l.mu.Unlock()
+	for _, a := range list {
+		a.mu.Lock()
+		_, ok := a.conns[p]
+		a.mu.Unlock()
+		if ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Adapter) obj(p dbus.ObjectPath) dbus.BusObject { return a.bus.Object(busName, p) }

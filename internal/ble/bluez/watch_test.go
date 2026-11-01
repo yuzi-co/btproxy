@@ -422,6 +422,7 @@ func TestRecovery(t *testing.T) {
 // call timeout instead of starting for ever, runs the restart command, at most once per restartEvery, and
 // runs again once StartDiscovery is answered.
 func TestUnanswered(t *testing.T) {
+	bluetoothdRestarts = restartGate{} // shared by the process: an earlier test's restart counts
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, false)
 	bz.setWedged(true)
@@ -549,6 +550,7 @@ func TestCallbackOutsideLock(t *testing.T) {
 // TestHealthCheck hangs bluetoothd while passive scanning runs, where no stall watchdog applies and
 // advertisements from the HCI monitor would keep flowing: the periodic check must notice and restart it.
 func TestHealthCheck(t *testing.T) {
+	bluetoothdRestarts = restartGate{} // shared by the process: an earlier test's restart counts
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, true)
 	marker := filepath.Join(t.TempDir(), "restarts")

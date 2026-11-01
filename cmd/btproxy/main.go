@@ -29,7 +29,9 @@ const esphomeVersion = "2026.10.0"
 
 // backends maps -backend names to constructors; bluez registers itself on Linux.
 var backends = map[string]func(adapter string, log *logx.Logger) (ble.Adapter, error){
-	"fake": func(string, *logx.Logger) (ble.Adapter, error) { return &fake.Adapter{}, nil },
+	"fake": func(name string, _ *logx.Logger) (ble.Adapter, error) {
+		return &fake.Adapter{Addr: fakeAddr(name)}, nil
+	},
 }
 
 // Flags read by the bluez backend.
@@ -47,12 +49,12 @@ func main() {
 	name := flag.String("name", "btproxy-"+strings.ToLower(strings.Split(host, ".")[0]), "node name shown in Home Assistant")
 	friendly := flag.String("friendly-name", "", "friendly name (default: the node name)")
 	area := flag.String("area", "", "suggested area")
-	listen := flag.String("listen", ":6053", "API listen address")
+	listen := flag.String("listen", ":6053", "API listen address; with several adapters, the first of consecutive ports, or a comma-separated list")
 	backend := flag.String("backend", "bluez", "Bluetooth backend: bluez or fake")
-	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter (bluez backend)")
+	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter, or a comma-separated list served as one device each (bluez backend)")
 	maxConns := flag.Int("connections", 3, "maximum simultaneous peripheral connections")
 	scanMode := flag.String("scan-mode", "active", "scanner mode: active or passive (bluez: needs bluetoothd --experimental, else active)")
-	mac := flag.String("mac", "", "MAC reported as the device's unique id (default: first network interface)")
+	mac := flag.String("mac", "", "MAC reported as the device's unique id (default: first network interface; further adapters: their own address)")
 	mdnsOn := flag.Bool("mdns", true, "advertise the API over mDNS so Home Assistant discovers it")
 	mdnsIface := flag.String("mdns-iface", "", "comma-separated interfaces to advertise on (default: all with IPv4)")
 	keyB64 := flag.String("encryption-key", "",
@@ -105,41 +107,67 @@ func main() {
 	if !ok {
 		fatal(log, "unknown backend", "backend", *backend)
 	}
-	adapter, err := newAdapter(*adapterName, log)
-	if err != nil {
-		fatal(log, "open adapter", "err", err)
-	}
-	if *mac == "" {
-		*mac = hostMAC(adapter)
-	}
-	if *friendly == "" {
-		*friendly = *name
-	}
-
-	l, err := net.Listen("tcp", *listen)
-	if err != nil {
-		fatal(log, "listen", "err", err)
-	}
-	log.Info("btproxy started", "version", version, "listen", l.Addr().String(), "name", *name,
-		"bt_mac", ble.FormatMAC(adapter.MAC()), "encryption", key != nil)
 	if advFilter != nil {
 		log.Info("advertisement filter", "filter", advFilter.String())
 	}
-	if *mdnsOn {
-		startMDNS(log, *name, *friendly, *mac, l.Addr().(*net.TCPAddr).Port, *mdnsIface, key != nil)
+	nodes, err := planNodes(*adapterName, *listen, *name, *friendly)
+	if err != nil {
+		fatal(log, "adapters", "err", err)
 	}
-	srv := api.NewServer(api.Config{
-		Name: *name, FriendlyName: *friendly, MAC: *mac, SuggestedArea: *area,
-		Version: esphomeVersion, ProjectVersion: version, MaxConnections: *maxConns, ScanMode: mode,
-		Logs: logs, Backend: *backend, Adapter: *adapterName,
-		EncryptionKey: key, AdvFilter: advFilter,
-	}, adapter, log)
-	fatal(log, "serve", "err", srv.Serve(l))
+	var responders []*mdns.Responder
+	macs := map[string]string{}
+	served := make(chan error, len(nodes))
+	for i, n := range nodes {
+		adapter, err := newAdapter(n.adapter, log)
+		if err != nil && i > 0 {
+			// A missing extra adapter must not take the others down; restart the proxy once it is back.
+			log.Error("open adapter, not serving it", "adapter", n.adapter, "err", err)
+			continue
+		} else if err != nil {
+			fatal(log, "open adapter", "adapter", n.adapter, "err", err)
+		}
+		m := *mac
+		if i > 0 {
+			m = ble.FormatMAC(adapter.MAC()) // the first keeps the unique id it had with one adapter
+		} else if m == "" {
+			m = hostMAC(adapter)
+		}
+		if other, dup := macs[m]; dup {
+			fatal(log, "two adapters with the same MAC", "mac", m, "adapters", other+","+n.adapter)
+		}
+		macs[m] = n.adapter
+
+		l, err := net.Listen("tcp", n.listen)
+		if err != nil {
+			fatal(log, "listen", "adapter", n.adapter, "err", err)
+		}
+		log.Info("btproxy started", "version", version, "listen", l.Addr().String(), "name", n.name,
+			"adapter", n.adapter, "bt_mac", ble.FormatMAC(adapter.MAC()), "encryption", key != nil)
+		if *mdnsOn {
+			if r := startMDNS(log, n.name, n.friendly, m, l.Addr().(*net.TCPAddr).Port, *mdnsIface, key != nil); r != nil {
+				responders = append(responders, r)
+			}
+		}
+		nlog := log
+		if len(nodes) > 1 {
+			nlog = log.With("node", n.name)
+		}
+		srv := api.NewServer(api.Config{
+			Name: n.name, FriendlyName: n.friendly, MAC: m, SuggestedArea: *area,
+			Version: esphomeVersion, ProjectVersion: version, MaxConnections: *maxConns, ScanMode: mode,
+			Logs: logs, Backend: *backend, Adapter: n.adapter,
+			EncryptionKey: key, AdvFilter: advFilter,
+		}, adapter, nlog)
+		go func() { served <- srv.Serve(l) }()
+	}
+	if len(responders) > 0 {
+		go withdrawOnSignal(log, responders)
+	}
+	fatal(log, "serve", "err", <-served)
 }
 
-// startMDNS advertises the API like an ESPHome device and, on SIGINT or SIGTERM, withdraws the advertisement
-// before exiting. A failure only disables discovery.
-func startMDNS(log *logx.Logger, name, friendly, mac string, port int, ifaces string, encrypted bool) {
+// startMDNS advertises the API like an ESPHome device. A failure only disables discovery and returns nil.
+func startMDNS(log *logx.Logger, name, friendly, mac string, port int, ifaces string, encrypted bool) *mdns.Responder {
 	var names []string
 	for _, n := range strings.Split(ifaces, ",") {
 		if n = strings.TrimSpace(n); n != "" {
@@ -163,16 +191,21 @@ func startMDNS(log *logx.Logger, name, friendly, mac string, port int, ifaces st
 	}
 	r, err := mdns.Start(mdns.Config{Name: mdns.Label(name), Port: port, TXT: txt, Ifaces: names}, log)
 	if err != nil {
-		log.Warn("mdns disabled", "err", err)
-		return
+		log.Warn("mdns disabled", "name", name, "err", err)
+		return nil
 	}
-	go func() {
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-		log.Info("stopping", "signal", <-sig)
+	return r
+}
+
+// withdrawOnSignal withdraws the mDNS advertisements on SIGINT or SIGTERM and exits.
+func withdrawOnSignal(log *logx.Logger, rs []*mdns.Responder) {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	log.Info("stopping", "signal", <-sig)
+	for _, r := range rs {
 		r.Close()
-		os.Exit(0)
-	}()
+	}
+	os.Exit(0)
 }
 
 // encryptionKey decodes the API key from the flag, the key file or the environment, in that order of

@@ -46,6 +46,8 @@ func must(s string) ble.UUID {
 
 // Adapter is the fake controller; the zero value is ready to use.
 type Adapter struct {
+	Addr uint64 // controller address; 0 means AdapterAddr
+
 	mu       sync.Mutex
 	down     bool
 	scanning bool
@@ -54,7 +56,12 @@ type Adapter struct {
 	conns    map[*conn]bool
 }
 
-func (*Adapter) MAC() uint64 { return AdapterAddr }
+func (a *Adapter) MAC() uint64 {
+	if a.Addr != 0 {
+		return a.Addr
+	}
+	return AdapterAddr
+}
 
 func (a *Adapter) SetScanMode(m ble.ScanMode) {
 	a.mu.Lock()
