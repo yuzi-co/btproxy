@@ -45,6 +45,10 @@ type fakeBlueZ struct {
 	rssi        int16                    // RSSI threshold of the last discovery filter, 0 for none
 	quietMons   bool                     // the monitors registered match nothing
 	connects    []string                 // Device1.Connect and Adapter1.ConnectDevice calls, by method
+	hold        chan struct{}            // while set, connecting waits for a value from it
+	scanning    []bool                   // per connect: discovering or monitors registered when it started
+
+	exportMu sync.Mutex // godbus's Export is not safe for concurrent use, which concurrent connects make
 }
 
 const fakeAdapter = dbus.ObjectPath("/org/bluez/hci0")
@@ -108,7 +112,7 @@ func (f *fakeBlueZ) advertiseFrom(p dbus.ObjectPath, rssi int16) {
 		f.bus.Emit(p, ifProps+".PropertiesChanged", ifDevice, props, []string{})
 		return
 	}
-	f.bus.Export(fakeDeviceIf{f, p}, p, ifDevice)
+	f.export(p)
 	f.bus.Emit("/", ifObjManager+".InterfacesAdded", p, map[string]map[string]dbus.Variant{ifDevice: props})
 }
 
@@ -205,6 +209,12 @@ func (f *fakeBlueZ) hideDevice(p dbus.ObjectPath) {
 	f.mu.Lock()
 	f.devices[p] = true
 	f.mu.Unlock()
+	f.export(p)
+}
+
+func (f *fakeBlueZ) export(p dbus.ObjectPath) {
+	f.exportMu.Lock()
+	defer f.exportMu.Unlock()
 	f.bus.Export(fakeDeviceIf{f, p}, p, ifDevice)
 }
 
@@ -253,6 +263,13 @@ func (d fakeDeviceIf) Connect() *dbus.Error {
 }
 
 func (d fakeDeviceIf) connected() *dbus.Error {
+	d.f.mu.Lock()
+	d.f.scanning = append(d.f.scanning, d.f.discovering || d.f.registered > 0)
+	hold := d.f.hold
+	d.f.mu.Unlock()
+	if hold != nil {
+		<-hold
+	}
 	d.f.mu.Lock()
 	fail := d.f.connectFail
 	d.f.mu.Unlock()

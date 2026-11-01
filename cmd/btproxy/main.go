@@ -38,6 +38,7 @@ var (
 	stallTimeout      time.Duration
 	bluetoothdRestart string
 	rawAdverts        string
+	scanPause         bool
 )
 
 func main() {
@@ -64,6 +65,8 @@ func main() {
 		"shell command that restarts bluetoothd when scanning keeps stalling or it stops answering (bluez backend)")
 	flag.StringVar(&rawAdverts, "raw-adverts", "auto",
 		"read advertisements from the HCI monitor: auto, on or off (bluez backend; needs CAP_NET_RAW)")
+	flag.BoolVar(&scanPause, "scan-pause-on-connect", true,
+		"stop scanning while a connection is being made, like ESPHome (bluez backend)")
 	flag.Parse()
 
 	level := logx.LevelInfo
