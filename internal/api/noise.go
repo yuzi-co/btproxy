@@ -1,3 +1,5 @@
+//go:build !nonoise
+
 package api
 
 import (
@@ -25,6 +27,9 @@ import (
 //	<- e, ee
 const (
 	NoiseProtocol = "Noise_NNpsk0_25519_ChaChaPoly_SHA256"
+
+	// Encryption tells whether the encrypted API is built in. The nonoise build tag leaves it out.
+	Encryption = true
 
 	noiseIndicator     = 0x01
 	maxHandshakeSize   = 128 // ESPHome's limit for frames before the handshake completes

@@ -84,6 +84,9 @@ func main() {
 	if err != nil {
 		fatal(log, "encryption key", "err", err)
 	}
+	if key != nil && !api.Encryption {
+		fatal(log, "encryption key set, but this build has no encryption (built with -tags nonoise)")
+	}
 	newAdapter, ok := backends[*backend]
 	if !ok {
 		fatal(log, "unknown backend", "backend", *backend)

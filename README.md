@@ -69,6 +69,15 @@ CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldfl
 
 The binaries are static, about 4 to 5 MB (5.0 MB for mipsle).
 
+`-tags nonoise` leaves out API encryption (Noise, ChaCha20-Poly1305, X25519), which makes the mipsle binary
+256 KB smaller (4.8 MB). Such a build stops at start with an error when given an encryption key
+(`-encryption-key`, `-encryption-key-file` or `$BTPROXY_ENCRYPTION_KEY`). The router build uses it while
+encryption is off there:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -tags nonoise -trimpath -ldflags="-s -w" -o dist/btproxy-mipsle ./cmd/btproxy
+```
+
 ## Run
 
 Needs `bluetoothd` and the system D-Bus, and permission to use the adapter (root, or a D-Bus policy for the

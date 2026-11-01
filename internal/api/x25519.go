@@ -1,3 +1,5 @@
+//go:build !nonoise
+
 package api
 
 import (
