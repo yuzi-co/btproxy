@@ -67,8 +67,9 @@ func TestTwoAdapters(t *testing.T) {
 	if port >= 65535 {
 		t.Skip("no port after", port)
 	}
-	cmd := exec.Command(os.Args[0], "-backend", "fake", "-adapter", "hci0,hci1", "-mdns=false",
-		"-name", "proxy", "-mac", "02:00:00:00:00:01", "-listen", "127.0.0.1:"+strconv.Itoa(port))
+	args := []string{"-backend", "fake", "-adapter", "hci0,hci1", "-mdns=false",
+		"-name", "proxy", "-mac", "02:00:00:00:00:01", "-listen", "127.0.0.1:" + strconv.Itoa(port)}
+	cmd := exec.Command(os.Args[0], append(args, testChildArgs...)...)
 	cmd.Env = append(os.Environ(), "BTPROXY_RUN_MAIN=1")
 	if testing.Verbose() {
 		cmd.Stderr = os.Stderr

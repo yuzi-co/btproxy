@@ -1,0 +1,95 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// autostartFormValue is what the settings form sends for the autostart checkbox: its current state ("" is
+// unchecked, as a browser leaves it out), so the end-to-end test leaves the real Run value alone.
+func autostartFormValue() string {
+	if autostartEnabled(autostartValue) {
+		return "true"
+	}
+	return ""
+}
+
+// testChildArgs go to every proxy a test starts: no tray icon or message boxes, no settings page, and no
+// settings file from %LOCALAPPDATA% (a later -config overrides this one).
+var testChildArgs = []string{"-tray=false", "-ui", "", "-config", ""}
+
+func TestAutostart(t *testing.T) {
+	name := "btproxy-test-" + strconv.Itoa(os.Getpid())
+	t.Cleanup(func() { setAutostart(name, false, "") })
+	if autostartEnabled(name) {
+		t.Fatal("enabled before the test")
+	}
+	cmd, err := autostartCommand()
+	if err != nil || !strings.HasPrefix(cmd, `"`) || !strings.HasSuffix(cmd, `.exe"`) {
+		t.Fatalf("command %q %v", cmd, err)
+	}
+	if err := setAutostart(name, true, cmd); err != nil {
+		t.Fatal(err)
+	}
+	if !autostartEnabled(name) {
+		t.Fatal("not enabled after setting it")
+	}
+	if err := setAutostart(name, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if autostartEnabled(name) {
+		t.Fatal("still enabled after removing it")
+	}
+	if err := setAutostart(name, false, ""); err != nil {
+		t.Fatal("removing a missing value:", err)
+	}
+}
+
+func TestRotatingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "btproxy.log")
+	opened := 0
+	r, err := openRotating(path, 100, func(*os.File) { opened++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.Repeat("x", 39) + "\n" // 40 bytes
+	for range 5 {
+		r.Write([]byte(line))
+	}
+	r.f.Close()
+	cur, _ := os.ReadFile(path)
+	old, _ := os.ReadFile(path + ".1")
+	// 40+40 fit, the third rotates; then 40+40 again, the fifth rotates once more.
+	if len(cur) != 40 || len(old) != 80 || opened != 3 {
+		t.Fatalf("current %d bytes, old %d bytes, opened %d times", len(cur), len(old), opened)
+	}
+	// Reopening appends.
+	r, err = openRotating(path, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Write([]byte(line))
+	r.f.Close()
+	if cur, _ := os.ReadFile(path); len(cur) != 80 {
+		t.Fatalf("after reopening: %d bytes", len(cur))
+	}
+}
+
+func TestPickIcon(t *testing.T) {
+	for size, want := range map[int]int{16: 16, 20: 24, 24: 24, 32: 32, 48: 32, 8: 16} {
+		img, ok := pickIcon(iconData, size)
+		if !ok {
+			t.Fatalf("%d: nothing", size)
+		}
+		// The images are PNGs; the width is in the IHDR chunk.
+		if string(img[1:4]) != "PNG" || int(img[19]) != want {
+			t.Errorf("size %d: got a %d pixel image, want %d", size, img[19], want)
+		}
+	}
+	if _, ok := pickIcon([]byte{0, 0, 1, 0, 1, 0}, 16); ok {
+		t.Error("truncated icon accepted")
+	}
+}

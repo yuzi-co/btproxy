@@ -103,7 +103,9 @@ default `auto`), `-scan-pause-on-connect` (`true`: stop scanning while a connect
 ESPHome, see [Scanning](#scanning)), `-connect-retries` (2: retry a connect that fails at once with HCI reason
 0x3e this many times before reporting the failure, see [Scanning](#scanning); `0` disables),
 `-adv-allow`, `-adv-deny` and `-adv-deny-random` (see [Advertisement filter](#advertisement-filter)),
-`-encryption-key` and `-encryption-key-file` (see [Encryption](#encryption)), `-debug`.
+`-encryption-key` and `-encryption-key-file` (see [Encryption](#encryption)), `-debug`, `-config`, `-ui`,
+`-ui-password` and `-ui-password-file` (see [Settings page](#settings-page)); on Windows also `-tray` and
+`-log-file` (see [Windows](#windows)).
 
 Home Assistant discovers the proxy over mDNS and offers it under Settings, Devices & services. Without mDNS
 (`-mdns=false`, or a network that does not pass multicast), add it by hand: Add integration, ESPHome, host and
@@ -128,6 +130,41 @@ logged and left out, so a missing USB stick does not take the others down; resta
 The first one failing still stops the proxy. The log stream API clients subscribe to carries the lines of every
 adapter, tagged with `node` and `adapter`.
 
+## Settings page
+
+`-config FILE` names a settings file: a flat JSON object of flag values, such as
+`{"friendly-name": "Garage", "connections": "3", "mdns": "false"}` (numbers and booleans may also be written
+bare). It is read at start; flags given on the command line override it. A setting the file has wrong (an unknown
+name, a value the flag rejects) is logged and the others still apply. Without `-config` there is no file, except
+on Windows, where it is `%LOCALAPPDATA%\btproxy\config.json`.
+
+`-ui ADDRESS` serves a settings page there, for example `-ui :8080`. It shows the status (clients,
+connections, advertisement rate, scanner state, the last warning or error) and a form for the settings that
+matter for the backend in use: name, friendly name, area, MAC (the detected one as placeholder), listen
+address, mDNS and its interfaces, encryption key (masked, with buttons to show it and to generate a new one),
+connection slots, scan mode, the advertisement filter, debug logging and, with the bluez backend, the adapters,
+the pairing agent, raw advertisements, scan pause, stall timeout and connect retries. Settings given on the
+command line are shown locked, with a note. `-bluetoothd-restart` is shown but never editable on the page, since
+it is a shell command run as the proxy's user; change it in the file or on the command line. Saving validates
+every value with the parsers the flags use and writes the file, keeping only values that differ from the
+defaults; when something changed, the proxy restarts to apply it, withdrawing its mDNS records first as on
+SIGTERM. On Linux the restart replaces the process image (`exec`) with the same command line, so the PID stays
+and procd or systemd see nothing; on Windows a new process starts and waits for the old one to exit. The page
+reloads itself once the proxy is back.
+
+Anywhere but a loopback address the page needs a password: `-ui-password-file FILE` (preferred),
+`$BTPROXY_UI_PASSWORD` or `-ui-password`, checked with HTTP Basic authentication (any user name) in constant
+time, with a one-second delay after a wrong one. btproxy refuses to start with `-ui` on another address without
+a password. Without a password the page only answers requests whose Host is `localhost` or a loopback address,
+against DNS rebinding. Forms carry a per-process token that saving checks, and cross-origin posts are refused.
+The page sets a strict Content-Security-Policy and loads nothing from elsewhere. It is plain HTTP: on a network
+you do not trust, keep it on 127.0.0.1 and reach it through SSH (`ssh -L 8080:127.0.0.1:8080 router`).
+
+The server is a small HTTP/1.1 implementation (`internal/ui`) rather than `net/http`, which would add about
+4 MB to the router build: one request per connection, no chunked bodies, 8 KB of headers, 16 KB of body, 10 s
+for the whole exchange and 8 connections at a time. It adds 64 KB to the mipsle build (3,997,887 to
+4,063,423 bytes with `-tags nonoise`), whether or not `-ui` is given.
+
 ## Windows
 
 The `winrt` backend runs btproxy on Windows 10 (version 2004 or later) and Windows 11 through the WinRT
@@ -135,11 +172,38 @@ Bluetooth LE APIs, the ones Bleak uses. It is pure Go (`CGO_ENABLED=0`); the bin
 `internal/ble/winrt/gen` (`go generate ./internal/ble/winrt/gen` regenerates them).
 
 ```sh
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/btproxy.exe ./cmd/btproxy
-btproxy.exe -name btproxy-office -mac AA:BB:CC:DD:EE:FF
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H windowsgui" -o dist/btproxy.exe ./cmd/btproxy
 ```
 
-The binary is about 3.4 MB. It uses the default Bluetooth adapter, which must support LE and the central role;
+The binary is about 3.7 MB. Built with `-H windowsgui` it has no console window: started from Explorer, a
+shortcut or at logon it runs in the background with a tray icon. Without `-H windowsgui` it is a console
+program that logs to the console, as on Linux (`btproxy.exe -name btproxy-office` from a terminal).
+
+The tray icon's tooltip shows the node name and API port; its menu shows the status (clients, connections,
+advertisements per second, or a Bluetooth error when scanning stopped), and has Start with Windows,
+Settings..., Open log and Quit. Quit withdraws the mDNS records and exits, as SIGTERM does on Linux; logging off
+or shutting down Windows does the same. `-tray` turns the icon on or off; by default it is on when the process
+has no console.
+
+Start with Windows writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\btproxy`, the quoted path of
+the executable without flags, and removes it when unticked; the tick shows whether the value exists. Settings
+therefore belong in the settings file, which the started proxy reads.
+
+Settings... opens the [settings page](#settings-page) in the default browser. On Windows it is on by default,
+on 127.0.0.1 with a free port (`-ui` changes that, `-ui ""` turns it off). The tray opens it with a random token
+in the URL, which the page swaps for a cookie (HttpOnly, SameSite=Strict), so other local users and web sites
+cannot use it. Settings are kept in `%LOCALAPPDATA%\btproxy\config.json`; the Start with Windows box is on the
+page too. When the proxy restarts after saving, the page keeps its port and token.
+
+Without a console, logs go to `%LOCALAPPDATA%\btproxy\btproxy.log`; at 1 MB the file moves to `btproxy.log.1`
+(replacing the older one) and a new one starts. A crash's stack trace lands there too. `-log-file PATH` logs to
+a file also when there is a console. Open log opens the file with the program associated with `.log`. If
+btproxy stops on an error at start (no Bluetooth adapter, port in use), a message box says why.
+
+Only one btproxy runs per listen address (a named mutex): a second one, such as a manual start while the one
+started at logon runs, says so in a message box (or in the log without a tray) and exits.
+
+The icon is drawn by `cmd/btproxy/gen_icon.go` (`go generate ./cmd/btproxy`) into `btproxy.ico`. It uses the default Bluetooth adapter, which must support LE and the central role;
 `-adapter` and the BlueZ flags (`-agent`, `-stall-timeout`, `-bluetoothd-restart`, `-raw-adverts`,
 `-scan-pause-on-connect`) have no effect. Listening on all interfaces makes Windows Firewall ask on the first
 start; Home Assistant needs TCP 6053 in and, for discovery, UDP 5353. The default `-mac` is the first network
@@ -412,6 +476,7 @@ whether the command will be allowed is only known when it is sent.
 ## Logs
 
 btproxy logs to stderr (`-debug` for debug lines), which OpenWrt's procd and systemd pass to the system log.
+On Windows without a console it logs to a file instead (see [Windows](#windows)).
 Every line also goes to API clients that subscribe to logs, at the level each one asks for, even below
 `-debug`'s threshold: a client subscribed at DEBUG gets debug lines while stderr stays at info. Lines are
 formatted like ESPHome's logger, `[I][server:269]: connected addr=AA:BB:CC:DD:EE:01 mtu=247`, in its ANSI
@@ -454,6 +519,12 @@ For an encrypted API, put the key in `/etc/btproxy.key` (`chmod 600`); the init 
 exists. OpenWrt keeps BlueZ's state in `/var/lib/bluetooth` on tmpfs; link it to a directory on flash (for
 example `/etc/bluetooth/keys`) so bonds survive a reboot, and list `/usr/bin/btproxy`, `/etc/init.d/btproxy`,
 that directory and the key file in `/etc/sysupgrade.conf`.
+
+The init script passes `-config /etc/btproxy.json`; to edit settings on the [settings page](#settings-page),
+set `UI` in `/etc/init.d/btproxy` (for example `UI=:8080`), put a password in `/etc/btproxy.uipass`
+(`chmod 600`), and set `NAME`, `FRIENDLY_NAME` and `AREA` to `""` for those to be editable rather than locked.
+Then `/etc/init.d/btproxy restart`, and add `/etc/btproxy.json` and `/etc/btproxy.uipass` to
+`/etc/sysupgrade.conf`. An older copy of the init script, without `-config`, makes the page read-only.
 
 systemd (Raspberry Pi OS, Debian): copy the binary to `/usr/local/bin/btproxy` and
 [contrib/systemd/btproxy.service](contrib/systemd/btproxy.service) to `/etc/systemd/system/`, then
