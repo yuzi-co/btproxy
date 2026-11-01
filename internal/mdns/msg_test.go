@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -207,15 +208,31 @@ func TestParseRejects(t *testing.T) {
 	resp := encodeResponse(0, nil, testSvc.all(testIPs), nil, false, false)
 	loop := buildQuery(0, question{name: "a.local.", qtype: typeA, qclass: classIN})
 	loop = append(loop[:12], 0xc0, 12, 0, 1, 0, 1) // name pointing at itself
+	label := strings.Repeat("a", 63) + "."
+	q := question{name: "a.local.", qtype: typeA, qclass: classIN}
 	for name, b := range map[string][]byte{
-		"response":  resp,
-		"short":     {0, 0, 0},
-		"truncated": buildQuery(0, question{name: "a.local.", qtype: typeA, qclass: classIN})[:16],
-		"loop":      loop,
+		"long name":          buildQuery(0, question{name: strings.Repeat(label, 4) + "aaaaaaaaaaaa.", qtype: typeA, qclass: classIN}),
+		"too many questions": buildQuery(0, slices.Repeat([]question{q}, maxQuestions+1)...),
+		"response":           resp,
+		"short":              {0, 0, 0},
+		"truncated":          buildQuery(0, question{name: "a.local.", qtype: typeA, qclass: classIN})[:16],
+		"loop":               loop,
 	} {
 		if _, err := parseQuery(b); err == nil {
 			t.Errorf("%s: no error", name)
 		}
+	}
+}
+
+func TestParseLimitsAllow(t *testing.T) {
+	q := question{name: "a.local.", qtype: typeA, qclass: classIN}
+	if _, err := parseQuery(buildQuery(0, slices.Repeat([]question{q}, maxQuestions)...)); err != nil {
+		t.Errorf("%d questions: %v", maxQuestions, err)
+	}
+	// The longest name: 254 characters with its trailing dot, 255 bytes on the wire with the root label.
+	long := strings.Repeat(strings.Repeat("a", 63)+".", 3) + strings.Repeat("a", 61) + "."
+	if _, err := parseQuery(buildQuery(0, question{name: long, qtype: typeA, qclass: classIN})); err != nil {
+		t.Errorf("name of %d bytes: %v", len(long), err)
 	}
 }
 

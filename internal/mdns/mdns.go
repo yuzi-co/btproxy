@@ -238,13 +238,13 @@ func (r *Responder) read() {
 			r.log.Debug("mdns read", "err", err)
 			continue
 		}
-		q, err := parseQuery(buf[:n])
-		if err != nil {
-			continue // responses, including our own looped back
-		}
 		i, ok := r.ifaceFor(src.IP)
 		if !ok {
 			continue
+		}
+		q, err := parseQuery(buf[:n])
+		if err != nil {
+			continue // responses, including our own looped back
 		}
 		answers, extra, unicast := r.svc.answer(q, i.ips)
 		if len(answers) == 0 {

@@ -26,6 +26,13 @@ const (
 	serviceType  = "_esphomelib._tcp.local."
 )
 
+// Limits on a query. The answer to a legacy unicast query repeats its questions, so these also bound how much
+// larger than the query that answer can be. Real queriers ask a few questions at most.
+const (
+	maxNameBytes = 255 // RFC 1035 section 3.1
+	maxQuestions = 16
+)
+
 var errMalformed = errors.New("malformed packet")
 
 type question struct {
@@ -52,6 +59,9 @@ func parseQuery(b []byte) (query, error) {
 	}
 	q := query{id: binary.BigEndian.Uint16(b)}
 	n := int(binary.BigEndian.Uint16(b[4:]))
+	if n > maxQuestions {
+		return query{}, errMalformed
+	}
 	off := 12
 	for range n {
 		name, next, err := readName(b, off)
@@ -100,7 +110,7 @@ func readName(b []byte, off int) (string, int, error) {
 		case l&0xc0 != 0:
 			return "", 0, errMalformed
 		default:
-			if off+1+l > len(b) {
+			if off+1+l > len(b) || sb.Len()+l+1 >= maxNameBytes {
 				return "", 0, errMalformed
 			}
 			sb.Write(b[off+1 : off+1+l])
