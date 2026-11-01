@@ -3,6 +3,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -51,6 +53,9 @@ func main() {
 	mac := flag.String("mac", "", "MAC reported as the device's unique id (default: first network interface)")
 	mdnsOn := flag.Bool("mdns", true, "advertise the API over mDNS so Home Assistant discovers it")
 	mdnsIface := flag.String("mdns-iface", "", "comma-separated interfaces to advertise on (default: all with IPv4)")
+	keyB64 := flag.String("encryption-key", "",
+		"API encryption key, base64 of 32 bytes as in ESPHome's api: encryption: key: (visible in ps; prefer -encryption-key-file or $BTPROXY_ENCRYPTION_KEY)")
+	keyFile := flag.String("encryption-key-file", "", "file holding the API encryption key")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.BoolVar(&useAgent, "agent", true, "register a BlueZ pairing agent (bluez backend)")
 	flag.DurationVar(&stallTimeout, "stall-timeout", 3*time.Minute,
@@ -75,6 +80,10 @@ func main() {
 	if !ok {
 		fatal(log, "unknown scan mode", "scan-mode", *scanMode)
 	}
+	key, err := encryptionKey(*keyB64, *keyFile, os.Getenv("BTPROXY_ENCRYPTION_KEY"))
+	if err != nil {
+		fatal(log, "encryption key", "err", err)
+	}
 	newAdapter, ok := backends[*backend]
 	if !ok {
 		fatal(log, "unknown backend", "backend", *backend)
@@ -95,21 +104,22 @@ func main() {
 		fatal(log, "listen", "err", err)
 	}
 	log.Info("btproxy started", "version", version, "listen", l.Addr().String(), "name", *name,
-		"bt_mac", ble.FormatMAC(adapter.MAC()))
+		"bt_mac", ble.FormatMAC(adapter.MAC()), "encryption", key != nil)
 	if *mdnsOn {
-		startMDNS(log, *name, *friendly, *mac, l.Addr().(*net.TCPAddr).Port, *mdnsIface)
+		startMDNS(log, *name, *friendly, *mac, l.Addr().(*net.TCPAddr).Port, *mdnsIface, key != nil)
 	}
 	srv := api.NewServer(api.Config{
 		Name: *name, FriendlyName: *friendly, MAC: *mac, SuggestedArea: *area,
 		Version: esphomeVersion, ProjectVersion: version, MaxConnections: *maxConns, ScanMode: mode,
 		Logs: logs, Backend: *backend, Adapter: *adapterName,
+		EncryptionKey: key,
 	}, adapter, log)
 	fatal(log, "serve", "err", srv.Serve(l))
 }
 
 // startMDNS advertises the API like an ESPHome device and, on SIGINT or SIGTERM, withdraws the advertisement
 // before exiting. A failure only disables discovery.
-func startMDNS(log *slog.Logger, name, friendly, mac string, port int, ifaces string) {
+func startMDNS(log *slog.Logger, name, friendly, mac string, port int, ifaces string, encrypted bool) {
 	var names []string
 	for _, n := range strings.Split(ifaces, ",") {
 		if n = strings.TrimSpace(n); n != "" {
@@ -128,6 +138,9 @@ func startMDNS(log *slog.Logger, name, friendly, mac string, port int, ifaces st
 		"project_name=yuzi.btproxy", // as DeviceInfo reports it
 		"project_version=" + version,
 	}
+	if encrypted {
+		txt = append(txt, "api_encryption="+api.NoiseProtocol)
+	}
 	r, err := mdns.Start(mdns.Config{Name: mdns.Label(name), Port: port, TXT: txt, Ifaces: names}, log)
 	if err != nil {
 		log.Warn("mdns disabled", "err", err)
@@ -140,6 +153,35 @@ func startMDNS(log *slog.Logger, name, friendly, mac string, port int, ifaces st
 		r.Close()
 		os.Exit(0)
 	}()
+}
+
+// encryptionKey decodes the API key from the flag, the key file or the environment, in that order of
+// preference. No key means a plaintext API.
+func encryptionKey(flagValue, file, env string) ([]byte, error) {
+	if flagValue != "" && file != "" {
+		return nil, errors.New("-encryption-key and -encryption-key-file are both set")
+	}
+	s := flagValue
+	if file != "" {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return nil, err
+		}
+		if s = strings.TrimSpace(string(b)); s == "" {
+			return nil, fmt.Errorf("%s is empty", file)
+		}
+	}
+	if s == "" {
+		s = env
+	}
+	if s = strings.TrimSpace(s); s == "" {
+		return nil, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(s)
+	if err != nil || len(key) != 32 {
+		return nil, errors.New("not base64 of 32 bytes") // the key itself stays out of the log
+	}
+	return key, nil
 }
 
 // hostMAC picks the first up, non-loopback interface with a hardware address; the adapter MAC is the fallback.

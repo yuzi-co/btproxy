@@ -5,6 +5,11 @@ After=bluetooth.service network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/btproxy -name btproxy-%H -area "" -bluetoothd-restart "systemctl restart bluetooth"
+# API encryption: put the key (base64 of 32 bytes, like ESPHome's api: encryption: key:) in /etc/btproxy.key,
+# chmod 600, uncomment these two lines and remove the ExecStart above. The credential keeps the key out of ps and
+# of systemctl show, unlike -encryption-key or Environment=.
+#LoadCredential=btproxy.key:/etc/btproxy.key
+#ExecStart=/usr/local/bin/btproxy -name btproxy-%H -area "" -bluetoothd-restart "systemctl restart bluetooth" -encryption-key-file %d/btproxy.key
 Restart=always
 RestartSec=5
 

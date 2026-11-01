@@ -1,13 +1,18 @@
 """End-to-end check of btproxy with aioesphomeapi, the client library Home Assistant uses.
 
-Run btproxy with -backend fake, then: python test/e2e.py [host] [port]
+Run btproxy with -backend fake, then: python test/e2e.py [host] [port] [encryption key]
+
+With a key (btproxy started with the same -encryption-key), the session is encrypted, and a plaintext client
+and a client with the wrong key must be refused with the errors Home Assistant turns into a reauth prompt.
 """
 
 import asyncio
+import base64
 import inspect
 import sys
 
-from aioesphomeapi import APIClient, BluetoothScannerMode, BluetoothScannerState, LogLevel
+from aioesphomeapi import (APIClient, BluetoothScannerMode, BluetoothScannerState, InvalidEncryptionKeyAPIError,
+                           LogLevel, RequiresEncryptionAPIError)
 from aioesphomeapi.core import BluetoothConnectionParamsAPIError
 
 FAKE_ADDR = 0xAABBCCDDEE01
@@ -19,8 +24,23 @@ async def maybe_await(v):
     return await v if inspect.isawaitable(v) else v
 
 
-async def main(host: str, port: int) -> None:
-    cli = APIClient(host, port, None)
+async def expect_refused(cli: APIClient, exc: type) -> None:
+    try:
+        await cli.connect(login=True)
+    except exc as e:
+        print("refused:", type(e).__name__)
+        return
+    finally:
+        await cli.disconnect(force=True)
+    raise AssertionError(f"connection not refused with {exc.__name__}")
+
+
+async def main(host: str, port: int, key: str | None) -> None:
+    if key:
+        await expect_refused(APIClient(host, port, None), RequiresEncryptionAPIError)
+        wrong = base64.b64encode(bytes(32)).decode()
+        await expect_refused(APIClient(host, port, None, noise_psk=wrong), InvalidEncryptionKeyAPIError)
+    cli = APIClient(host, port, None, noise_psk=key or None)
     await cli.connect(login=True)
     info = await cli.device_info()
     caps = await cli.device_capabilities()
@@ -168,4 +188,5 @@ async def main(host: str, port: int) -> None:
 
 if __name__ == "__main__":
     asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1",
-                     int(sys.argv[2]) if len(sys.argv) > 2 else 6053))
+                     int(sys.argv[2]) if len(sys.argv) > 2 else 6053,
+                     sys.argv[3] if len(sys.argv) > 3 else None))

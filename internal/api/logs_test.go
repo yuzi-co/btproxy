@@ -52,7 +52,7 @@ type logPeer struct {
 func newLogPeer(t *testing.T, logs *Logs, level int32) *logPeer {
 	a, b := net.Pipe()
 	t.Cleanup(func() { a.Close(); b.Close() })
-	c := &client{c: a, log: slog.New(logs.Handler(slog.NewTextHandler(io.Discard, nil)))}
+	c := &client{s: &Server{}, c: a, log: slog.New(logs.Handler(slog.NewTextHandler(io.Discard, nil)))}
 	logs.subscribe(c, level)
 	t.Cleanup(func() { logs.unsubscribe(c) })
 	return &logPeer{t: t, c: c, p: b, r: bufio.NewReader(b)}
@@ -170,7 +170,7 @@ func TestLogsDeadClient(t *testing.T) {
 	log := slog.New(logs.Handler(countHandler{&n}))
 	a, b := net.Pipe()
 	b.Close()
-	c := &client{c: a, log: log}
+	c := &client{s: &Server{}, c: a, log: log}
 	logs.subscribe(c, logVeryVerbose)
 	defer logs.unsubscribe(c)
 	log.Info("first")

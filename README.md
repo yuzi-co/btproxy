@@ -27,7 +27,8 @@ client library).
   [Scanning](#scanning)) and, if `-bluetoothd-restart` is set, restarted.
 - Log streaming: Home Assistant (the ESPHome entry's option to subscribe to the device's logs) and `esphome logs` receive
   btproxy's log lines like a device's (see [Logs](#logs)).
-- Not supported: API encryption (Noise), IPv6 mDNS.
+- API encryption (Noise, as ESPHome's `api: encryption: key:`), off by default (see [Encryption](#encryption)).
+- Not supported: setting the encryption key from Home Assistant, IPv6 mDNS.
 
 ## Build
 
@@ -37,7 +38,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" 
 CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldflags="-s -w" -o dist/btproxy-mipsle ./cmd/btproxy
 ```
 
-The binaries are static, about 4 MB (4.7 MB for mipsle).
+The binaries are static, about 4 MB (4.9 MB for mipsle).
 
 ## Run
 
@@ -57,7 +58,8 @@ Flags: `-name`, `-friendly-name`, `-area`, `-listen` (`:6053`), `-adapter` (`hci
 advertisements; `0` disables), `-bluetoothd-restart` (shell command that restarts `bluetoothd` when it hangs,
 for example `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"`; default: none),
 `-raw-adverts` (`auto`, `on` or `off`: where advertisements come from, see [Advertisements](#advertisements);
-default `auto`), `-debug`.
+default `auto`),
+`-encryption-key` and `-encryption-key-file` (see [Encryption](#encryption)), `-debug`.
 
 Home Assistant discovers the proxy over mDNS and offers it under Settings, Devices & services. Without mDNS
 (`-mdns=false`, or a network that does not pass multicast), add it by hand: Add integration, ESPHome, host and
@@ -69,7 +71,8 @@ btproxy advertises itself like an ESPHome device: `_esphomelib._tcp` service `<n
 (`-name` reduced to a DNS label), with the TXT keys ESPHome's mdns component sends and Home Assistant reads:
 `friendly_name`, `version` (the ESPHome version btproxy reports), `mac` (the `-mac` value, lower case without
 colons), `platform=linux`, `board` (the Go architecture), `network=ethernet`, `project_name` and
-`project_version`. There is no `api_encryption`, since the API is plaintext.
+`project_version`. With an encryption key, `api_encryption=Noise_NNpsk0_25519_ChaChaPoly_SHA256` too, which
+tells Home Assistant to ask for the key when it discovers the proxy.
 
 Home Assistant uses `mac` as the config entry's unique id, the same id DeviceInfo gives, so an entry added
 earlier by IP is matched rather than duplicated. When the address changes, the next announcement updates the
@@ -121,6 +124,31 @@ monitor API (`--experimental`, see [Scanning](#scanning)), and asks BlueZ for di
 `bluetoothd`, the monitor does not resolve private addresses: a bonded device that uses resolvable private
 addresses shows up under its current random address, not its identity address, unless the controller resolves
 it.
+
+## Encryption
+
+Without a key the API is plaintext, like an ESPHome node without `api: encryption:`. With a key, the proxy
+accepts only encrypted clients: Noise_NNpsk0_25519_ChaChaPoly_SHA256 with the key as the pre-shared key, the
+protocol ESPHome uses. The key is the same kind as ESPHome's, 32 random bytes in base64, for example from
+`head -c 32 /dev/urandom | base64`. Give it in one of three ways:
+
+- `-encryption-key-file /etc/btproxy.key`: a file holding the key (surrounding whitespace is ignored). Keep it
+  readable by root only.
+- `-encryption-key <key>`: simplest, but any local user can read it with `ps`.
+- the environment variable `BTPROXY_ENCRYPTION_KEY`, used only when neither flag is set.
+
+Setting both flags, or a key that is not base64 of 32 bytes, stops the proxy at start.
+
+The init script and the systemd unit in [contrib](contrib) show how to pass the file. Home Assistant needs the
+same key: for a new proxy it asks during setup; for one added before without encryption, the next connection
+fails with "requires encryption" and Home Assistant starts a reauthentication that asks for it. A client with
+another key is refused with the message ESPHome sends ("Handshake MAC failure"), which Home Assistant reports as
+a wrong key, and a plaintext client gets the reply that makes it report that encryption is required. Without a
+key, an encrypted client is told the device uses plaintext.
+
+Home Assistant can also offer to set a key on a plaintext ESPHome device (`NoiseEncryptionSetKeyRequest`). The
+proxy refuses that, because it does not store a key itself, and does not claim `api_encryption_supported` in
+its device info unless it already runs with a key.
 
 ## Scanning
 
@@ -221,14 +249,17 @@ with the count once it catches up.
 OpenWrt (23.05): `opkg install kmod-bluetooth bluez-daemon` plus the firmware for the stick (for example
 `rtl8761bu-firmware`), copy the build for the router's architecture (`dist/btproxy-mipsle` for MT7620/MT7621) to
 `/usr/bin/btproxy`, and [contrib/openwrt/btproxy.init](contrib/openwrt/btproxy.init) to `/etc/init.d/btproxy`.
-OpenWrt keeps BlueZ's state in `/var/lib/bluetooth` on tmpfs; link it to a directory on flash (for example
-`/etc/bluetooth/keys`) so bonds survive a reboot, and list `/usr/bin/btproxy`, `/etc/init.d/btproxy` and that
-directory in `/etc/sysupgrade.conf`.
+For an encrypted API, put the key in `/etc/btproxy.key` (`chmod 600`); the init script passes it when the file
+exists. OpenWrt keeps BlueZ's state in `/var/lib/bluetooth` on tmpfs; link it to a directory on flash (for
+example `/etc/bluetooth/keys`) so bonds survive a reboot, and list `/usr/bin/btproxy`, `/etc/init.d/btproxy`,
+that directory and the key file in `/etc/sysupgrade.conf`.
 
 systemd (Raspberry Pi OS, Debian): copy the binary to `/usr/local/bin/btproxy` and
 [contrib/systemd/btproxy.service](contrib/systemd/btproxy.service) to `/etc/systemd/system/`, then
 `systemctl enable --now btproxy`. The unit wants `bluetooth.service` rather than requiring it, so a
-`bluetoothd` restart leaves the proxy running and it recovers by itself.
+`bluetoothd` restart leaves the proxy running and it recovers by itself. For an encrypted API, put the key in
+`/etc/btproxy.key` (`chmod 600`) and swap `ExecStart` for the two commented lines in the unit, which hand it to
+the proxy as a systemd credential.
 
 ### Bonded devices
 
@@ -260,4 +291,6 @@ go test ./...                       # the bluez and mDNS socket tests need GOOS=
 go run ./cmd/btproxy -backend fake -listen 127.0.0.1:16053 &
 python -m venv .venv && .venv/bin/pip install aioesphomeapi
 .venv/bin/python test/e2e.py 127.0.0.1 16053
+# encrypted: start btproxy with -encryption-key-file k (a test key), then
+.venv/bin/python test/e2e.py 127.0.0.1 16053 "$(cat k)"
 ```

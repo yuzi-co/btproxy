@@ -94,6 +94,7 @@ type deviceInfo struct {
 	ProjectName, ProjectVersion    string
 	SuggestedArea                  string
 	FeatureFlags                   uint32
+	EncryptionSupported            bool
 }
 
 func encHelloResponse(serverInfo, name string) []byte {
@@ -118,6 +119,9 @@ func encDeviceInfo(d deviceInfo) []byte {
 	e.uint(15, uint64(d.FeatureFlags))
 	e.str(16, d.SuggestedArea)
 	e.str(18, d.BTMAC)
+	// Home Assistant offers to provision a key on a plaintext device that claims encryption support, which the
+	// proxy cannot store, so it is reported only while the API is encrypted.
+	e.bool(19, d.EncryptionSupported)
 	return e.b
 }
 
