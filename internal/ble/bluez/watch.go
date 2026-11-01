@@ -361,12 +361,28 @@ func (a *Adapter) disarm() {
 	a.rawActive.Store(false)
 }
 
-// emit reports a device's cached advertisement, unless the HCI monitor delivers them. Called with a.mu held.
-func (a *Adapter) emit(d *device) {
-	if a.scanFn != nil && d.rssi != 0 && d.addr != 0 && !a.rawHandles() {
-		a.adverts++
-		a.scanFn(ble.Advert{Addr: d.addr, AddrType: d.addrType, RSSI: int8(d.rssi), Data: d.adData()})
+// pending is an advertisement on its way to the scan callback.
+type pending struct {
+	fn func(ble.Advert) // nil: nothing to deliver
+	ad ble.Advert
+}
+
+// deliver calls the scan callback. Never with a.mu held: the API server calls Scan and stop with its own
+// lock held, and the callback takes that lock, so the two would wait for each other.
+func (p pending) deliver() {
+	if p.fn != nil {
+		p.fn(p.ad)
 	}
+}
+
+// emit prepares a device's cached advertisement for delivery, unless the HCI monitor delivers them. Called
+// with a.mu held; the caller delivers the result after releasing it.
+func (a *Adapter) emit(d *device) pending {
+	if a.scanFn == nil || d.rssi == 0 || d.addr == 0 || a.rawHandles() {
+		return pending{}
+	}
+	a.adverts++
+	return pending{a.scanFn, ble.Advert{Addr: d.addr, AddrType: d.addrType, RSSI: int8(d.rssi), Data: d.adData()}}
 }
 
 // watch follows bluetoothd and the adapter: it is called for every signal before dispatch handles it.
