@@ -202,7 +202,7 @@ func TestSave(t *testing.T) {
 	if r, _ := post(t, base+"/save", url.Values{"name": {"x"}}, nil); r.StatusCode != 403 {
 		t.Errorf("no csrf: %d", r.StatusCode)
 	}
-	if r, _ := post(t, base+"/save", url.Values{"csrf": {"0" + m[1][1:]}, "name": {"x"}}, nil); r.StatusCode != 403 {
+	if r, _ := post(t, base+"/save", url.Values{"csrf": {"x" + m[1][1:]}, "name": {"x"}}, nil); r.StatusCode != 403 {
 		t.Errorf("wrong csrf: %d", r.StatusCode)
 	}
 	if r, _ := post(t, base+"/save", form, func(q *http.Request) { q.Header.Set("Origin", "http://evil.example") }); r.StatusCode != 403 {
