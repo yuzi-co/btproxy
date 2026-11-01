@@ -87,14 +87,23 @@ func NewServer(cfg Config, adapter ble.Adapter, log *slog.Logger) *Server {
 	return s
 }
 
-// Serve accepts clients until the listener is closed.
+// Serve accepts clients until the listener is closed. Other accept errors, such as running out of file
+// descriptors, are retried after a pause that doubles from 5 ms to 1 s, as net/http does.
 func (s *Server) Serve(l net.Listener) error {
 	go s.scanStatusLoop()
+	var delay time.Duration
 	for {
 		c, err := l.Accept()
-		if err != nil {
+		if errors.Is(err, net.ErrClosed) {
 			return err
 		}
+		if err != nil {
+			delay = min(max(2*delay, 5*time.Millisecond), time.Second)
+			s.log.Warn("accept failed, retrying", "err", err, "in", delay)
+			time.Sleep(delay)
+			continue
+		}
+		delay = 0
 		if tc, ok := c.(*net.TCPConn); ok {
 			tc.SetNoDelay(true)
 			// Clients only ping while they receive nothing, and a scanning proxy sends all the time, so

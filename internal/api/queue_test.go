@@ -3,11 +3,13 @@ package api
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"runtime"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -198,4 +200,42 @@ func TestNoGoroutineLeak(t *testing.T) {
 	s.mu.Unlock()
 	waitFor(t, "no clients", func() bool { return clientCount(s) == 0 })
 	waitFor(t, "the clients' goroutines to end", func() bool { return runtime.NumGoroutine() <= base })
+}
+
+// flakyListener fails its first accepts as a process out of file descriptors does.
+type flakyListener struct {
+	*pipeListener
+	fails int
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	if l.fails > 0 {
+		l.fails--
+		return nil, &net.OpError{Op: "accept", Net: "tcp", Err: syscall.EMFILE}
+	}
+	return l.pipeListener.Accept()
+}
+
+// TestServeRetriesAccept checks that Serve outlives failing accepts and returns only once the listener is
+// closed.
+func TestServeRetriesAccept(t *testing.T) {
+	l := &flakyListener{pipeListener: newPipeListener(), fails: 5}
+	s := NewServer(Config{Name: "test"}, testAdapter{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(l) }()
+	c := l.dial(t)
+	c.Write(AppendFrame(nil, msgPingRequest, nil))
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if f, err := ReadFrame(bufio.NewReader(c)); err != nil || f.Type != msgPingResponse {
+		t.Fatalf("got %+v, %v", f, err)
+	}
+	l.Close()
+	select {
+	case err := <-done:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Serve returned %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after the listener was closed")
+	}
 }
