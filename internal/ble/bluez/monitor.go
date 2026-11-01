@@ -107,11 +107,13 @@ func (monitor) Activate() *dbus.Error { return nil }
 // DeviceFound re-sends what is known about a device as it comes into range, since BlueZ reports later
 // advertisements only when their content or RSSI changes.
 func (m monitor) DeviceFound(p dbus.ObjectPath) *dbus.Error {
+	var ad pending
 	m.a.mu.Lock()
-	defer m.a.mu.Unlock()
 	if d := m.a.devices[p]; d != nil {
-		m.a.emit(d)
+		ad = m.a.emit(d)
 	}
+	m.a.mu.Unlock()
+	ad.deliver()
 	return nil
 }
 

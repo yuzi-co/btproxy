@@ -227,9 +227,10 @@ func (a *Adapter) dispatch(signals <-chan *dbus.Signal) {
 			switch iface {
 			case ifDevice:
 				a.mu.Lock()
-				a.updateDevice(s.Path, changed, true)
+				ad := a.updateDevice(s.Path, changed, true)
 				c := a.conns[s.Path]
 				a.mu.Unlock()
+				ad.deliver()
 				if c != nil {
 					c.deviceChanged(changed)
 				}
@@ -250,8 +251,9 @@ func (a *Adapter) dispatch(signals <-chan *dbus.Signal) {
 			ifs, _ := s.Body[1].(map[string]map[string]dbus.Variant)
 			if props, ok := ifs[ifDevice]; ok && a.underAdapter(p) {
 				a.mu.Lock()
-				a.updateDevice(p, props, true)
+				ad := a.updateDevice(p, props, true)
 				a.mu.Unlock()
+				ad.deliver()
 			}
 		case ifObjManager + ".InterfacesRemoved":
 			if len(s.Body) < 2 {
@@ -286,9 +288,9 @@ func (a *Adapter) connFor(p dbus.ObjectPath) *conn {
 	return a.conns[dbus.ObjectPath(s[:i])]
 }
 
-// updateDevice merges Device1 properties into the cache and, if asked and scanning, emits an advertisement.
-// Called with a.mu held.
-func (a *Adapter) updateDevice(p dbus.ObjectPath, props map[string]dbus.Variant, emit bool) {
+// updateDevice merges Device1 properties into the cache and, if asked and scanning, returns an advertisement
+// for the caller to deliver once it has released a.mu (see emit). Called with a.mu held.
+func (a *Adapter) updateDevice(p dbus.ObjectPath, props map[string]dbus.Variant, emit bool) pending {
 	d := a.devices[p]
 	if d == nil {
 		d = &device{}
@@ -341,8 +343,9 @@ func (a *Adapter) updateDevice(p dbus.ObjectPath, props map[string]dbus.Variant,
 		}
 	}
 	if emit && fresh {
-		a.emit(d)
+		return a.emit(d)
 	}
+	return pending{}
 }
 
 // adData rebuilds raw AD structures from the cached properties. BlueZ only exposes the parsed form, so field

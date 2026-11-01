@@ -368,3 +368,51 @@ func TestStall(t *testing.T) {
 	}
 	bz.bus.Close()
 }
+
+// TestCallbackOutsideLock has the scan callback take a lock that is held while Scan is called, as the API
+// server does: the callback must not run with the adapter's lock held, or the two wait for each other.
+func TestCallbackOutsideLock(t *testing.T) {
+	addr := startBus(t)
+	bz := startFakeBlueZ(t, addr, false)
+	defer bz.bus.Close()
+	a, err := Open("hci0", Options{RawAdverts: RawOff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetScanMode(ble.ScanActive)
+	var server sync.Mutex // the API server's lock
+	var armed atomic.Bool
+	entered := make(chan struct{})
+	var once sync.Once
+	stop, _ := a.Scan(func(ble.Advert) {
+		if armed.Load() {
+			once.Do(func() { close(entered) })
+		}
+		server.Lock()
+		server.Unlock()
+	})
+	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
+
+	server.Lock()
+	armed.Store(true)
+	bz.advertise()
+	select {
+	case <-entered: // the callback now waits for server
+	case <-time.After(5 * time.Second):
+		server.Unlock()
+		t.Fatal("no advertisement delivered")
+	}
+	done := make(chan struct{})
+	go func() {
+		stop() // the server stops scanning with its lock held
+		stop, _ = a.Scan(func(ble.Advert) {})
+		close(done)
+	}()
+	select {
+	case <-done:
+		server.Unlock()
+		stop()
+	case <-time.After(5 * time.Second):
+		t.Fatal("deadlock: Scan and stop wait for the adapter lock the advertisement callback holds")
+	}
+}
