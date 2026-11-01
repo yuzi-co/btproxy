@@ -98,6 +98,7 @@ for example `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"
 `-raw-adverts` (`auto`, `on` or `off`: where advertisements come from, see [Advertisements](#advertisements);
 default `auto`), `-scan-pause-on-connect` (`true`: stop scanning while a connection is being made, like
 ESPHome, see [Scanning](#scanning)),
+`-adv-allow`, `-adv-deny` and `-adv-deny-random` (see [Advertisement filter](#advertisement-filter)),
 `-encryption-key` and `-encryption-key-file` (see [Encryption](#encryption)), `-debug`.
 
 Home Assistant discovers the proxy over mDNS and offers it under Settings, Devices & services. Without mDNS
@@ -183,6 +184,23 @@ without `DuplicateData`, which it no longer needs. Passive scanning has no scan 
 Unlike `bluetoothd`, the monitor does not resolve private addresses. A bonded device that uses resolvable
 private addresses shows up under its current random address, not its identity address, unless the controller
 resolves it.
+
+### Advertisement filter
+
+To cut API traffic, the proxy can forward only some advertisements. `-adv-allow` and `-adv-deny` take
+comma-separated entries: an address (`AA:BB:CC:DD:EE:FF`), an OUI (`58:2B:DB`) or another prefix with a
+trailing `*` (`58:2B:*`), a service UUID in the UUID lists or the service data (`uuid:fe95`, a 32-bit one,
+or the 36-character form), or the company id of manufacturer data (`mfr:0x004c` or `mfr:76`). Deny wins over
+allow, and an empty allow list allows everything. `-adv-deny-random` drops advertisements from private random
+addresses, resolvable and non-resolvable (random static addresses and addresses the controller resolved stay).
+That removes most phones, AirTags and similar trackers, and with them phone presence: iBeacons sent by a phone
+app and Home Assistant's Private BLE Device integration rely on such addresses.
+
+The filter runs on the finished advertisement (with its scan response), before it is encoded, and allocates
+nothing. The scan watchdogs still see every advertisement. Connections are not filtered, but Home Assistant
+connects through the proxy that has heard the device, so a device that should connect through this proxy (a
+bonded one, for example) must not be filtered out. The filter shows in the log at start and in the
+configuration dump.
 
 ## Encryption
 

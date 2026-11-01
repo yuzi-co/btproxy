@@ -31,3 +31,21 @@ func BenchmarkAdverts(b *testing.B) {
 		s.onAdvert(ble.Advert{Addr: 0xF09E4A123400 | uint64(i&0xff), AddrType: ble.AddrRandom, RSSI: -67, Data: data})
 	}
 }
+
+// BenchmarkAdvertsFiltered measures an advertisement the filter drops: an allow list it does not match.
+func BenchmarkAdvertsFiltered(b *testing.B) {
+	f, err := ble.ParseAdvFilter("uuid:fe95,mfr:0x0499", "", false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	s := NewServer(Config{Name: "bench", AdvFilter: f}, testAdapter{}, logx.Discard())
+	data := []byte{0x02, 0x01, 0x06, 0x1a, 0xff, 0x4c, 0x00, 0x02, 0x15, 0xe2, 0xc5, 0x6d, 0xb5, 0xdf, 0xfb, 0x48,
+		0xd2, 0xb0, 0x60, 0xd0, 0xf5, 0xa7, 0x10, 0x96, 0xe0, 0x00, 0x01, 0x00, 0x02, 0xc5}
+	b.ReportAllocs()
+	for i := 0; b.Loop(); i++ {
+		s.onAdvert(ble.Advert{Addr: 0xF09E4A123400 | uint64(i&0xff), AddrType: ble.AddrRandom, RSSI: -67, Data: data})
+	}
+	if s.pendingN != 0 {
+		b.Fatal("advertisement not filtered")
+	}
+}

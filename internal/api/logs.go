@@ -116,9 +116,9 @@ func (s *Server) configDump() string {
 	}
 	return fmt.Sprintf("Bluetooth Proxy:\n"+
 		"  Name: %s\n  Version: %s (ESPHome %s)\n  MAC: %s\n  Backend: %s\n  Adapter: %s (%s)\n"+
-		"  Scan mode: %s\n  Connections: %d of %d in use",
+		"  Scan mode: %s\n  Advertisement filter: %v\n  Connections: %d of %d in use",
 		s.cfg.Name, s.cfg.ProjectVersion, s.cfg.Version, s.cfg.MAC, s.cfg.Backend, s.cfg.Adapter,
-		ble.FormatMAC(s.adapter.MAC()), mode, used, s.cfg.MaxConnections)
+		ble.FormatMAC(s.adapter.MAC()), mode, s.cfg.AdvFilter, used, s.cfg.MaxConnections)
 }
 
 // esphomeLevel maps a logx level to ESPHome's. CONFIG has no logx counterpart: only the configuration dump
