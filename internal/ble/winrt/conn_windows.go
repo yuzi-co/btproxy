@@ -10,10 +10,10 @@ import (
 	"github.com/saltosystems/winrt-go/windows/foundation"
 	"github.com/saltosystems/winrt-go/windows/foundation/collections"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
-	gatt "btproxy/internal/ble/winrt/gen/windows/devices/bluetooth/genericattributeprofile"
-	"btproxy/internal/ble/winrt/gen/windows/devices/enumeration"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
+	gatt "github.com/yuzi-co/btproxy/internal/ble/winrt/gen/windows/devices/bluetooth/genericattributeprofile"
+	"github.com/yuzi-co/btproxy/internal/ble/winrt/gen/windows/devices/enumeration"
 )
 
 // cccdUUID is the Client Characteristic Configuration descriptor.

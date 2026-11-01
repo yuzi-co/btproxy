@@ -1,6 +1,6 @@
 package api
 
-import "btproxy/internal/ble"
+import "github.com/yuzi-co/btproxy/internal/ble"
 
 // initScanner applies the configured scanner mode and has status changes reported to the subscribers.
 func (s *Server) initScanner() {

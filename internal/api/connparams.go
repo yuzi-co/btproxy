@@ -1,6 +1,6 @@
 package api
 
-import "btproxy/internal/ble"
+import "github.com/yuzi-co/btproxy/internal/ble"
 
 // setConnParams handles BluetoothSetConnectionParamsRequest. As in ESPHome, the device must be connected
 // through the proxy, and the reply comes once the controller has taken the request, not when the new

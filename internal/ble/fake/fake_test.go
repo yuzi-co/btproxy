@@ -3,7 +3,7 @@ package fake
 import (
 	"testing"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 // TestUnpair checks that unpairing closes the connection to the fake device and that unpairing an unknown

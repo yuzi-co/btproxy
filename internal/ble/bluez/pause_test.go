@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 // openPauseTest opens an adapter that pauses scanning for connects, against a fake bluetoothd with the

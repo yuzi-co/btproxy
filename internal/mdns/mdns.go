@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"btproxy/internal/logx"
-	"btproxy/internal/netif"
+	"github.com/yuzi-co/btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/netif"
 )
 
 const (

@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // Config describes the proxy as Home Assistant sees it.

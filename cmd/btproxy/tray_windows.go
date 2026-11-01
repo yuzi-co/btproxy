@@ -9,7 +9,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/logx"
 
 	"golang.org/x/sys/windows"
 )

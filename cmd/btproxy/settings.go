@@ -13,11 +13,11 @@ import (
 	"sync"
 	"time"
 
-	"btproxy/internal/api"
-	"btproxy/internal/ble"
-	"btproxy/internal/logx"
-	"btproxy/internal/mdns"
-	"btproxy/internal/ui"
+	"github.com/yuzi-co/btproxy/internal/api"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/mdns"
+	"github.com/yuzi-co/btproxy/internal/ui"
 )
 
 // The settings file (-config) holds flag values as a flat JSON object, {"name": "btproxy-office", ...}.
@@ -118,23 +118,25 @@ type appNode struct {
 	srv     *api.Server
 }
 
-// loadSettings reads the settings file and applies it to the flags not given on the command line.
-func loadSettings(path string) {
+// loadSettings reads the settings file and applies it to the flags not given on the command line. It returns
+// an error if the file exists but cannot be read or parsed: the file may hold the encryption key, so the proxy
+// must not carry on without it. Entries that cannot be applied only end up in app.configErr.
+func loadSettings(path string) error {
 	app.started = time.Now()
 	app.cmdline = map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { app.cmdline[f.Name] = true })
 	app.configPath = path
 	app.config = map[string]string{}
 	if path == "" {
-		return
+		return nil
 	}
 	cfg, err := loadConfig(path)
 	if err != nil {
-		app.configErr = err
-		return
+		return err
 	}
 	app.config = cfg
 	app.configErr = applyConfig(cfg, app.cmdline)
+	return nil
 }
 
 // loadConfig reads a settings file; a missing file is an empty configuration.

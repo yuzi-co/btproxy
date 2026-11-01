@@ -11,7 +11,7 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 // rssiOf is the RSSI the device cache holds for a device; ok is false if it has no entry.

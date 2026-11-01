@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // restartAdapter is a testAdapter that reports bluetoothd restarts.

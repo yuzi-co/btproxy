@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 // BenchmarkDecoder decodes non-scannable advertisements, the common case, and scannable ones with their scan

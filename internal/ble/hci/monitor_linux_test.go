@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 // TestOpen opens the monitor where the kernel has Bluetooth and the test CAP_NET_RAW, which checks the socket

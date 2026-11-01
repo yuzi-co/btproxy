@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"unsafe"
 
-	"btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
 	"github.com/go-ole/go-ole"
+	"github.com/yuzi-co/btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
 )
 
 const SignatureBluetoothLEAdvertisementWatcherStoppedEventArgs string = "rc(Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementWatcherStoppedEventArgs;{dd40f84d-e7b9-43e3-9c04-0685d085fd8c})"

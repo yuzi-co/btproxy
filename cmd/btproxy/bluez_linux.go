@@ -1,9 +1,9 @@
 package main
 
 import (
-	"btproxy/internal/ble"
-	"btproxy/internal/ble/bluez"
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/bluez"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // agentDone is set once an adapter has registered the pairing agent.

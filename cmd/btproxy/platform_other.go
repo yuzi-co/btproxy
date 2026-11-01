@@ -7,8 +7,8 @@ import (
 	"os"
 	"syscall"
 
-	"btproxy/internal/logx"
-	"btproxy/internal/ui"
+	"github.com/yuzi-co/btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ui"
 )
 
 // The hooks main and the settings page call for the Windows tray, log file, single instance check and

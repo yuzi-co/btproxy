@@ -16,8 +16,8 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 const (

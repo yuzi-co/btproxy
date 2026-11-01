@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // TestEncServicesUUID checks that each attribute carries one UUID form: short_uuid for base UUIDs when the

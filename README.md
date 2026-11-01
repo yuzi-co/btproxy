@@ -4,6 +4,8 @@ An ESPHome-compatible Bluetooth proxy for Linux and Windows, written in Go. Home
 ESPHome integration (port 6053) like an ESP32 proxy, then scans and connects to BLE devices through the host's
 adapter: BlueZ over D-Bus on Linux, WinRT on Windows. Other programs can use the adapter at the same time.
 
+Not related to [conorpp/btproxy](https://github.com/conorpp/btproxy), a Bluetooth man-in-the-middle tool.
+
 Status: in use since 2026-10-31 on an OpenWrt 23.05 router (MT7620A, mipsle, 128 MB RAM, RTL8761B USB stick)
 and since 2026-11-01 on Windows 11 (Intel adapter), with Home Assistant 2026.11. The fake backend passes an
 end-to-end test with `aioesphomeapi`.
@@ -131,7 +133,8 @@ first one failing stops the proxy. Log lines are tagged with `node` and `adapter
 ## Settings page
 
 `-config FILE` is a flat JSON object of flag values, such as `{"friendly-name": "Garage", "connections": 3}`,
-read at start. Command-line flags override it; a bad entry is logged and the rest apply.
+read at start. Command-line flags override it; a bad entry is logged and the rest apply. A file that cannot be
+read or parsed stops the proxy, since it may hold the encryption key.
 
 `-ui ADDRESS` (such as `:8080`) serves the status (clients, connections, advertisement rate, scanner state, last
 warning or error) and a form for the settings relevant to the backend. Settings given on the command line show
@@ -143,7 +146,8 @@ Windows: a new process).
   (preferred), `$BTPROXY_UI_PASSWORD` or `-ui-password`. HTTP Basic, any user name, one-second delay after a
   wrong one.
 - Without a password it answers only Host `localhost` or loopback (against DNS rebinding).
-- Per-process form token, cross-origin posts refused, strict Content-Security-Policy, nothing external.
+- Per-process form token, cross-origin posts refused, nothing external. The Content-Security-Policy blocks
+  other origins but allows the page's inline script and style.
 - Plain HTTP: on an untrusted network keep it on 127.0.0.1 and use SSH (`ssh -L 8080:127.0.0.1:8080 router`).
 
 The server is a minimal HTTP/1.1 implementation (`net/http` would add about 4 MB; this adds 64 KB, with or
@@ -257,8 +261,10 @@ heard the device, so do not filter out devices that should connect through this 
 
 ## Encryption
 
-Without a key the API is plaintext. With one, only Noise (Noise_NNpsk0_25519_ChaChaPoly_SHA256, as ESPHome)
-clients are accepted. The key is 32 random bytes in base64 (`head -c 32 /dev/urandom | base64`):
+Without a key the API is plaintext and has no authentication: any host that can reach the port can use the
+proxy, including bonded devices, unpair devices and read its logs. The proxy logs a warning at start unless it
+listens on loopback only. With a key, only Noise (Noise_NNpsk0_25519_ChaChaPoly_SHA256, as ESPHome) clients are
+accepted. The key is 32 random bytes in base64 (`head -c 32 /dev/urandom | base64`):
 
 - `-encryption-key-file /etc/btproxy.key`: preferred; make it root-readable only.
 - `-encryption-key <key>`: visible to local users in `ps`.
@@ -423,3 +429,8 @@ Profiling: build with `-tags pprof` and without `-s -w`. The proxy serves Go's p
 reach it over an SSH tunnel (`ssh -L 16060:127.0.0.1:6060 root@router`) and run
 `go tool pprof -seconds 120 http://127.0.0.1:16060/debug/pprof/profile`
 with the unstripped binary.
+
+## License
+
+[MIT](LICENSE). The API definitions in [proto](proto) come from ESPHome, also under
+[MIT](proto/LICENSE).

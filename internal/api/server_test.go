@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 const testAddr = 0xAA_BB_CC_DD_EE_02

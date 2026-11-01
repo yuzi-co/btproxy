@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 
 	"google.golang.org/protobuf/encoding/protowire"
 )

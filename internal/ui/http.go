@@ -15,16 +15,22 @@ import (
 	"strings"
 	"time"
 
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
-// Limits on a request, and on the server. Variables, so the tests can shorten the timeout.
-var (
+// Limits on a request.
+const (
 	maxHeaderBytes = 8 << 10
 	maxBodyBytes   = 16 << 10
-	maxConns       = 8
-	ioTimeout      = 10 * time.Second // reading the request and writing the response, together
 )
+
+// limits are the server's limits. A parameter of serve, so the tests can shorten them.
+type limits struct {
+	conns     int
+	ioTimeout time.Duration // reading the request and writing the response, together
+}
+
+var defaultLimits = limits{conns: 8, ioTimeout: 10 * time.Second}
 
 // Request is a parsed HTTP request.
 type Request struct {
@@ -53,10 +59,10 @@ func (e *httpError) Error() string { return e.msg }
 
 func bad(status int, msg string) error { return &httpError{status, msg} }
 
-// serve accepts connections and answers each with handle, at most maxConns at a time; connections beyond
+// serve accepts connections and answers each with handle, at most lim.conns at a time; connections beyond
 // that are closed at once.
-func serve(l net.Listener, handle func(*Request) *Response, log *logx.Logger) error {
-	sem := make(chan struct{}, maxConns)
+func serve(l net.Listener, handle func(*Request) *Response, log *logx.Logger, lim limits) error {
+	sem := make(chan struct{}, lim.conns)
 	for {
 		c, err := l.Accept()
 		if errors.Is(err, net.ErrClosed) {
@@ -71,7 +77,7 @@ func serve(l net.Listener, handle func(*Request) *Response, log *logx.Logger) er
 		case sem <- struct{}{}:
 			go func() {
 				defer func() { <-sem }()
-				serveConn(c, handle)
+				serveConn(c, handle, lim.ioTimeout)
 			}()
 		default:
 			c.Close()
@@ -79,7 +85,7 @@ func serve(l net.Listener, handle func(*Request) *Response, log *logx.Logger) er
 	}
 }
 
-func serveConn(c net.Conn, handle func(*Request) *Response) {
+func serveConn(c net.Conn, handle func(*Request) *Response, ioTimeout time.Duration) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(ioTimeout))
 	req, err := readRequest(bufio.NewReaderSize(c, 4096))

@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"unsafe"
 
-	"btproxy/internal/ble/winrt/gen/windows/devices/enumeration"
 	"github.com/go-ole/go-ole"
 	"github.com/saltosystems/winrt-go/windows/foundation"
+	"github.com/yuzi-co/btproxy/internal/ble/winrt/gen/windows/devices/enumeration"
 )
 
 const SignatureBluetoothLEDevice string = "rc(Windows.Devices.Bluetooth.BluetoothLEDevice;{b5ee2f7b-4ad8-4642-ac48-80a0b500e887})"

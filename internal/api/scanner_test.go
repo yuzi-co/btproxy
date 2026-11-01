@@ -3,8 +3,8 @@ package api
 import (
 	"testing"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/ble/fake"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/fake"
 )
 
 func (tc *testClient) subscribeAdverts() {

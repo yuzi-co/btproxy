@@ -1,9 +1,9 @@
 package main
 
 import (
-	"btproxy/internal/ble"
-	"btproxy/internal/ble/winrt"
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/winrt"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 func init() {

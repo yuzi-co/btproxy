@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"btproxy/internal/logx"
-	"btproxy/internal/ui"
+	"github.com/yuzi-co/btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ui"
 
 	"golang.org/x/sys/windows"
 )

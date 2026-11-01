@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"btproxy/internal/ble/fake"
+	"github.com/yuzi-co/btproxy/internal/ble/fake"
 )
 
 // node is one API endpoint. Home Assistant treats each ESPHome device as one Bluetooth scanner, so every

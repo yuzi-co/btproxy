@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"unsafe"
 
-	"btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
 	"github.com/go-ole/go-ole"
+	"github.com/yuzi-co/btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
 )
 
 const SignatureBluetoothLEAdvertisementReceivedEventArgs string = "rc(Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementReceivedEventArgs;{27987ddf-e596-41be-8d43-9e6731d4a913})"

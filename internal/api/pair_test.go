@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 func (a testAdapter) Unpair(addr uint64) error {

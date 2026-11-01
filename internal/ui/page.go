@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // Kind is how a setting is edited.
@@ -89,7 +89,7 @@ func New(app App, opt Options) *Server {
 }
 
 // Serve answers requests on l until it is closed.
-func (s *Server) Serve(l net.Listener) error { return serve(l, s.handle, s.opt.Log) }
+func (s *Server) Serve(l net.Listener) error { return serve(l, s.handle, s.opt.Log, defaultLimits) }
 
 // RandomToken returns 128 random bits in hex.
 func RandomToken() string {

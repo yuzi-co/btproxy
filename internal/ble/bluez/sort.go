@@ -5,7 +5,7 @@ package bluez
 import (
 	"slices"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 func sortServices(s []ble.Service) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -14,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/api"
-	"btproxy/internal/ui"
+	"github.com/yuzi-co/btproxy/internal/api"
+	"github.com/yuzi-co/btproxy/internal/ui"
 )
 
 func goodSettings() map[string]string {
@@ -104,6 +105,28 @@ func TestLoopbackAddr(t *testing.T) {
 		if loopbackAddr(addr) != want {
 			t.Errorf("%s: want %v", addr, want)
 		}
+	}
+}
+
+// A settings file that exists but cannot be used stops the proxy: it may hold the encryption key, and carrying
+// on would serve a plaintext API.
+func TestBadSettingsFile(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "btproxy.json")
+	if err := os.WriteFile(cfg, []byte(`{"encryption-key": `), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-backend", "fake", "-mdns=false", "-name", "proxy", "-mac", "02:00:00:00:00:01",
+		"-listen", "127.0.0.1:" + freePort(t), "-config", cfg}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], append(append([]string{}, testChildArgs...), args...)...)
+	cmd.Env = append(os.Environ(), "BTPROXY_RUN_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("still running with a bad settings file:\n%s", out)
+	}
+	if err == nil || !strings.Contains(string(out), "settings file") {
+		t.Fatalf("err %v, output:\n%s", err, out)
 	}
 }
 

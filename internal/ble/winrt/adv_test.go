@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 func TestAppendAD(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 func TestHandleOf(t *testing.T) {

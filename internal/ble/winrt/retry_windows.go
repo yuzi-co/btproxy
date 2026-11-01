@@ -4,7 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 // Windows has no explicit connect: a GATT session that asks to keep the connection makes the stack connect, and

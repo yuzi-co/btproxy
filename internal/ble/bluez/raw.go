@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/ble/hci"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/hci"
 )
 
 // RawMode selects where advertisements come from.

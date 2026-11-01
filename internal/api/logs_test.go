@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 func TestEsphomeLevel(t *testing.T) {

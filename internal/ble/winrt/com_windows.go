@@ -16,7 +16,7 @@ import (
 	"github.com/saltosystems/winrt-go/windows/storage/streams"
 	"golang.org/x/sys/windows"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 var comOnce sync.Once

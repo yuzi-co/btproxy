@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // TestCoexist binds the way avahi and umdns do (SO_REUSEADDR, plus SO_REUSEPORT for umdns) before our socket.

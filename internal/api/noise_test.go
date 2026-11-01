@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // Test keys only: the PSK is bytes 0..31, the ephemeral private keys 0x40.. and 0x80...

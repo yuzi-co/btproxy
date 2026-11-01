@@ -1,4 +1,4 @@
-module btproxy
+module github.com/yuzi-co/btproxy
 
 go 1.27.3
 

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 func unhex(t *testing.T, s string) []byte {

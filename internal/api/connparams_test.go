@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 // paramsAdapter is a testAdapter that can change connection parameters; it records what it was asked.

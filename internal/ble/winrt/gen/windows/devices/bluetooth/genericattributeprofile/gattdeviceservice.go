@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"unsafe"
 
-	"btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
 	"github.com/go-ole/go-ole"
 	"github.com/saltosystems/winrt-go/windows/foundation"
+	"github.com/yuzi-co/btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
 )
 
 const SignatureGattDeviceService string = "rc(Windows.Devices.Bluetooth.GenericAttributeProfile.GattDeviceService;{ac7b7c05-b33c-47cf-990f-6b8f5577df71})"

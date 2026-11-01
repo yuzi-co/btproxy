@@ -7,7 +7,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 // TestHCIConnUpdate checks the LE Connection Update packet and the parsing of the events that answer it.

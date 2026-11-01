@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 func parse(s string) (*Request, error) {
@@ -69,12 +69,17 @@ func TestReadRequestRejects(t *testing.T) {
 
 func startServer(t *testing.T, handle func(*Request) *Response) string {
 	t.Helper()
+	return startServerLimits(t, handle, defaultLimits)
+}
+
+func startServerLimits(t *testing.T, handle func(*Request) *Response, lim limits) string {
+	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
-	go serve(l, handle, logx.Discard())
+	go serve(l, handle, logx.Discard(), lim)
 	return l.Addr().String()
 }
 
@@ -82,9 +87,7 @@ func okHandler(*Request) *Response { return text(200, "ok") }
 
 // A client that sends its request slowly (or not at all) is cut off at the deadline.
 func TestSlowClient(t *testing.T) {
-	defer func(d time.Duration) { ioTimeout = d }(ioTimeout)
-	ioTimeout = 200 * time.Millisecond
-	addr := startServer(t, okHandler)
+	addr := startServerLimits(t, okHandler, limits{conns: defaultLimits.conns, ioTimeout: 200 * time.Millisecond})
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -108,9 +111,7 @@ func TestSlowClient(t *testing.T) {
 
 // Connections beyond the limit are closed at once, and the server keeps working.
 func TestConnLimit(t *testing.T) {
-	defer func(d time.Duration, n int) { ioTimeout, maxConns = d, n }(ioTimeout, maxConns)
-	ioTimeout, maxConns = time.Second, 2
-	addr := startServer(t, okHandler)
+	addr := startServerLimits(t, okHandler, limits{conns: 2, ioTimeout: time.Second})
 	var held []net.Conn
 	for range 2 {
 		c, err := net.Dial("tcp", addr)

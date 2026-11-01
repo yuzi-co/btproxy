@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // discardConn is a net.Conn that accepts every write at once.

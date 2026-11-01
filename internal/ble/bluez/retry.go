@@ -9,7 +9,7 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 // Many connects fail within half a second with HCI reason 0x3e (connection failed to be established): the

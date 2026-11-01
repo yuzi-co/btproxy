@@ -1,6 +1,6 @@
 package api
 
-import "btproxy/internal/ble"
+import "github.com/yuzi-co/btproxy/internal/ble"
 
 // Status is a summary of a server's state for a local user interface (the Windows tray and settings page).
 type Status struct {

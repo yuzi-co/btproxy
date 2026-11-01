@@ -1,6 +1,6 @@
 package api
 
-import "btproxy/internal/ble"
+import "github.com/yuzi-co/btproxy/internal/ble"
 
 // pair bonds with a connected device. As in ESPHome, the device must be connected through the proxy.
 func (s *Server) pair(c *client, addr uint64) {

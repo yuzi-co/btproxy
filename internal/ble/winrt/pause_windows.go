@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 // Scanning pauses while a connection is being made, as on an ESP32 and with the BlueZ backend: from the connect

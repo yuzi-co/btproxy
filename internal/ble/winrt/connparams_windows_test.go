@@ -3,7 +3,7 @@ package winrt
 import (
 	"testing"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 func TestChoosePreset(t *testing.T) {

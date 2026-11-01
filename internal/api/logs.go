@@ -7,8 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // ESPHome log levels (LogLevel in api.proto).

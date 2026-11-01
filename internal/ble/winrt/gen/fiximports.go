@@ -17,7 +17,7 @@ import (
 
 const (
 	upstream = `"github.com/saltosystems/winrt-go/windows/devices/`
-	local    = `"btproxy/internal/ble/winrt/gen/windows/devices/`
+	local    = `"github.com/yuzi-co/btproxy/internal/ble/winrt/gen/windows/devices/`
 )
 
 func main() {

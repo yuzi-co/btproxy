@@ -11,10 +11,10 @@ import (
 	"github.com/go-ole/go-ole"
 	"github.com/saltosystems/winrt-go/windows/foundation"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
-	"btproxy/internal/ble/winrt/gen/windows/devices/bluetooth/advertisement"
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
+	"github.com/yuzi-co/btproxy/internal/ble/winrt/gen/windows/devices/bluetooth/advertisement"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 const (

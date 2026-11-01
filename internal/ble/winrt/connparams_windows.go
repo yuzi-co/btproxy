@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"math"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/winrt/gen/windows/devices/bluetooth"
 )
 
 // Windows 11 (build 22000) lets an app ask for connection parameters, but only as one of three presets

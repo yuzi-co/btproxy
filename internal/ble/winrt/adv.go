@@ -5,7 +5,7 @@ package winrt
 import (
 	"slices"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 // maxAdvert is the most AD data an ESPHome raw advertisement carries (advertisement plus scan response).

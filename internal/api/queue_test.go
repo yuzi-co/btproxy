@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // pipeListener hands the server connections made with net.Pipe, whose writes block until the other end

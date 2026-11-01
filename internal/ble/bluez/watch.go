@@ -11,8 +11,8 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"btproxy/internal/ble"
-	"btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // Timings, variables so the tests can shorten them. scanRetry is how often the supervisor retries when the

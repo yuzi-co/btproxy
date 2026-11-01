@@ -15,12 +15,12 @@ import (
 	"syscall"
 	"time"
 
-	"btproxy/internal/api"
-	"btproxy/internal/ble"
-	"btproxy/internal/ble/fake"
-	"btproxy/internal/logx"
-	"btproxy/internal/mdns"
-	"btproxy/internal/netif"
+	"github.com/yuzi-co/btproxy/internal/api"
+	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/fake"
+	"github.com/yuzi-co/btproxy/internal/logx"
+	"github.com/yuzi-co/btproxy/internal/mdns"
+	"github.com/yuzi-co/btproxy/internal/netif"
 )
 
 var version = "0.1.0"
@@ -87,7 +87,7 @@ func main() {
 	flag.IntVar(&connectRetries, "connect-retries", 2,
 		"retry a connect that fails at once on the radio (HCI 0x3e) this many times, 0 to disable (bluez and winrt backends)")
 	flag.Parse()
-	loadSettings(*configFile)
+	settingsErr := loadSettings(*configFile)
 
 	level := logx.LevelInfo
 	if *debug {
@@ -98,6 +98,9 @@ func main() {
 	app.problems.w = logOutput()
 	log := logx.New(&app.problems, level, logs)
 	app.log = log
+	if settingsErr != nil {
+		fatal(log, "settings file", "path", *configFile, "err", settingsErr)
+	}
 	if app.configErr != nil {
 		log.Error("settings file", "path", *configFile, "err", app.configErr)
 	}
@@ -160,6 +163,10 @@ func main() {
 		l, err := net.Listen("tcp", n.listen)
 		if err != nil {
 			fatal(log, "listen", "adapter", n.adapter, "err", err)
+		}
+		if key == nil && !loopbackAddr(l.Addr().String()) {
+			log.Warn("API is not encrypted: any host that can reach it can use the proxy and its bonded devices; "+
+				"see -encryption-key-file", "listen", l.Addr().String())
 		}
 		log.Info("btproxy started", "version", version, "listen", l.Addr().String(), "name", n.name,
 			"adapter", n.adapter, "bt_mac", ble.FormatMAC(adapter.MAC()), "encryption", key != nil)

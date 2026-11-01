@@ -11,7 +11,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 const (

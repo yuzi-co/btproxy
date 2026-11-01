@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 func fakeQuiet(bz *fakeBlueZ) (rssi int16, quietMons bool, registered int) {
