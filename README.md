@@ -15,8 +15,12 @@ client library).
 - Active connections: connect, service discovery, read and write of characteristics and descriptors,
   notifications, disconnect, connection slot reporting, cache clearing. Up to `-connections` (default 3).
 - Pairing and unpairing on request from Home Assistant ("Just Works" only, see [Bonded devices](#bonded-devices)).
-- Not supported: passive scanning (BlueZ needs its experimental advertisement monitor API for that,
-  so the scanner always runs active and says so), connection parameter changes, API encryption (Noise), IPv6 mDNS.
+- Active and passive scanning, scanner state and mode reporting, and mode changes from Home Assistant (see
+  [Scanning](#scanning)).
+- Recovery without a restart when `bluetoothd` restarts, the adapter disappears and returns, or it is powered
+  off: connections are reported dropped, then the adapter is powered on, scanning resumes and, after a
+  `bluetoothd` restart, the pairing agent is registered again.
+- Not supported: connection parameter changes, API encryption (Noise), IPv6 mDNS.
 
 ## Build
 
@@ -26,7 +30,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" 
 CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldflags="-s -w" -o dist/btproxy-mipsle ./cmd/btproxy
 ```
 
-The binaries are static, about 4 MB (4.5 MB for mipsle).
+The binaries are static, about 4 MB (4.7 MB for mipsle).
 
 ## Run
 
@@ -41,7 +45,8 @@ btproxy -name btproxy-bedroom -area Bedroom
 Flags: `-name`, `-friendly-name`, `-area`, `-listen` (`:6053`), `-adapter` (`hci0`), `-connections` (3),
 `-mac` (unique id reported to HA; default: the first network interface's MAC), `-mdns` (`true`), `-mdns-iface`
 (comma-separated interfaces to advertise on; default: all up interfaces with IPv4), `-backend` (`bluez` or
-`fake`), `-agent` (`true`: register a BlueZ pairing agent), `-debug`.
+`fake`), `-agent` (`true`: register a BlueZ pairing agent), `-scan-mode` (`active` or `passive`; default
+`active`, like ESPHome), `-debug`.
 
 Home Assistant discovers the proxy over mDNS and offers it under Settings, Devices & services. Without mDNS
 (`-mdns=false`, or a network that does not pass multicast), add it by hand: Add integration, ESPHome, host and
@@ -71,6 +76,34 @@ unicast packet to port 5353 reaches only one of them, which only matters for que
 5353 instead of the group. Keep `-name` different from the host name, since `umdns` already answers for
 `<hostname>.local` (the default, `btproxy-<hostname>`, is).
 
+## Scanning
+
+`-scan-mode` is the configured mode Home Assistant reads back. Home Assistant can switch the mode at run time
+(its auto mode keeps a proxy passive and opens short active windows); the state reports carry the mode really
+in use, which is active whenever passive scanning is unavailable. States: running, idle (no subscriber), failed
+(`bluetoothd` or the adapter is gone, or scanning could not start; retried every 10 s), stopped (the adapter is
+powered off and could not be powered on).
+
+Active scanning is BlueZ discovery (`StartDiscovery`, LE only, duplicate data on). Passive scanning registers
+advertisement monitors (`AdvertisementMonitorManager1`), with which the kernel scans passively and BlueZ
+updates the devices that match. This API needs BlueZ 5.56 or later, a kernel with advertisement monitor
+support (5.10 or later), and `bluetoothd --experimental` (`-E`): even current BlueZ registers the monitor
+manager only in experimental mode. OpenWrt's `bluez-daemon` init script starts `bluetoothd -n` without it, so
+there the proxy falls back to active scanning unless `/etc/init.d/bluetoothd` is changed to pass `-E` (which
+also enables `ConnectDevice`): `procd_set_param command "$PROG" -n -E`, and list the file in
+`/etc/sysupgrade.conf`. After `bluetoothd` restarts, passive scanning is tried again.
+
+Passive scanning has limits that active scanning does not:
+
+- BlueZ has no match-all monitor, and 5.66 overflows a buffer for monitors with more than 7 patterns, so the
+  proxy registers three: common Flags values, manufacturer data of common company ids (Apple, Microsoft,
+  Samsung, Google, Ruuvi, Govee, SwitchBot) and common 16-bit service data (Xiaomi, BTHome, SwitchBot,
+  environmental sensing, Google, Tile). Advertisements without Flags that match none of these are not seen.
+- Without discovery, BlueZ reports a device only when its advertisement content changes or its RSSI moves by
+  8 dB or more, so unchanged beacons arrive far less often and RSSI is coarse. Prefer active scanning for
+  presence detection.
+- No scan responses, so names and other scan-response data of active-only devices are missing.
+
 ## Notes
 
 - BlueZ exposes advertisements only in parsed form (name, manufacturer data, service data, UUIDs, flags, TX
@@ -83,6 +116,8 @@ unicast packet to port 5353 reaches only one of them, which only matters for que
 - BlueZ owns the CCCD descriptors, so a write to one turns notifications on or off with
   `StartNotify`/`StopNotify` instead.
 - Discovery keeps running while a connection is being made (ESPHome pauses it; BlueZ copes without).
+  Connecting does not depend on discovery: for `Device1.Connect` and `ConnectDevice` the kernel scans for the
+  device itself, so connections work in passive mode too.
 - There is no idle timeout on API clients: Home Assistant does not ping while advertisements flow, so dead peers
   are found with TCP keepalive (30 s idle, then 3 probes 10 s apart).
 
