@@ -52,3 +52,26 @@ func TestEncServicesUUID(t *testing.T) {
 		t.Error("efficientUUIDs version check")
 	}
 }
+
+// TestConnParamsMessages decodes a request with a value beyond 16 bits and encodes a negative error code,
+// which int32 carries as a 10-byte varint.
+func TestConnParamsMessages(t *testing.T) {
+	var e enc
+	e.uint(1, 0xAABBCCDDEEFF)
+	e.uint(2, 6)
+	e.uint(3, 0x12345)
+	e.uint(4, 499)
+	e.uint(5, 3200)
+	addr, p, err := decConnParams(e.b)
+	if want := (ble.ConnParams{MinInterval: 6, MaxInterval: 0xffff, Latency: 499, Timeout: 3200}); err != nil ||
+		addr != 0xAABBCCDDEEFF || p != want {
+		t.Errorf("decoded %x %+v %v, want %+v", addr, p, err, want)
+	}
+	fs, err := fields(encConnParamsResult(0xAABBCCDDEEFF, gattNotConnected))
+	if err != nil || fieldValue(fs, 1) != 0xAABBCCDDEEFF || int32(fieldValue(fs, 2)) != -1 {
+		t.Errorf("encoded %+v %v", fs, err)
+	}
+	if fs, _ := fields(encConnParamsResult(1, 0)); len(fs) != 1 {
+		t.Errorf("success carries an error field: %+v", fs)
+	}
+}

@@ -8,6 +8,7 @@ import inspect
 import sys
 
 from aioesphomeapi import APIClient, BluetoothScannerMode, BluetoothScannerState, LogLevel
+from aioesphomeapi.core import BluetoothConnectionParamsAPIError
 
 FAKE_ADDR = 0xAABBCCDDEE01
 BATTERY, ECHO, CCCD = 0x0003, 0x0013, 0x0014
@@ -28,6 +29,7 @@ async def main(host: str, port: int) -> None:
           "flags", info.bluetooth_proxy_feature_flags)
     assert info.bluetooth_proxy_feature_flags & 0b10, "active connections not advertised"
     assert info.bluetooth_proxy_feature_flags & 0b1000, "pairing not advertised"
+    assert info.bluetooth_proxy_feature_flags & 0x80, "connection parameters not advertised"
 
     entities, services = await cli.list_entities_services()
     assert entities == [] and services == []
@@ -117,6 +119,10 @@ async def main(host: str, port: int) -> None:
     print("pair:", paired)
     assert paired.paired and paired.error == 0, paired
 
+    # 30-50 ms interval, 5 s supervision timeout; aioesphomeapi raises on a nonzero error.
+    await cli.bluetooth_device_set_connection_params(FAKE_ADDR, 24, 40, 0, 500)
+    print("connection params ok")
+
     await cli.bluetooth_device_disconnect(FAKE_ADDR)
     await asyncio.sleep(0.3)
     print("states:", states, "free:", free[-1])
@@ -125,6 +131,13 @@ async def main(host: str, port: int) -> None:
     paired = await cli.bluetooth_device_pair(FAKE_ADDR)
     print("pair while disconnected:", paired)
     assert not paired.paired and paired.error == -1, paired
+
+    try:
+        await cli.bluetooth_device_set_connection_params(FAKE_ADDR, 24, 40, 0, 500)
+        raise AssertionError("connection params while disconnected succeeded")
+    except BluetoothConnectionParamsAPIError as e:
+        print("connection params while disconnected ->", e.error_code)
+        assert e.error_code == -1, e.error_code
 
     # Unpairing drops the connection (BlueZ removes the device); the reply must come first, or aioesphomeapi
     # raises BluetoothConnectionDroppedError.

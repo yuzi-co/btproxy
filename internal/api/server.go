@@ -102,8 +102,12 @@ func (s *Server) Serve(l net.Listener) error {
 }
 
 func (s *Server) featureFlags() uint32 {
-	return featurePassiveScan | featureRawAdvertisements | featureStateAndMode |
-		featureActiveConnections | featureRemoteCaching | featureCacheClearing | featurePairing
+	f := uint32(featurePassiveScan | featureRawAdvertisements | featureStateAndMode |
+		featureActiveConnections | featureRemoteCaching | featureCacheClearing | featurePairing)
+	if _, ok := s.adapter.(ble.ConnParamsSetter); ok {
+		f |= featureConnParams
+	}
+	return f
 }
 
 // subscribers returns the clients that receive advertisements.
@@ -446,6 +450,13 @@ func (c *client) handle(f Frame) bool {
 		s.setScanMode(ble.ScanMode(r.kind))
 	case msgSubscribeBTConnectionsFree:
 		c.send(msgBTConnectionsFreeResponse, s.connectionsFree())
+	case msgBTSetConnParamsRequest:
+		addr, p, err := decConnParams(f.Payload)
+		if err != nil {
+			c.log.Warn("bad message", "type", f.Type, "err", err)
+			return false
+		}
+		go s.setConnParams(c, addr, p) // waits for the controller, like a device request
 	case msgBTDeviceRequest, msgBTGATTGetServicesRequest, msgBTGATTReadRequest, msgBTGATTWriteRequest,
 		msgBTGATTReadDescriptorRequest, msgBTGATTWriteDescriptorRequest, msgBTGATTNotifyRequest:
 		r, err := decRequest(f.Type, f.Payload)

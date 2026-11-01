@@ -51,6 +51,8 @@ const (
 	msgNoiseEncryptionSetKeyResponse = 125
 	msgBTScannerStateResponse        = 126
 	msgBTScannerSetModeRequest       = 127
+	msgBTSetConnParamsRequest        = 145
+	msgBTSetConnParamsResponse       = 146
 	msgDeviceCapabilitiesRequest     = 149
 	msgDeviceCapabilitiesResponse    = 150
 )
@@ -67,6 +69,7 @@ const (
 	featureCacheClearing     = 1 << 4
 	featureRawAdvertisements = 1 << 5
 	featureStateAndMode      = 1 << 6
+	featureConnParams        = 1 << 7
 )
 
 // Bluetooth device request types.
@@ -236,6 +239,13 @@ func encAddrResult(addr uint64, ok bool, code int32) []byte {
 	return e.b
 }
 
+func encConnParamsResult(addr uint64, code int32) []byte {
+	var e enc
+	e.uint(1, addr)
+	e.int32(2, code)
+	return e.b
+}
+
 func encScannerState(state ble.ScanState, mode, configured ble.ScanMode) []byte {
 	var e enc
 	e.uint(1, uint64(state))
@@ -270,6 +280,28 @@ func decSubscribeLogs(b []byte) (level int32, dump bool, err error) {
 		}
 	}
 	return level, dump, err
+}
+
+// decConnParams decodes a BluetoothSetConnectionParamsRequest. The fields are uint32 on the wire but 16 bits
+// in Bluetooth; larger values are clamped, as ESPHome does, and left for the controller to refuse.
+func decConnParams(b []byte) (addr uint64, p ble.ConnParams, err error) {
+	fs, err := fields(b)
+	clamp := func(v uint64) uint16 { return uint16(min(v, 0xffff)) }
+	for _, f := range fs {
+		switch f.num {
+		case 1:
+			addr = f.v
+		case 2:
+			p.MinInterval = clamp(f.v)
+		case 3:
+			p.MaxInterval = clamp(f.v)
+		case 4:
+			p.Latency = clamp(f.v)
+		case 5:
+			p.Timeout = clamp(f.v)
+		}
+	}
+	return addr, p, err
 }
 
 // request holds the fields shared by the Bluetooth requests: address, handle, request type, flags and data.
