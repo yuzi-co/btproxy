@@ -27,7 +27,8 @@ type Config struct {
 	Logs           *Logs        // log stream for clients that subscribe to logs; nil sends none
 	Backend        string       // backend and adapter names, for the configuration dump
 	Adapter        string
-	EncryptionKey  []byte // 32-byte API encryption key; nil serves plaintext only
+	EncryptionKey  []byte         // 32-byte API encryption key; nil serves plaintext only
+	AdvFilter      *ble.AdvFilter // advertisements to forward; nil forwards all
 }
 
 // handshakeTimeout bounds the encrypted handshake, so a client that opens a connection and stalls is dropped.
@@ -168,8 +169,12 @@ func (s *Server) updateScan() {
 }
 
 // onAdvert encodes an advertisement into the batch being collected, copying its data, which is only valid
-// during the call.
+// during the call. Advertisements the filter drops stop here, before the lock. The adapter has counted them
+// by then, so its stall watchdog and raw advertisement checks see every advertisement, filtered or not.
 func (s *Server) onAdvert(a ble.Advert) {
+	if !s.cfg.AdvFilter.Allow(a) {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pending == nil {

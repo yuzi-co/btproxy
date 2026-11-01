@@ -58,6 +58,11 @@ func main() {
 	keyB64 := flag.String("encryption-key", "",
 		"API encryption key, base64 of 32 bytes as in ESPHome's api: encryption: key: (visible in ps; prefer -encryption-key-file or $BTPROXY_ENCRYPTION_KEY)")
 	keyFile := flag.String("encryption-key-file", "", "file holding the API encryption key")
+	advAllow := flag.String("adv-allow", "",
+		"forward only advertisements matching one of these comma-separated entries: MAC, OUI or prefix (AA:BB:CC, AA:BB:CC:DD:*), uuid:fe95, mfr:0x004c (default: all)")
+	advDeny := flag.String("adv-deny", "", "drop advertisements matching one of these entries (as -adv-allow; deny wins)")
+	advDenyRandom := flag.Bool("adv-deny-random", false,
+		"drop advertisements from private (resolvable and non-resolvable) random addresses, phones included")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.BoolVar(&useAgent, "agent", true, "register a BlueZ pairing agent (bluez backend)")
 	flag.DurationVar(&stallTimeout, "stall-timeout", 3*time.Minute,
@@ -92,6 +97,10 @@ func main() {
 	if key != nil && !api.Encryption {
 		fatal(log, "encryption key set, but this build has no encryption (built with -tags nonoise)")
 	}
+	advFilter, err := ble.ParseAdvFilter(*advAllow, *advDeny, *advDenyRandom)
+	if err != nil {
+		fatal(log, "advertisement filter", "err", err)
+	}
 	newAdapter, ok := backends[*backend]
 	if !ok {
 		fatal(log, "unknown backend", "backend", *backend)
@@ -113,6 +122,9 @@ func main() {
 	}
 	log.Info("btproxy started", "version", version, "listen", l.Addr().String(), "name", *name,
 		"bt_mac", ble.FormatMAC(adapter.MAC()), "encryption", key != nil)
+	if advFilter != nil {
+		log.Info("advertisement filter", "filter", advFilter.String())
+	}
 	if *mdnsOn {
 		startMDNS(log, *name, *friendly, *mac, l.Addr().(*net.TCPAddr).Port, *mdnsIface, key != nil)
 	}
@@ -120,7 +132,7 @@ func main() {
 		Name: *name, FriendlyName: *friendly, MAC: *mac, SuggestedArea: *area,
 		Version: esphomeVersion, ProjectVersion: version, MaxConnections: *maxConns, ScanMode: mode,
 		Logs: logs, Backend: *backend, Adapter: *adapterName,
-		EncryptionKey: key,
+		EncryptionKey: key, AdvFilter: advFilter,
 	}, adapter, log)
 	fatal(log, "serve", "err", srv.Serve(l))
 }
