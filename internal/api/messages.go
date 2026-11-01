@@ -87,6 +87,9 @@ const (
 // gattError is reported for failed GATT operations and connections (ESP_GATT_ERROR, 0x85).
 const gattError = 0x85
 
+// gattNotConnected is ESPHome's own error code for requests on a device that is not connected.
+const gattNotConnected = -1
+
 type deviceInfo struct {
 	Name, FriendlyName, MAC, BTMAC string
 	Version, Model, Manufacturer   string

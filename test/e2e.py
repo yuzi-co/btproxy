@@ -27,6 +27,7 @@ async def main(host: str, port: int) -> None:
     print("device:", info.name, info.mac_address, "bt", info.bluetooth_mac_address,
           "flags", info.bluetooth_proxy_feature_flags)
     assert info.bluetooth_proxy_feature_flags & 0b10, "active connections not advertised"
+    assert info.bluetooth_proxy_feature_flags & 0b1000, "pairing not advertised"
 
     entities, services = await cli.list_entities_services()
     assert entities == [] and services == []
@@ -40,17 +41,21 @@ async def main(host: str, port: int) -> None:
     print("adverts:", len(adverts), "first data", bytes(adverts[0].data).hex())
     assert free and free[0][:2] == (3, 3), free
 
-    connected = asyncio.get_running_loop().create_future()
     states = []
 
-    def on_state(conn: bool, mtu: int, err: int) -> None:
-        states.append((conn, mtu, err))
-        if not connected.done():
-            connected.set_result((conn, mtu, err))
+    async def connect() -> None:
+        connected = asyncio.get_running_loop().create_future()
 
-    await maybe_await(cli.bluetooth_device_connect(
-        FAKE_ADDR, on_state, feature_flags=info.bluetooth_proxy_feature_flags, address_type=1))
-    print("connect:", await asyncio.wait_for(connected, 5))
+        def on_state(conn: bool, mtu: int, err: int) -> None:
+            states.append((conn, mtu, err))
+            if not connected.done():
+                connected.set_result((conn, mtu, err))
+
+        await maybe_await(cli.bluetooth_device_connect(
+            FAKE_ADDR, on_state, feature_flags=info.bluetooth_proxy_feature_flags, address_type=1))
+        print("connect:", await asyncio.wait_for(connected, 5))
+
+    await connect()
 
     svcs = await cli.bluetooth_gatt_get_services(FAKE_ADDR)
     uuids = [s.uuid for s in svcs.services]
@@ -86,10 +91,32 @@ async def main(host: str, port: int) -> None:
     except Exception as e:  # BluetoothGATTAPIError
         print("bad handle ->", type(e).__name__)
 
+    paired = await cli.bluetooth_device_pair(FAKE_ADDR)
+    print("pair:", paired)
+    assert paired.paired and paired.error == 0, paired
+
     await cli.bluetooth_device_disconnect(FAKE_ADDR)
     await asyncio.sleep(0.3)
     print("states:", states, "free:", free[-1])
     assert states[-1][0] is False and free[-1][0] == 3
+
+    paired = await cli.bluetooth_device_pair(FAKE_ADDR)
+    print("pair while disconnected:", paired)
+    assert not paired.paired and paired.error == -1, paired
+
+    # Unpairing drops the connection (BlueZ removes the device); the reply must come first, or aioesphomeapi
+    # raises BluetoothConnectionDroppedError.
+    await connect()
+    unpaired = await cli.bluetooth_device_unpair(FAKE_ADDR)
+    print("unpair:", unpaired)
+    assert unpaired.success and unpaired.error == 0, unpaired
+    await asyncio.sleep(0.3)
+    print("states:", states[-1], "free:", free[-1])
+    assert states[-1][0] is False and free[-1][0] == 3
+
+    unpaired = await cli.bluetooth_device_unpair(0xAABBCCDDEE99)
+    print("unpair unknown device:", unpaired)
+    assert not unpaired.success and unpaired.error == 0x85, unpaired
 
     unsub()
     unsub_free()

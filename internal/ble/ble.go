@@ -90,6 +90,8 @@ type Conn interface {
 	// Notify enables or disables notifications (or indications) on a characteristic. Values arrive on the
 	// callback given to Adapter.Connect.
 	Notify(handle uint16, enable bool) error
+	// Pair bonds with the device. A device that is already paired succeeds at once.
+	Pair() error
 	Disconnect() error
 }
 
@@ -108,6 +110,9 @@ type Adapter interface {
 	Connect(addr uint64, addrType uint32, ev Events) (Conn, error)
 	// ClearCache forgets the services the stack has cached for a device. Bonds are kept.
 	ClearCache(addr uint64) error
+	// Unpair removes the bond with a device, connected or not, and drops any connection to it without
+	// calling Events.Disconnected.
+	Unpair(addr uint64) error
 }
 
 // ErrNotConnected is returned for requests on a closed connection.

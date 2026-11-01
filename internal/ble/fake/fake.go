@@ -73,10 +73,35 @@ func (Adapter) Connect(addr uint64, _ uint32, ev ble.Events) (ble.Conn, error) {
 		time.Sleep(time.Second)
 		return nil, errors.New("device not found")
 	}
-	return &conn{ev: ev, value: []byte("hello"), done: make(chan struct{})}, nil
+	c := &conn{ev: ev, value: []byte("hello"), done: make(chan struct{})}
+	live.Lock()
+	live.conn = c
+	live.Unlock()
+	return c, nil
 }
 
 func (Adapter) ClearCache(uint64) error { return nil }
+
+// Unpair drops the connection to FakeAddr, as BlueZ does when it removes a device; other addresses fail.
+func (Adapter) Unpair(addr uint64) error {
+	if addr != FakeAddr {
+		return errors.New("device not found")
+	}
+	live.Lock()
+	c := live.conn
+	live.conn = nil
+	live.Unlock()
+	if c != nil {
+		c.Disconnect()
+	}
+	return nil
+}
+
+// live is the latest connection to FakeAddr, for Unpair.
+var live struct {
+	sync.Mutex
+	conn *conn
+}
 
 type conn struct {
 	ev ble.Events
@@ -163,6 +188,15 @@ func (c *conn) notifyLoop() {
 		}
 		c.ev.Notification(HandleEcho, []byte{n})
 	}
+}
+
+func (c *conn) Pair() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return ble.ErrNotConnected
+	}
+	return nil
 }
 
 func (c *conn) Disconnect() error {

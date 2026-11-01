@@ -14,7 +14,8 @@ client library).
 - Raw advertisements, batched like ESPHome (rebuilt from BlueZ's parsed properties, see below).
 - Active connections: connect, service discovery, read and write of characteristics and descriptors,
   notifications, disconnect, connection slot reporting, cache clearing. Up to `-connections` (default 3).
-- Not supported: pairing, passive scanning (BlueZ needs its experimental advertisement monitor API for that,
+- Pairing and unpairing on request from Home Assistant ("Just Works" only, see [Bonded devices](#bonded-devices)).
+- Not supported: passive scanning (BlueZ needs its experimental advertisement monitor API for that,
   so the scanner always runs active and says so), connection parameter changes, API encryption (Noise), IPv6 mDNS.
 
 ## Build
@@ -40,7 +41,7 @@ btproxy -name btproxy-bedroom -area Bedroom
 Flags: `-name`, `-friendly-name`, `-area`, `-listen` (`:6053`), `-adapter` (`hci0`), `-connections` (3),
 `-mac` (unique id reported to HA; default: the first network interface's MAC), `-mdns` (`true`), `-mdns-iface`
 (comma-separated interfaces to advertise on; default: all up interfaces with IPv4), `-backend` (`bluez` or
-`fake`), `-debug`.
+`fake`), `-agent` (`true`: register a BlueZ pairing agent), `-debug`.
 
 Home Assistant discovers the proxy over mDNS and offers it under Settings, Devices & services. Without mDNS
 (`-mdns=false`, or a network that does not pass multicast), add it by hand: Add integration, ESPHome, host and
@@ -101,7 +102,21 @@ systemd (Raspberry Pi OS, Debian): copy the binary to `/usr/local/bin/btproxy` a
 ### Bonded devices
 
 Devices that need an encrypted link (a Tion breezer, for example) must be bonded with the proxy's adapter.
-Either pair once with `bluetoothctl`, or move an existing bond: stop `bluetoothd` on both machines, copy
+Home Assistant can pair a connected device through the proxy (an integration asks for it, or the ESPHome
+`bluetooth_device_pair` call): the proxy calls BlueZ's `Device1.Pair`, and a device that is already paired is
+reported as paired without pairing again. The proxy never pairs on its own, so existing bonds are left alone.
+
+At start the proxy registers a BlueZ agent with the NoInputNoOutput capability and asks to be the default agent.
+It confirms "Just Works" pairing and service authorization only for devices connected through the proxy, and
+refuses PIN and passkey entry, so devices that need a code cannot be paired this way. If another program holds
+the default agent, the proxy keeps its own registered for the pairings it starts and logs a warning. `-agent=false`
+skips the agent; BlueZ then still pairs devices that need no confirmation.
+
+Unpairing calls `Adapter1.RemoveDevice`, because BlueZ has no call that removes only the bond: it also forgets
+the device's cached services and drops its connection, which the proxy reports to Home Assistant after the
+unpairing reply. The device shows up again with its next advertisement.
+
+Alternatively, pair once with `bluetoothctl`, or move an existing bond: stop `bluetoothd` on both machines, copy
 `/var/lib/bluetooth/<adapter MAC>/<device MAC>/` (`info` and `attributes`) into the new adapter's directory,
 then start `bluetoothd`. Copy only while `bluetoothd` is stopped, because it rewrites `info` from memory when it
 exits.

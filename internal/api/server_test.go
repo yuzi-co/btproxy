@@ -15,9 +15,10 @@ import (
 
 const testAddr = 0xAA_BB_CC_DD_EE_02
 
-// testAdapter is a ble.Adapter whose Connect is supplied by the test.
+// testAdapter is a ble.Adapter whose Connect (and Unpair, if set) is supplied by the test.
 type testAdapter struct {
 	connect func(ev ble.Events) (ble.Conn, error)
+	unpair  func(addr uint64) error
 }
 
 func (testAdapter) MAC() uint64                           { return 1 }
@@ -28,11 +29,12 @@ func (a testAdapter) Connect(_ uint64, _ uint32, ev ble.Events) (ble.Conn, error
 }
 
 // testConn records writes; delay, if set, makes each write take that long, and stuck, if set, holds every
-// write until Disconnect.
+// write until Disconnect. Pair returns pairErr.
 type testConn struct {
-	delay func(i int) time.Duration
-	stuck chan struct{}
-	once  sync.Once
+	delay   func(i int) time.Duration
+	stuck   chan struct{}
+	once    sync.Once
+	pairErr error
 
 	mu     sync.Mutex
 	writes [][]byte

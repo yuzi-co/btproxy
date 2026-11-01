@@ -94,7 +94,7 @@ func (s *Server) Serve(l net.Listener) error {
 
 func (s *Server) featureFlags() uint32 {
 	return featurePassiveScan | featureRawAdvertisements | featureStateAndMode |
-		featureActiveConnections | featureRemoteCaching | featureCacheClearing
+		featureActiveConnections | featureRemoteCaching | featureCacheClearing | featurePairing
 }
 
 // subscribers returns the clients that receive advertisements.
@@ -449,9 +449,9 @@ func (c *client) deviceRequest(r request) {
 		}
 		c.send(msgBTDeviceClearCacheResponse, encAddrResult(r.addr, err == nil, code))
 	case reqPair:
-		c.send(msgBTDevicePairingResponse, encAddrResult(r.addr, false, gattError))
+		s.pair(c, r.addr)
 	case reqUnpair:
-		c.send(msgBTDeviceUnpairingResponse, encAddrResult(r.addr, false, gattError))
+		s.unpair(c, r.addr)
 	}
 }
 

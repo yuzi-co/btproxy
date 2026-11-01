@@ -29,6 +29,9 @@ var backends = map[string]func(adapter string) (ble.Adapter, error){
 	"fake": func(string) (ble.Adapter, error) { return fake.Adapter{}, nil },
 }
 
+// useAgent is the -agent flag, read by the bluez backend.
+var useAgent bool
+
 func main() {
 	host, _ := os.Hostname()
 	name := flag.String("name", "btproxy-"+strings.ToLower(strings.Split(host, ".")[0]), "node name shown in Home Assistant")
@@ -42,6 +45,7 @@ func main() {
 	mdnsOn := flag.Bool("mdns", true, "advertise the API over mDNS so Home Assistant discovers it")
 	mdnsIface := flag.String("mdns-iface", "", "comma-separated interfaces to advertise on (default: all with IPv4)")
 	debug := flag.Bool("debug", false, "debug logging")
+	flag.BoolVar(&useAgent, "agent", true, "register a BlueZ pairing agent (bluez backend)")
 	flag.Parse()
 
 	level := slog.LevelInfo
@@ -49,6 +53,7 @@ func main() {
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(log)
 
 	newAdapter, ok := backends[*backend]
 	if !ok {
