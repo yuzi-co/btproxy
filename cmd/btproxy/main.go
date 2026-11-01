@@ -69,6 +69,11 @@ func main() {
 	advDenyRandom := flag.Bool("adv-deny-random", false,
 		"drop advertisements from private (resolvable and non-resolvable) random addresses, phones included")
 	debug := flag.Bool("debug", false, "debug logging")
+	configFile := flag.String("config", defaultConfig,
+		"settings file (flat JSON of flag values); flags on the command line override it, the settings page saves it")
+	uiAddr := flag.String("ui", defaultUI, "serve the settings page on this address, such as :8080 (needs -ui-password unless loopback)")
+	uiPass := flag.String("ui-password", "", "settings page password, any user name (prefer -ui-password-file or $BTPROXY_UI_PASSWORD)")
+	uiPassFile := flag.String("ui-password-file", "", "file holding the settings page password")
 	flag.BoolVar(&useAgent, "agent", true, "register a BlueZ pairing agent (bluez backend)")
 	flag.DurationVar(&stallTimeout, "stall-timeout", 3*time.Minute,
 		"restart active scanning after this long without advertisements, 0 to disable (bluez backend)")
@@ -81,6 +86,7 @@ func main() {
 	flag.IntVar(&connectRetries, "connect-retries", 2,
 		"retry a connect that fails at once on the radio (HCI 0x3e) this many times, 0 to disable (bluez backend)")
 	flag.Parse()
+	loadSettings(*configFile)
 
 	level := logx.LevelInfo
 	if *debug {
@@ -88,7 +94,17 @@ func main() {
 	}
 	// Everything logged also goes to API clients that subscribe to logs, at the level each asks for.
 	logs := &api.Logs{}
-	log := logx.New(os.Stderr, level, logs)
+	app.problems.w = logOutput()
+	log := logx.New(&app.problems, level, logs)
+	app.log = log
+	if app.configErr != nil {
+		log.Error("settings file", "path", *configFile, "err", app.configErr)
+	}
+	oneInstance(log, *listen)
+	uiPassword, err := uiPassword(*uiPass, *uiPassFile, os.Getenv("BTPROXY_UI_PASSWORD"))
+	if err != nil {
+		fatal(log, "ui password", "err", err)
+	}
 
 	scan := map[string]ble.ScanMode{"active": ble.ScanActive, "passive": ble.ScanPassive}
 	mode, ok := scan[*scanMode]
@@ -161,11 +177,16 @@ func main() {
 			Logs: logs, Backend: *backend, Adapter: n.adapter,
 			EncryptionKey: key, AdvFilter: advFilter,
 		}, adapter, nlog)
+		addNode(n.name, adapter, l, srv)
 		go func() { served <- srv.Serve(l) }()
 	}
 	if len(responders) > 0 {
 		go withdrawOnSignal(log, responders)
 	}
+	if err := startUI(log, responders, *uiAddr, uiPassword, uiToken); err != nil {
+		fatal(log, "settings page", "err", err)
+	}
+	startTray(log)
 	fatal(log, "serve", "err", <-served)
 }
 
@@ -286,6 +307,7 @@ func virtualMAC(m net.HardwareAddr) bool {
 
 func fatal(log *logx.Logger, msg string, args ...any) {
 	log.Error(msg, args...)
+	platformFatal(msg, args)
 	fmt.Fprintln(os.Stderr, "exiting")
 	os.Exit(1)
 }
