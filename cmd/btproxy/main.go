@@ -20,6 +20,7 @@ import (
 	"btproxy/internal/ble/fake"
 	"btproxy/internal/logx"
 	"btproxy/internal/mdns"
+	"btproxy/internal/netif"
 )
 
 var version = "0.1.0"
@@ -269,7 +270,7 @@ func hostMAC(a ble.Adapter) string {
 		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 || len(i.HardwareAddr) != 6 {
 			continue
 		}
-		if !virtualMAC(i.HardwareAddr) {
+		if !netif.VirtualMAC(i.HardwareAddr) {
 			return strings.ToUpper(i.HardwareAddr.String())
 		}
 		if virtual == nil {
@@ -280,29 +281,6 @@ func hostMAC(a ble.Adapter) string {
 		return strings.ToUpper(virtual.String())
 	}
 	return ble.FormatMAC(a.MAC())
-}
-
-// virtualOUIs are the vendor prefixes of hypervisors' virtual network adapters.
-var virtualOUIs = [][3]byte{
-	{0x00, 0x15, 0x5d},                                         // Hyper-V
-	{0x00, 0x50, 0x56}, {0x00, 0x0c, 0x29}, {0x00, 0x05, 0x69}, // VMware
-	{0x08, 0x00, 0x27}, // VirtualBox
-	{0x00, 0x16, 0x3e}, // Xen
-	{0x00, 0x1c, 0x42}, // Parallels
-}
-
-// virtualMAC tells whether a MAC is locally administered (bridges, containers, VPNs, randomized Wi-Fi) or
-// belongs to a hypervisor, so likely not the machine's own hardware.
-func virtualMAC(m net.HardwareAddr) bool {
-	if m[0]&0x02 != 0 {
-		return true
-	}
-	for _, o := range virtualOUIs {
-		if m[0] == o[0] && m[1] == o[1] && m[2] == o[2] {
-			return true
-		}
-	}
-	return false
 }
 
 func fatal(log *logx.Logger, msg string, args ...any) {

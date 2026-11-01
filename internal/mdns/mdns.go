@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"btproxy/internal/logx"
+	"btproxy/internal/netif"
 )
 
 const (
@@ -28,10 +29,12 @@ var group = net.IPv4(224, 0, 0, 251)
 
 // Config describes the advertised service.
 type Config struct {
-	Name   string   // instance and host name; must already be a DNS label (see Label)
-	Port   int      // API port
-	TXT    []string // key=value pairs
-	Ifaces []string // interface names to serve; empty means every up, multicast, non-loopback one with IPv4
+	Name string   // instance and host name; must already be a DNS label (see Label)
+	Port int      // API port
+	TXT  []string // key=value pairs
+	// Ifaces are the interface names to serve. Empty means every up, multicast, non-loopback one with IPv4,
+	// except, on Windows, the virtual ones (see netif.Virtual) while any other is left.
+	Ifaces []string
 }
 
 type iface struct {
@@ -78,6 +81,11 @@ func Start(cfg Config, log *logx.Logger) (*Responder, error) {
 	r := &Responder{svc: newService(cfg.Name, cfg.Port, cfg.TXT), names: cfg.Ifaces, log: log, conn: conn, raw: raw,
 		joined: map[string]string{}, stop: make(chan struct{})}
 	r.refresh()
+	if len(cfg.Ifaces) == 0 {
+		if _, skipped := scan(nil); len(skipped) > 0 {
+			log.Info("mdns skips virtual interfaces", "ifaces", skipped)
+		}
+	}
 	for _, n := range cfg.Ifaces {
 		if !slices.ContainsFunc(r.ifaces, func(i iface) bool { return i.name == n }) {
 			log.Warn("mdns interface not up or without IPv4, will retry", "iface", n)
@@ -141,7 +149,7 @@ func (r *Responder) announce() {
 
 // refresh rescans the interfaces, joins the group on new ones and reports whether anything changed.
 func (r *Responder) refresh() bool {
-	ifs := scan(r.names)
+	ifs, _ := scan(r.names)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	changed := !slices.EqualFunc(ifs, r.ifaces, func(a, b iface) bool { return a.String() == b.String() })
@@ -166,10 +174,15 @@ func (r *Responder) refresh() bool {
 	return changed
 }
 
-// scan lists the usable interfaces, restricted to names when given.
-func scan(names []string) []iface {
+// scan lists the usable interfaces, restricted to names when given. Without names it leaves out the virtual
+// ones, unless that would leave none, and returns those it left out, with the reason.
+func scan(names []string) (out []iface, skipped []string) {
 	all, _ := net.Interfaces()
-	var out []iface
+	var virtual map[int]string
+	if len(names) == 0 {
+		virtual = netif.Virtual()
+	}
+	var virt []iface
 	for _, ni := range all {
 		if ni.Flags&net.FlagUp == 0 || ni.Flags&net.FlagMulticast == 0 || ni.Flags&net.FlagLoopback != 0 {
 			continue
@@ -185,11 +198,20 @@ func scan(names []string) []iface {
 				i.nets = append(i.nets, n)
 			}
 		}
-		if len(i.ips) > 0 {
-			out = append(out, i)
+		if len(i.ips) == 0 {
+			continue
 		}
+		if r, ok := virtual[ni.Index]; ok {
+			virt = append(virt, i)
+			skipped = append(skipped, ni.Name+": "+r)
+			continue
+		}
+		out = append(out, i)
 	}
-	return out
+	if len(out) == 0 {
+		return virt, nil
+	}
+	return out, skipped
 }
 
 // ifaceFor finds the served interface whose subnet holds src: mDNS is link-local, so that is where the query

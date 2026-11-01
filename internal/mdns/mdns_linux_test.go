@@ -45,7 +45,7 @@ func TestCoexist(t *testing.T) {
 
 // TestResponder runs the real responder and resolves it with a legacy unicast query to the group.
 func TestResponder(t *testing.T) {
-	ifs := scan(nil)
+	ifs, _ := scan(nil)
 	if len(ifs) == 0 {
 		t.Skip("no multicast interface with IPv4")
 	}

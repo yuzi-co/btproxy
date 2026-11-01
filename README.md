@@ -273,6 +273,17 @@ changes (checked every 30 s), and sends goodbye packets on SIGINT or SIGTERM. Ea
 addresses of the interface it came from; queries from other subnets are ignored. On a router with several VLANs,
 restrict it with `-mdns-iface br-lan` so the proxy is not advertised on WAN or guest networks.
 
+On Windows, without `-mdns-iface`, the proxy also leaves out virtual interfaces, which are up with IPv4 on
+any machine with Hyper-V or WSL (`vEthernet (Default Switch)`, `vEthernet (WSL)`), and logs which ones it
+skipped and why. VPN and tunnel adapters are skipped by their driver's name (TAP-Windows, OpenVPN, WireGuard,
+Wintun, Tailscale, ZeroTier, AnyConnect, GlobalProtect, Fortinet) or by having no MAC. Hypervisor and container
+adapters (Hyper-V, VirtualBox, VMware, Docker, WSL), adapters with a hypervisor's MAC prefix and adapters with
+a locally administered MAC are skipped only when they have no default gateway: the host's adapter on a Hyper-V
+external switch, a Windows VM's own NIC and Wi-Fi with a random MAC all have one and are the LAN. If that would
+leave no interface, all are served. Linux keeps every up interface with IPv4: bridges such as `br-lan`, VLAN
+devices and macvlans there often have locally administered MACs and are the interfaces to serve, and a Linux
+VM's own NIC has a hypervisor's prefix, so neither test is safe there; use `-mdns-iface`.
+
 It shares port 5353 with other responders: the socket sets `SO_REUSEADDR` and `SO_REUSEPORT`, which Linux
 accepts next to OpenWrt's `umdns` (`SO_REUSEADDR`) and `avahi-daemon`. Multicast reaches every socket; a
 unicast packet to port 5353 reaches only one of them, which only matters for queriers that send unicast to
