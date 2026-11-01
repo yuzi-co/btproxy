@@ -52,7 +52,8 @@ type logPeer struct {
 func newLogPeer(t *testing.T, logs *Logs, level int32) *logPeer {
 	a, b := net.Pipe()
 	t.Cleanup(func() { a.Close(); b.Close() })
-	c := &client{s: &Server{}, c: a, log: slog.New(logs.Handler(slog.NewTextHandler(io.Discard, nil)))}
+	c := newClient(&Server{}, a, slog.New(logs.Handler(slog.NewTextHandler(io.Discard, nil))))
+	t.Cleanup(c.closeQueue)
 	logs.subscribe(c, level)
 	t.Cleanup(func() { logs.unsubscribe(c) })
 	return &logPeer{t: t, c: c, p: b, r: bufio.NewReader(b)}
@@ -157,7 +158,8 @@ func TestLogsSlowClient(t *testing.T) {
 		}
 		got++
 	}
-	if got == 0 || got > logQueue+1 {
+	// What the writer holds in its blocked write, then what was queued for the client before dropping began.
+	if got == 0 || got > maxWrite/32+dropLimit+logQueue {
 		t.Errorf("%d messages before the drop report", got)
 	}
 }
@@ -170,7 +172,8 @@ func TestLogsDeadClient(t *testing.T) {
 	log := slog.New(logs.Handler(countHandler{&n}))
 	a, b := net.Pipe()
 	b.Close()
-	c := &client{s: &Server{}, c: a, log: log}
+	c := newClient(&Server{}, a, log)
+	defer c.closeQueue()
 	logs.subscribe(c, logVeryVerbose)
 	defer logs.unsubscribe(c)
 	log.Info("first")

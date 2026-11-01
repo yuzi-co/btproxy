@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -262,10 +263,13 @@ func (c *client) noiseHandshake(r *bufio.Reader) error {
 	} else if err != nil {
 		return reject("Handshake error", err)
 	}
+	// The reply is queued before the transport cipher is set, so nothing encrypted can go ahead of it.
+	c.recv = recv
+	c.writeRaw(appendNoiseFrame(nil, append([]byte{0x00}, reply...)))
 	c.wmu.Lock()
-	defer c.wmu.Unlock()
-	c.recv, c.sendC = recv, send
-	return c.write(appendNoiseFrame(nil, append([]byte{0x00}, reply...)))
+	c.sendC = send
+	c.wmu.Unlock()
+	return nil
 }
 
 // readNoise reads and decrypts one message: 16-bit type, 16-bit size, payload.
@@ -288,15 +292,20 @@ func (c *client) readNoise(r *bufio.Reader) (Frame, error) {
 	return Frame{Type: uint32(binary.BigEndian.Uint16(m)), Payload: m[4 : 4+size]}, nil
 }
 
-// appendNoise encrypts one message into a frame. Called with c.wmu held.
+// appendNoise encrypts one message into a frame appended to b, in place. Called by the writer only.
 func (c *client) appendNoise(b []byte, typ uint32, payload []byte) ([]byte, error) {
 	if len(payload) > MaxMessageSize {
 		return b, fmt.Errorf("message of %d bytes is too large", len(payload))
 	}
-	m := make([]byte, 4, 4+len(payload)+noiseTagSize)
-	binary.BigEndian.PutUint16(m, uint16(typ))
-	binary.BigEndian.PutUint16(m[2:], uint16(len(payload)))
-	return appendNoiseFrame(b, c.sendC.seal(m[:0], nil, append(m, payload...))), nil
+	n := 4 + len(payload) + noiseTagSize
+	b = slices.Grow(b, 3+n) // room for the tag too, so Seal encrypts within b
+	b = binary.BigEndian.AppendUint16(append(b, noiseIndicator), uint16(n))
+	off := len(b)
+	b = binary.BigEndian.AppendUint16(b, uint16(typ))
+	b = binary.BigEndian.AppendUint16(b, uint16(len(payload)))
+	b = append(b, payload...)
+	ct := c.sendC.seal(b[off:off], nil, b[off:])
+	return b[:off+len(ct)], nil
 }
 
 // noiseMAC formats a MAC as ESPHome's server hello carries it: lower case hex without separators.

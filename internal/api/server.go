@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"btproxy/internal/ble"
@@ -97,7 +98,7 @@ func (s *Server) Serve(l net.Listener) error {
 			tc.SetKeepAliveConfig(net.KeepAliveConfig{Enable: true, Idle: 30 * time.Second,
 				Interval: 10 * time.Second, Count: 3})
 		}
-		cl := &client{s: s, c: c, log: s.log.With("client", c.RemoteAddr().String())}
+		cl := newClient(s, c, s.log.With("client", c.RemoteAddr().String()))
 		s.mu.Lock()
 		s.clients[cl] = true
 		s.mu.Unlock()
@@ -172,7 +173,7 @@ func (s *Server) flush() {
 		n := min(len(ads), advBatchSize)
 		msg := encRawAdvertisements(ads[:n])
 		for _, c := range subs {
-			c.send(msgBTRawAdvertisementsResponse, msg)
+			c.sendDroppable(msgBTRawAdvertisementsResponse, msg)
 		}
 		ads = ads[n:]
 	}
@@ -181,12 +182,8 @@ func (s *Server) flush() {
 // broadcast sends a Bluetooth connection message to every client. Home Assistant is normally the only one.
 func (s *Server) broadcast(typ uint32, payload []byte) {
 	s.mu.Lock()
-	cls := make([]*client, 0, len(s.clients))
+	defer s.mu.Unlock()
 	for c := range s.clients {
-		cls = append(cls, c)
-	}
-	s.mu.Unlock()
-	for _, c := range cls {
 		c.send(typ, payload)
 	}
 }
@@ -331,66 +328,151 @@ func (s *Server) removeClient(c *client) {
 	}
 }
 
-// client is one API connection.
+// outQueue bounds the messages waiting for a client's writer. Advertisement batches and log lines, which
+// come again or may be missed, are dropped once dropLimit are waiting. Anything else that finds the queue
+// full closes the client, as ESPHome drops a client that cannot keep up: a stream missing a GATT response or
+// a connection change would mislead it.
+const (
+	outQueue  = 256
+	dropLimit = outQueue / 2
+	maxWrite  = 8 << 10 // the writer sends what is waiting in writes of about this size
+)
+
+// client is one API connection. Messages are queued by send and written by the client's own writer, so a
+// client that stops reading holds up nothing but itself.
 type client struct {
 	s   *Server
 	c   net.Conn
 	log *slog.Logger
 
 	wmu           sync.Mutex
-	dead          bool         // a write failed, guarded by wmu
-	sendC         *noiseCipher // set when the encrypted handshake is done; guarded by wmu
+	out           chan outMsg  // to the writer; closed by run when it ends
+	closed        bool         // out is closed; guarded by wmu
+	dead          bool         // a write failed or the queue overflowed, nothing more is queued; guarded by wmu
+	sendC         *noiseCipher // set under wmu when the encrypted handshake is done, then used by the writer only
+	logDrops      atomic.Int64 // log lines dropped since the writer last reported drops
 	recv          *noiseCipher // used by run only
 	advSubscribed bool         // guarded by s.mu
 	apiMajor      uint32
 	apiMinor      uint32 // set by HelloRequest, before any Bluetooth request
 }
 
-// send writes one message. With encryption on, messages before the end of the handshake are dropped, like the
-// broadcasts that reach every client.
-func (c *client) send(typ uint32, payload []byte) {
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
-	if c.dead { // logged once below: with logs subscribed, every failed write would log another line to send
-		return
-	}
-	if c.s.cfg.EncryptionKey == nil {
-		c.write(AppendFrame(nil, typ, payload))
-		return
-	}
-	if c.sendC == nil {
-		return
-	}
-	b, err := c.appendNoise(nil, typ, payload)
-	if err != nil {
-		c.dead = true // before logging: the log line would be sent to this client too
-		c.log.Warn("not sent", "type", typ, "err", err)
-		return
-	}
-	c.write(b)
+// outMsg is a queued message. Raw ones are sent as they are, without framing or encryption.
+type outMsg struct {
+	typ     uint32
+	payload []byte
+	raw     bool
 }
 
-// write sends bytes as they are, closing the connection on failure. Called with c.wmu held.
-func (c *client) write(b []byte) error {
-	c.c.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	_, err := c.c.Write(b)
-	if err != nil {
-		c.dead = true
-		c.log.Debug("write", "err", err)
+// newClient makes a client and starts its writer.
+func newClient(s *Server, c net.Conn, log *slog.Logger) *client {
+	cl := &client{s: s, c: c, log: log, out: make(chan outMsg, outQueue)}
+	go cl.writeLoop()
+	return cl
+}
+
+// send queues one message; it never blocks. With encryption on, messages before the end of the handshake are
+// dropped, like the broadcasts that reach every client.
+func (c *client) send(typ uint32, payload []byte) { c.queue(outMsg{typ: typ, payload: payload}, false) }
+
+// sendDroppable queues a message that may be lost, an advertisement batch or a log line, unless dropLimit
+// messages are already waiting. It reports whether the message was queued.
+func (c *client) sendDroppable(typ uint32, payload []byte) bool {
+	return c.queue(outMsg{typ: typ, payload: payload}, true)
+}
+
+// writeRaw queues bytes to be sent as they are.
+func (c *client) writeRaw(b []byte) { c.queue(outMsg{payload: b, raw: true}, false) }
+
+func (c *client) queue(m outMsg, droppable bool) bool {
+	c.wmu.Lock()
+	if c.dead || c.closed || !m.raw && c.s.cfg.EncryptionKey != nil && c.sendC == nil {
+		c.wmu.Unlock()
+		return false
+	}
+	switch n := len(c.out); {
+	case droppable && n >= dropLimit:
+		c.wmu.Unlock()
+		return false
+	case n == cap(c.out):
+		c.dead = true // before logging: with logs subscribed, the line would be queued for this client too
+		c.wmu.Unlock()
 		c.c.Close()
+		c.log.Warn("client too slow, closing", "type", m.typ)
+		return false
 	}
-	return err
+	c.out <- m // never blocks: only queue sends, under wmu, and there is room
+	c.wmu.Unlock()
+	return true
 }
 
-func (c *client) writeRaw(b []byte) {
+// closeQueue lets the writer end once it has sent what is queued. Called by run when it returns.
+func (c *client) closeQueue() {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	c.write(b)
+	c.closed = true
+	close(c.out)
+}
+
+// writeLoop sends the queued messages in order, as many as are waiting in one write, until the queue is
+// closed, then closes the connection. After a failed write the rest is discarded. Log drops are reported to
+// the client once it has caught up, not logged: a log line about them would only queue behind them.
+func (c *client) writeLoop() {
+	defer c.c.Close()
+	var buf []byte
+	failed := false
+	for m := range c.out {
+		if failed {
+			continue
+		}
+		var err error
+		buf, err = c.appendMsg(buf[:0], m)
+		for more := true; more && err == nil && len(buf) < maxWrite; {
+			select {
+			case m, ok := <-c.out:
+				if more = ok; ok {
+					buf, err = c.appendMsg(buf, m)
+				}
+			default:
+				more = false
+				if n := c.logDrops.Swap(0); n > 0 {
+					buf, err = c.appendMsg(buf, outMsg{typ: msgSubscribeLogsResponse, payload: encLog(logWarn,
+						formatLog(logWarn, "api", 0, fmt.Sprintf("%d log messages dropped, client too slow", n)))})
+				}
+			}
+		}
+		if err == nil {
+			c.c.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_, err = c.c.Write(buf)
+		}
+		if err != nil {
+			failed = true
+			c.wmu.Lock()
+			c.dead = true // before logging, as in queue
+			c.wmu.Unlock()
+			c.c.Close()
+			c.log.Debug("write", "err", err)
+		}
+		if cap(buf) > 2*maxWrite { // grown for a large message: not kept
+			buf = nil
+		}
+	}
+}
+
+// appendMsg appends a message as it goes on the wire. Called by the writer only.
+func (c *client) appendMsg(b []byte, m outMsg) ([]byte, error) {
+	switch {
+	case m.raw:
+		return append(b, m.payload...), nil
+	case c.sendC != nil:
+		return c.appendNoise(b, m.typ, m.payload)
+	}
+	return AppendFrame(b, m.typ, m.payload), nil
 }
 
 func (c *client) run() {
 	defer c.s.removeClient(c)
-	defer c.c.Close()
+	defer c.closeQueue() // the writer sends what is queued, such as a refusal or DisconnectResponse, then closes
 	c.log.Info("client connected")
 	r := bufio.NewReader(c.c)
 	read := ReadFrame

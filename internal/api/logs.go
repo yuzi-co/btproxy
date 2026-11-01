@@ -42,9 +42,8 @@ type Logs struct {
 }
 
 type logSub struct {
-	level   int32 // guarded by Logs.mu
-	ch      chan []byte
-	dropped atomic.Int64
+	level int32 // guarded by Logs.mu
+	ch    chan []byte
 }
 
 // Handler returns an slog.Handler that passes records to next, as before, and also to the subscribers.
@@ -93,26 +92,24 @@ func (l *Logs) updateMax() {
 func (l *Logs) publish(level int32, payload []byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for _, sub := range l.subs {
+	for c, sub := range l.subs {
 		if level > sub.level {
 			continue
 		}
 		select {
 		case sub.ch <- payload:
 		default:
-			sub.dropped.Add(1)
+			c.logDrops.Add(1)
 		}
 	}
 }
 
-// run sends a subscriber's messages until it unsubscribes. Drops are reported to that client once its queue
-// has room again, not logged: a log line about them would only queue behind them.
+// run passes a subscriber's messages to its client's queue until it unsubscribes. The client's writer reports
+// the drops once it has caught up.
 func (sub *logSub) run(c *client) {
 	for p := range sub.ch {
-		c.send(msgSubscribeLogsResponse, p)
-		if n := sub.dropped.Swap(0); n > 0 {
-			c.send(msgSubscribeLogsResponse, encLog(logWarn,
-				formatLog(logWarn, "api", 0, fmt.Sprintf("%d log messages dropped, client too slow", n))))
+		if !c.sendDroppable(msgSubscribeLogsResponse, p) {
+			c.logDrops.Add(1)
 		}
 	}
 }
