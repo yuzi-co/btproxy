@@ -907,7 +907,17 @@ func (c *conn) Disconnect() error {
 		delete(c.a.conns, c.path)
 	}
 	c.a.mu.Unlock()
+	start := time.Now()
 	err := c.call(c.path, ifDevice+".Disconnect").Err
 	c.unwatch()
+	if took := time.Since(start); took > 5*time.Second {
+		c.a.log.Warn("slow disconnect", "path", c.path, "took", took.Round(time.Millisecond))
+	}
+	// BlueZ answers a disconnect within the supervision timeout. No answer has been the first sign of a hung
+	// bluetoothd, so the supervisor counts it toward a restart and checks bluetoothd at once.
+	if isTimeout(err) {
+		c.a.unanswered.Add(1)
+		c.a.kickScan()
+	}
 	return err
 }

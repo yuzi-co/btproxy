@@ -22,6 +22,9 @@ var (
 	scanRetry      = 10 * time.Second
 	restartEvery   = 10 * time.Minute // at most one bluetoothd restart this often
 	restartTimeout = 30 * time.Second
+	// pingEvery is how often the supervisor checks that bluetoothd still answers. Advertisements are no proof
+	// once they come from the HCI monitor, which keeps reading the controller while bluetoothd hangs.
+	pingEvery = time.Minute
 )
 
 // restartAfter is how many stalls or unanswered calls in a row make the supervisor restart bluetoothd.
@@ -62,9 +65,12 @@ type scanState struct {
 	lastErr     string
 	seen        int       // adverts when reconcile last looked
 	quietSince  time.Time // when seen last changed or the scan was armed
-	strikes     int       // stalls and unanswered calls since the last advertisement or restart
+	strikes     int       // stalls and unanswered calls since bluetoothd last answered, or the last restart
 	lastRestart time.Time
-	pausedAt    time.Time // when scanning was stopped for a connect; zero when not paused
+	lastStrike  time.Time
+	lastPing    time.Time    // when bluetoothd was last checked; zero forces a check
+	unanswered  atomic.Int32 // calls from connections that bluetoothd did not answer, for the supervisor to count
+	pausedAt    time.Time    // when scanning was stopped for a connect; zero when not paused
 }
 
 func (a *Adapter) initScan() error {
@@ -177,7 +183,7 @@ func (a *Adapter) reconcile() {
 	defer release(waiters) // once scanning is stopped, or cannot be
 	a.mu.Lock()
 	want := a.scanFn != nil
-	gone, off, epoch, adverts := a.gone, a.off, a.epoch, a.adverts
+	gone, off, epoch, adverts, raw := a.gone, a.off, a.epoch, a.adverts, a.rawProven()
 	a.mu.Unlock()
 	mode := a.effectiveMode()
 	idle := func(fail ble.ScanState) {
@@ -188,13 +194,29 @@ func (a *Adapter) reconcile() {
 		}
 	}
 	if adverts != a.seen {
-		a.seen, a.quietSince, a.strikes = adverts, time.Now(), 0
+		a.seen, a.quietSince = adverts, time.Now()
+		if !raw { // BlueZ's advertisements show that bluetoothd works; the HCI monitor's do not
+			a.strikes = 0
+		}
+	}
+	if n := a.unanswered.Swap(0); n > 0 {
+		a.strike()
+		a.lastPing = time.Time{} // check now whether bluetoothd answers anything at all
 	}
 
 	if gone {
 		a.armed = false
 		idle(ble.ScanFailed)
 		return
+	}
+	if time.Since(a.lastPing) >= pingEvery {
+		a.lastPing = time.Now()
+		// An answer here does not clear earlier strikes: a hung bluetoothd has been seen to leave some calls
+		// unanswered while others still work.
+		if _, err := a.getProperty(a.path, ifAdapter+".Powered"); isTimeout(err) {
+			a.fail("health check", err)
+			a.strike()
+		}
 	}
 	if off {
 		if err := a.setProperty(a.path, ifAdapter+".Powered", true); err != nil {
@@ -275,10 +297,14 @@ func (a *Adapter) stalled(want bool) bool {
 		time.Since(a.quietSince) >= a.stallTimeout
 }
 
-// strike counts a stall or a call bluetoothd did not answer. After restartAfter in a row it restarts
-// bluetoothd with restartCmd, at most once per restartEvery; the recovery from a bluetoothd restart does the
-// rest.
+// strike counts a stall or a call bluetoothd did not answer. After restartAfter in a row, each within
+// restartEvery of the one before, it restarts bluetoothd with restartCmd, at most once per restartEvery; the
+// recovery from a bluetoothd restart does the rest.
 func (a *Adapter) strike() {
+	if time.Since(a.lastStrike) > restartEvery { // strikes far apart are unrelated
+		a.strikes = 0
+	}
+	a.lastStrike = time.Now()
 	a.strikes++
 	if a.restartCmd == "" || a.strikes < restartAfter ||
 		(!a.lastRestart.IsZero() && time.Since(a.lastRestart) < restartEvery) {

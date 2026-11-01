@@ -199,11 +199,25 @@ func TestDisconnectNotBlocked(t *testing.T) {
 	e.uint(1, testAddr)
 	e.uint(2, reqDisconnect)
 	tc.send(msgBTDeviceRequest, e.b)
-	if r := tc.expect(msgBTDeviceConnectionResponse); fieldValue(r, 2) != 0 {
-		t.Fatalf("still connected: %+v", r)
+	// The disconnect reply and the two write errors may arrive in any order.
+	errs, disconnected := 0, false
+	tc.c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for errs < 2 || !disconnected {
+		f, err := ReadFrame(tc.r)
+		if err != nil {
+			t.Fatalf("disconnected=%v, %d write errors: %v", disconnected, errs, err)
+		}
+		switch f.Type {
+		case msgBTGATTErrorResponse:
+			errs++
+		case msgBTDeviceConnectionResponse:
+			fs, _ := fields(f.Payload)
+			if fieldValue(fs, 2) != 0 {
+				t.Fatalf("still connected: %+v", fs)
+			}
+			disconnected = true
+		}
 	}
-	tc.expect(msgBTGATTErrorResponse)
-	tc.expect(msgBTGATTErrorResponse)
 }
 
 // TestLastClientLeavesWhileConnecting closes the only client while a connect is still running: the connection

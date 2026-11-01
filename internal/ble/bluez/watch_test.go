@@ -22,6 +22,7 @@ func init() {
 	// Before any adapter exists: the supervisors of earlier tests keep running and read these.
 	scanRetry = 50 * time.Millisecond
 	callTimeout = 300 * time.Millisecond
+	pingEvery = 100 * time.Millisecond
 }
 
 // fakeBlueZ is a minimal org.bluez on a private bus: one adapter, discovery and, if monitors is set, the
@@ -40,6 +41,7 @@ type fakeBlueZ struct {
 	stops       int                      // StopDiscovery calls
 	dupData     bool                     // DuplicateData of the last discovery filter
 	wedge       chan struct{}            // while set, StartDiscovery waits for it to close, as a wedged bluetoothd does
+	hung        chan struct{}            // while set, property reads wait for it to close too
 	devices     map[dbus.ObjectPath]bool // announced with InterfacesAdded
 	connectFail bool                     // Device1.Connect fails
 	rssi        int16                    // RSSI threshold of the last discovery filter, 0 for none
@@ -153,6 +155,12 @@ func (r fakeRoot) GetManagedObjects() (map[dbus.ObjectPath]map[string]map[string
 type fakeProps struct{ f *fakeBlueZ }
 
 func (p fakeProps) Get(iface, name string) (dbus.Variant, *dbus.Error) {
+	p.f.mu.Lock()
+	hung := p.f.hung
+	p.f.mu.Unlock()
+	if hung != nil {
+		<-hung
+	}
 	p.f.mu.Lock()
 	defer p.f.mu.Unlock()
 	switch name {
@@ -533,4 +541,38 @@ func TestCallbackOutsideLock(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("deadlock: Scan and stop wait for the adapter lock the advertisement callback holds")
 	}
+}
+
+// TestHealthCheck hangs bluetoothd while passive scanning runs, where no stall watchdog applies and
+// advertisements from the HCI monitor would keep flowing: the periodic check must notice and restart it.
+func TestHealthCheck(t *testing.T) {
+	addr := startBus(t)
+	bz := startFakeBlueZ(t, addr, true)
+	marker := filepath.Join(t.TempDir(), "restarts")
+	restarts := func() int {
+		b, _ := os.ReadFile(marker)
+		return strings.Count(string(b), "\n")
+	}
+	a, err := Open("hci0", Options{RestartCmd: "echo restart >> '" + marker + "'"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetScanMode(ble.ScanPassive)
+	stop, _ := a.Scan(func(ble.Advert) {})
+	defer stop()
+	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	time.Sleep(5 * pingEvery)
+	if r := restarts(); r != 0 {
+		t.Fatalf("restart command ran %d times while bluetoothd answered", r)
+	}
+	hung := make(chan struct{})
+	bz.mu.Lock()
+	bz.hung = hung
+	bz.mu.Unlock()
+	waitFor(t, "restart command", func() bool { return restarts() == 1 })
+	bz.mu.Lock()
+	bz.hung = nil
+	bz.mu.Unlock()
+	close(hung)
+	bz.bus.Close()
 }

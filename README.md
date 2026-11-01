@@ -219,17 +219,21 @@ in use, which is active whenever passive scanning is unavailable. States: runnin
 paused for a connect), failed (`bluetoothd` or the adapter is gone, scanning could not start, `bluetoothd` did
 not answer, or scanning stalled; retried every 10 s), stopped (the adapter is powered off and could not be powered on).
 
-`bluetoothd` can hang while keeping its D-Bus name. With BlueZ 5.66 and an RTL8761B, `StartDiscovery` once
-never replied, and the proxy sat with no advertisements for hours. Every call the proxy makes that
-`bluetoothd` should answer at once now gives up after 10 s, which counts as a failure. GATT operations,
-connecting and pairing keep their own 30 s limits. In active mode a
-watchdog also stops and restarts discovery when no advertisement at all has arrived for `-stall-timeout`
-(3 minutes), reporting failed in between. It does not run in passive mode, where BlueZ reports a device only
-when its advertisement changes and long silences are normal. After two stalls or unanswered calls in a row,
-with no advertisement in between, the proxy runs the `-bluetoothd-restart` command (through `/bin/sh -c`, at
-most once every 10 minutes, killed after 30 s). The usual recovery after a `bluetoothd` restart then brings
-scanning back. The init script and the systemd unit in [contrib](contrib) set the command. Without the command, the proxy keeps retrying
-and reporting failed.
+`bluetoothd` can hang while keeping its D-Bus name. With BlueZ 5.66 and an RTL8761B it hung several times a
+night: first a disconnect went unanswered, then everything else, `StartDiscovery` included. Every call the
+proxy makes that `bluetoothd` should answer at once gives up after 10 s, which counts as a failure, and so
+does a disconnect that is not answered within 30 s. GATT operations, connecting and pairing keep their own
+30 s limits. The proxy also reads one adapter property every minute as a health check, since advertisements
+from the HCI monitor keep arriving while `bluetoothd` hangs. In active mode a watchdog also stops and restarts
+discovery when no advertisement at all has arrived for `-stall-timeout` (3 minutes), reporting failed in
+between. It does not run in passive mode, where BlueZ reports a device only when its advertisement changes and
+long silences are normal.
+
+After two stalls or unanswered calls, each within 10 minutes of the one before (and, without the HCI monitor,
+no advertisement in between), the proxy runs the `-bluetoothd-restart` command (through `/bin/sh -c`, at most
+once every 10 minutes, killed after 30 s). The usual recovery after a `bluetoothd` restart then brings
+scanning back. The init script and the systemd unit in [contrib](contrib) set the command. Without the
+command, the proxy keeps retrying and reporting failed. Disconnects that take longer than 5 s are logged.
 
 Active scanning is BlueZ discovery (`StartDiscovery`, LE only, duplicate data on). Passive scanning registers
 advertisement monitors (`AdvertisementMonitorManager1`), with which the kernel scans passively and BlueZ
