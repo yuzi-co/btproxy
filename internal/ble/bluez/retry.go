@@ -29,7 +29,8 @@ func connectRetry(retries int) ble.ConnectRetry {
 }
 
 // radioFailure tells whether a connect error is one the radio may not repeat: BlueZ's
-// "le-connection-abort-by-local", or a BlueZ error with an empty message (not "does not exist").
+// "le-connection-abort-by-local", or a BlueZ error with an empty message (not "does not exist"). BlueZ 5.66
+// names the empty one org.bluez.Failed, without the usual ".Error".
 func radioFailure(err error) bool {
 	var de dbus.Error
 	if !errors.As(err, &de) || len(de.Body) == 0 {
@@ -37,5 +38,6 @@ func radioFailure(err error) bool {
 	}
 	msg, ok := de.Body[0].(string)
 	return ok && (msg == "le-connection-abort-by-local" ||
-		msg == "" && strings.HasPrefix(de.Name, "org.bluez.Error.") && de.Name != "org.bluez.Error.DoesNotExist")
+		msg == "" && (de.Name == "org.bluez.Failed" || strings.HasPrefix(de.Name, "org.bluez.Error.")) &&
+			de.Name != "org.bluez.Error.DoesNotExist")
 }

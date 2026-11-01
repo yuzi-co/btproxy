@@ -20,6 +20,8 @@ func TestRadioFailure(t *testing.T) {
 	}{
 		{failed("le-connection-abort-by-local"), true},
 		{failed(""), true},
+		{dbus.Error{Name: "org.bluez.Failed", Body: []any{""}}, true}, // what BlueZ 5.66 sends
+		{dbus.Error{Name: "org.bluez.Failed", Body: []any{"Operation already in progress"}}, false},
 		{failed("Page Timeout"), false},
 		{failed("le-connection-abort-by-remote"), false},
 		{failed(), false},

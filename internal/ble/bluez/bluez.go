@@ -492,6 +492,7 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	if err := a.watchDevice(p); err != nil {
 		return nil, fmt.Errorf("match rule: %w", err)
 	}
+	c.watched = true
 	a.mu.Lock()
 	if _, busy := a.conns[p]; busy {
 		a.mu.Unlock()
@@ -528,19 +529,31 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		}
 		return err
 	}, func(err error) bool {
-		// Not once the failure tore the connection down (BlueZ removed the device): a retry would find
-		// it gone.
-		select {
-		case <-c.lost:
+		if !radioFailure(err) {
+			var de dbus.Error
+			errors.As(err, &de)
+			log.Debug("connect failed, not a radio failure", "err", err, "name", de.Name)
 			return false
-		default:
-			return radioFailure(err)
 		}
+		// A link that failed in its first connection events was up for BlueZ for a moment: Connected
+		// went true and back to false, which tore the connection down. Set it up again for the retry.
+		select {
+		case <-c.lostCh():
+			if err := c.rearm(); err != nil {
+				log.Debug("connect failed, cannot retry", "err", err)
+				return false
+			}
+		default:
+		}
+		return true
 	}, ev.Withdrawn, func(n int, err error) {
 		log.Debug("connect failed on the radio, retrying", "retry", n, "err", err)
 	})
 	cancel()
 	if err != nil {
+		if retries > 0 {
+			return fail(fmt.Errorf("connect, %d retries: %w", retries, err))
+		}
 		return fail(fmt.Errorf("connect: %w", err))
 	}
 	if retries > 0 {
@@ -553,7 +566,7 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	}
 	select {
 	case <-c.resolved:
-	case <-c.lost:
+	case <-c.lostCh():
 		return fail(errors.New("link lost while resolving services"))
 	case <-time.After(resolveTimeout):
 		return fail(errors.New("services not resolved in time"))
@@ -607,9 +620,6 @@ type conn struct {
 
 	resolved     chan struct{}
 	resolvedOnce sync.Once
-	lost         chan struct{} // closed when the link goes down
-	lostOnce     sync.Once
-	unwatchOnce  sync.Once
 
 	gattDB // set before Connect returns, read-only afterwards
 
@@ -618,6 +628,8 @@ type conn struct {
 	mu        sync.Mutex
 	up        bool // connected and reported to the caller
 	closed    bool
+	lost      chan struct{} // closed when the link goes down; replaced by rearm
+	watched   bool          // the device's match rule is in place (see watchDevice)
 	notifying map[uint16]bool
 	reading   map[uint16]int      // ReadValue calls in flight per characteristic
 	held      map[uint16][][]byte // Value changes seen while a read was in flight
@@ -638,15 +650,55 @@ type echo struct {
 func (c *conn) markResolved() { c.resolvedOnce.Do(func() { close(c.resolved) }) }
 
 // unwatch drops the connection's match rule (see watchDevice) when it ends, whichever way.
-func (c *conn) unwatch() { c.unwatchOnce.Do(func() { c.a.unwatchDevice(c.path) }) }
+func (c *conn) unwatch() {
+	c.mu.Lock()
+	w := c.watched
+	c.watched = false
+	c.mu.Unlock()
+	if w {
+		c.a.unwatchDevice(c.path)
+	}
+}
+
+func (c *conn) lostCh() chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lost
+}
+
+// rearm sets a connection that went down while connecting up for another attempt: the match rule, its
+// place in a.conns and a fresh lost channel.
+func (c *conn) rearm() error {
+	if err := c.a.watchDevice(c.path); err != nil {
+		return fmt.Errorf("match rule: %w", err)
+	}
+	c.a.mu.Lock()
+	if other, ok := c.a.conns[c.path]; ok && other != c {
+		c.a.mu.Unlock()
+		c.a.unwatchDevice(c.path)
+		return errors.New("another connection took the device")
+	}
+	c.a.conns[c.path] = c
+	c.a.mu.Unlock()
+	c.mu.Lock()
+	c.watched = true
+	c.closed = false
+	c.lost = make(chan struct{})
+	c.mu.Unlock()
+	return nil
+}
 
 func (c *conn) deviceChanged(changed map[string]dbus.Variant) {
 	if v, ok := changed["ServicesResolved"]; ok && v.Value() == true {
 		c.markResolved()
 	}
 	if v, ok := changed["Connected"]; ok && v.Value() == false {
-		c.lostOnce.Do(func() { close(c.lost) })
 		c.mu.Lock()
+		select {
+		case <-c.lost:
+		default:
+			close(c.lost)
+		}
 		report := c.up && !c.closed
 		c.closed = true
 		c.mu.Unlock()
