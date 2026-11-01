@@ -11,8 +11,8 @@ import base64
 import inspect
 import sys
 
-from aioesphomeapi import (APIClient, BluetoothScannerMode, BluetoothScannerState, InvalidEncryptionKeyAPIError,
-                           LogLevel, RequiresEncryptionAPIError)
+from aioesphomeapi import (APIClient, BluetoothScannerMode, BluetoothScannerState, EntityCategory,
+                           InvalidEncryptionKeyAPIError, LogLevel, RequiresEncryptionAPIError, SensorInfo)
 from aioesphomeapi.core import BluetoothConnectionParamsAPIError
 
 FAKE_ADDR = 0xAABBCCDDEE01
@@ -52,7 +52,21 @@ async def main(host: str, port: int, key: str | None) -> None:
     assert info.bluetooth_proxy_feature_flags & 0x80, "connection parameters not advertised"
 
     entities, services = await cli.list_entities_services()
-    assert entities == [] and services == []
+    assert services == []
+    sensors = {e.object_id: e for e in entities if isinstance(e, SensorInfo)}
+    print("sensors:", sorted(sensors))
+    assert len(sensors) == len(entities), "only sensors expected"
+    for oid in ("uptime", "connection_attempts", "connections_made", "advertisement_rate", "free_connection_slots"):
+        assert oid in sensors, f"sensor {oid} missing"
+    assert all(e.entity_category == EntityCategory.DIAGNOSTIC for e in entities)
+    states = {}
+    unsub_states = cli.subscribe_states(lambda s: states.__setitem__(s.key, s))
+    await asyncio.sleep(0.3)
+    uptime = states.get(sensors["uptime"].key)
+    assert uptime is not None and not uptime.missing_state and uptime.state >= 0, f"uptime state {uptime}"
+    assert states[sensors["free_connection_slots"].key].state == 3
+    if callable(unsub_states):
+        unsub_states()
 
     logs = []
     unsub_logs = cli.subscribe_logs(lambda m: logs.append((m.level, m.message.decode())),

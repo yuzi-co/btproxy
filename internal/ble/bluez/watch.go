@@ -67,6 +67,7 @@ type scanState struct {
 	quietSince  time.Time // when seen last changed or the scan was armed
 	strikes     int       // stalls and unanswered calls since bluetoothd last answered, or the last restart
 	lastRestart time.Time
+	restarts    atomic.Uint64 // bluetoothd restarts started, for Restarts
 	lastStrike  time.Time
 	lastPing    time.Time    // when bluetoothd was last checked; zero forces a check
 	unanswered  atomic.Int32 // calls from connections that bluetoothd did not answer, for the supervisor to count
@@ -312,6 +313,7 @@ func (a *Adapter) strike() {
 	}
 	a.strikes = 0
 	a.lastRestart = time.Now()
+	a.restarts.Add(1)
 	a.log.Warn("bluetoothd not responding, restarting it", "cmd", a.restartCmd)
 	// os.StartProcess rather than os/exec, which adds 128 KB to the binary. The command's output goes to
 	// ours, so nothing waits on a pipe that a daemon it starts may keep open.
@@ -331,6 +333,9 @@ func (a *Adapter) strike() {
 		a.log.Warn("bluetoothd restart failed", "err", err)
 	}
 }
+
+// Restarts implements ble.RestartCounter: the bluetoothd restarts the supervisor started.
+func (a *Adapter) Restarts() uint64 { return a.restarts.Load() }
 
 func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 	quiet := a.quiet()

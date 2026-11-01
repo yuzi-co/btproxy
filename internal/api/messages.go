@@ -17,8 +17,10 @@ const (
 	msgDeviceInfoRequest             = 9
 	msgDeviceInfoResponse            = 10
 	msgListEntitiesRequest           = 11
+	msgListEntitiesSensorResponse    = 16
 	msgListEntitiesDoneResponse      = 19
 	msgSubscribeStatesRequest        = 20
+	msgSensorStateResponse           = 25
 	msgSubscribeLogsRequest          = 28
 	msgSubscribeLogsResponse         = 29
 	msgSubscribeHAServicesRequest    = 34

@@ -27,6 +27,8 @@ client library).
   [Scanning](#scanning)) and restarts it if `-bluetoothd-restart` is set.
 - Log streaming to Home Assistant (the ESPHome entry's option to subscribe to the device's logs) and to
   `esphome logs`, formatted like an ESPHome device's (see [Logs](#logs)).
+- Diagnostic sensors in Home Assistant: connection attempts and success rate, advertisement rate,
+  uptime, memory and more (see [Sensors](#sensors)).
 - API encryption (Noise, as ESPHome's `api: encryption: key:`), off by default (see [Encryption](#encryption)).
 - Not supported: setting the encryption key from Home Assistant, IPv6 mDNS.
 
@@ -336,6 +338,27 @@ A subscription with `dump_config` gets one CONFIG line with the proxy's settings
 adapter, scan mode, connections in use). Logging never waits for a client: lines wait in a queue of 64 per
 subscriber, then in the client's send queue, and when a slow client lets those fill up, further lines are
 dropped for that client and it gets a warning with the count once it catches up.
+
+## Sensors
+
+The proxy lists its statistics as ESPHome sensors, which Home Assistant shows as diagnostic entities of the
+device. States are sent when Home Assistant subscribes, every 60 s, and when a connection is made, ends or
+fails. Counters start at zero when the proxy starts.
+
+| Object id | Unit | What |
+|---|---|---|
+| `uptime` | s | time since the proxy started |
+| `connection_attempts` | | connects handed to the Bluetooth stack (not those refused for want of a free slot) |
+| `connections_made` | | of which connected |
+| `connection_success_rate` | % | share of the last 20 attempts that connected; unknown before the first |
+| `advertisement_rate` | adv/s | advertisements received, averaged over the last 60 s |
+| `advertisements_dropped` | | advertisements not sent to a client that fell behind, counted per client |
+| `active_connections` | | established connections |
+| `free_connection_slots` | | of `-connections` |
+| `bluetoothd_restarts` | | restarts by the watchdog (`-bluetoothd-restart`); bluez backend only |
+| `memory` | MiB | resident memory, from `/proc/self/statm`; Linux only |
+
+Entity keys are hashes of the object ids, as ESPHome makes them, so they stay the same across versions.
 
 ## Deploy
 
