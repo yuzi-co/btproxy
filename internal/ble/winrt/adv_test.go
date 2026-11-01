@@ -38,3 +38,27 @@ func TestSortServices(t *testing.T) {
 		t.Fatalf("not sorted: %+v", s)
 	}
 }
+
+// An extended advertisement can carry up to 1650 bytes; the rebuilt data keeps the structures that fit in an
+// ESPHome entry, in order, and stays parseable.
+func TestAppendADExtended(t *testing.T) {
+	var b []byte
+	b = appendAD(b, 0x01, []byte{0x06})
+	b = appendAD(b, 0xff, bytes.Repeat([]byte{0xaa}, 200)) // long manufacturer data: dropped
+	b = appendAD(b, 0x16, bytes.Repeat([]byte{0xbb}, 40))  // service data: fits
+	b = appendAD(b, 0x09, bytes.Repeat([]byte{'n'}, 30))   // name: does not fit any more
+	b = appendAD(b, 0x0a, []byte{0x04})                    // TX power: fits
+	if len(b) > maxAdvert {
+		t.Fatalf("len %d", len(b))
+	}
+	var types []byte
+	for i := 0; i < len(b); i += int(b[i]) + 1 {
+		if b[i] == 0 || i+int(b[i]) >= len(b) {
+			t.Fatalf("bad structure at %d: % x", i, b)
+		}
+		types = append(types, b[i+1])
+	}
+	if want := []byte{0x01, 0x16, 0x0a}; !bytes.Equal(types, want) {
+		t.Fatalf("types % x, want % x", types, want)
+	}
+}

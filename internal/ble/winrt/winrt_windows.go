@@ -8,6 +8,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/go-ole/go-ole"
 	"github.com/saltosystems/winrt-go/windows/foundation"
 
 	"btproxy/internal/ble"
@@ -291,6 +292,14 @@ func (a *Adapter) newWatcher(mode ble.ScanMode) (*watcher, error) {
 		ww.Release()
 		return nil, err
 	}
+	// Extended advertisements (Bluetooth 5) are left out unless asked for; the property is on
+	// IBluetoothLEAdvertisementWatcher2, Windows 10 2004 and later.
+	if itf, err := ww.QueryInterface(ole.NewGUID(advertisement.GUIDiBluetoothLEAdvertisementWatcher2)); err == nil {
+		itf.Release()
+		if err := ww.SetAllowExtendedAdvertisements(true); err != nil {
+			a.log.Debug("extended advertisements not enabled", "err", err)
+		}
+	}
 	w.recv = eventHandler(advertisement.SignatureBluetoothLEAdvertisementWatcher,
 		advertisement.SignatureBluetoothLEAdvertisementReceivedEventArgs, func(_, args unsafe.Pointer) {
 			a.received((*advertisement.BluetoothLEAdvertisementReceivedEventArgs)(args))
@@ -364,8 +373,8 @@ func (a *Adapter) received(args *advertisement.BluetoothLEAdvertisementReceivedE
 		return
 	}
 	addr, err := args.GetBluetoothAddress()
-	if err != nil {
-		return
+	if err != nil || addr == 0 {
+		return // anonymous extended advertisements have no address
 	}
 	rssi, _ := args.GetRawSignalStrengthInDBm()
 	at := ble.AddrPublic
@@ -399,8 +408,11 @@ func appendSections(dst []byte, adv *advertisement.BluetoothLEAdvertisement) []b
 		typ, err1 := s.GetDataType()
 		b, err2 := s.GetData()
 		if err1 == nil && err2 == nil && b != nil {
-			if d, err := appendBuffer(scratch[:0], b); err == nil {
-				dst = appendAD(dst, typ, d)
+			// Sections of an extended advertisement can be long; one that cannot fit is not copied.
+			if n, err := b.GetLength(); err == nil && len(dst)+2+int(n) <= maxAdvert {
+				if d, err := appendBuffer(scratch[:0], b); err == nil {
+					dst = appendAD(dst, typ, d)
+				}
 			}
 		}
 		if b != nil {

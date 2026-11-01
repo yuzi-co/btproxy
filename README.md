@@ -223,7 +223,11 @@ Differences from the BlueZ backend and an ESP32:
 
 - Advertisements are rebuilt from the data sections WinRT parses out of each packet, in their original order,
   so the bytes match what was on air. Advertisement and scan response arrive as separate entries, as from an
-  ESP32. Extended advertisements are not reported.
+  ESP32. Extended advertisements (Bluetooth 5) are reported too: the watcher asks for them
+  (`AllowExtendedAdvertisements`, Windows 10 2004 and later), and Windows hands them over reassembled. As with
+  the HCI monitor on Linux, an entry keeps the AD structures that fit in 62 bytes, in order, and anonymous
+  advertisements (no address) are skipped. The ESPHome API has no field for the primary and secondary PHY,
+  and the bindings' Windows metadata predates the event properties that carry them, so they are not read.
 - Windows owns the connections. btproxy holds a GATT session and the service objects; the link drops a few
   seconds after it lets go of them, and not at all while another program or Windows itself (a paired keyboard,
   for example) uses the device. Services Windows keeps for itself, such as HID, are listed without
