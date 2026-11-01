@@ -101,17 +101,22 @@ func (a *Adapter) initRaw(name string, mode RawMode) error {
 	return nil
 }
 
-// rawAdvert delivers an advertisement from the monitor.
+// rawAdvert delivers an advertisement from the monitor. The callback runs without a.mu: the API server calls
+// Scan and stop with its own lock held, which the callback takes too.
 func (a *Adapter) rawAdvert(ad ble.Advert) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.raw == nil {
+		a.mu.Unlock()
 		return
 	}
 	a.rawSeen = true
-	if a.scanFn != nil {
+	fn := a.scanFn
+	if fn != nil {
 		a.adverts++
-		a.scanFn(ad)
+	}
+	a.mu.Unlock()
+	if fn != nil {
+		fn(ad)
 	}
 }
 
