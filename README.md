@@ -38,24 +38,31 @@ GATT connections and discover over mDNS. "?" means not checked.
 | Runs on | Linux (BlueZ), Windows 10 2004+ and 11; static binary, about 4 MB | ESP32 | Linux (BlueZ), Python |
 | Advertisements | Linux: raw from HCI monitor, else rebuilt; Windows: rebuilt | raw | rebuilt by bleak |
 | Passive scanning | Linux needs `bluetoothd --experimental` | yes | yes |
-| Retry of radio connect failures | yes | ? | ? |
+| Retry of radio connect failures | yes | ? | yes |
 | Pairing, unpairing | yes (Just Works) | yes | no |
 | Cache clearing | yes, bonds kept | yes | reported, nothing cleared |
 | Connection parameters | Linux: exact; Windows 11: nearest preset | yes | no |
 | API encryption | yes, off by default | yes | no |
-| Diagnostic sensors | proxy statistics | general ones if added in YAML | ? |
-| Advertisement filter | allow/deny lists | ? | ? |
-| Several adapters | Linux: one device each | n/a | ? |
-| Settings | flags, file, web page; Windows tray | YAML, compiled in | ? |
-| Recovers from `bluetoothd` restarts, hangs | yes | n/a | restarts yes, hangs ? |
+| Diagnostic sensors | proxy statistics | general ones if added in YAML | no |
+| Advertisement filter | allow/deny lists | ? | no |
+| Several adapters | Linux: one device each | n/a | one per process |
+| Settings | flags, file, web page; Windows tray | YAML, compiled in | flags |
+| Recovers from `bluetoothd` restarts, hangs | yes | n/a | restarts ?; on a hang it backs off and logs a hint |
 
 Shelly Gen2+, the Ruuvi Gateway and Theengs / OpenMQTTGateway relay advertisements but cannot connect.
 
 An ESP32 is the better proxy where you only have USB power: cheap, and its radio does BLE alone. btproxy fits
-where a Linux box or Windows PC with an adapter already sits in the right room. On the router above the stick
-sits next to the router's 2.4 GHz radio, and many connects fail at the radio level (HCI reason 0x3e).
+where a Linux box or Windows PC with an adapter already sits in the right room. A USB stick next to a router's
+2.4 GHz radio can do badly: on the router above, many connects fail at the radio level (HCI reason 0x3e).
+
+## Install
+
+Download a binary from the [releases](https://github.com/yuzi-co/btproxy/releases), then see [Deploy](#deploy).
+With Go 1.27.3 or newer: `go install github.com/yuzi-co/btproxy/cmd/btproxy@latest`.
 
 ## Build
+
+Needs Go 1.27.3 or newer.
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64  go build -trimpath -ldflags="-s -w" -o dist/btproxy-arm64  ./cmd/btproxy
@@ -68,7 +75,7 @@ Sizes as of 2026-11-01: arm64 and armv7 3.6 MiB, amd64 3.8 MiB, mipsle 4.1 MiB, 
 `-H windowsgui` the Windows binary is a console program that logs like on Linux, with no tray.
 
 `-tags nonoise` leaves out API encryption (192 KiB less on mipsle, 3.9 MiB); such a build refuses to start when
-given a key. The router uses it while encryption is off:
+given a key:
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -tags nonoise -trimpath -ldflags="-s -w" -o dist/btproxy-mipsle ./cmd/btproxy
@@ -112,7 +119,7 @@ Home Assistant discovers it over mDNS. Otherwise add it by hand: Add integration
 | `-adv-allow`, `-adv-deny`, `-adv-deny-random` | | see [Advertisement filter](#advertisement-filter) |
 | `-encryption-key`, `-encryption-key-file` | | see [Encryption](#encryption); also `$BTPROXY_ENCRYPTION_KEY` |
 | `-config` | Windows: `%LOCALAPPDATA%\btproxy\config.json` | settings file |
-| `-ui` | Windows: 127.0.0.1, free port | settings page address |
+| `-ui` | Windows: 127.0.0.1, free port | settings page address; needs a password, see [Settings page](#settings-page) |
 | `-ui-password`, `-ui-password-file` | | settings page password; also `$BTPROXY_UI_PASSWORD` |
 | `-debug` | `false` | debug logging |
 | `-tray` | on when there is no console | Windows tray icon |
@@ -142,10 +149,12 @@ as locked; `-bluetoothd-restart` is never editable there. Saving validates, writ
 if anything changed, restarts the proxy (Linux: `exec` with the same PID, invisible to procd or systemd;
 Windows: a new process).
 
-- On a non-loopback address a password is required, or btproxy refuses to start: `-ui-password-file`
-  (preferred), `$BTPROXY_UI_PASSWORD` or `-ui-password`. HTTP Basic, any user name, one-second delay after a
-  wrong one.
-- Without a password it answers only Host `localhost` or loopback (against DNS rebinding).
+- A password is required, or btproxy refuses to start: `-ui-password-file` (preferred), `$BTPROXY_UI_PASSWORD`
+  or `-ui-password`. HTTP Basic, any user name, one-second delay after a wrong one. On Windows, a page on a
+  loopback address can use a [login link](#windows) from the tray instead; it then answers only Host `localhost`
+  or loopback (against DNS rebinding).
+- The stored encryption key is never sent to the browser. Leave the field empty to keep it, type or generate a
+  new one, or tick Remove; to read it, open the settings file.
 - Per-process form token, cross-origin posts refused, nothing external. The Content-Security-Policy blocks
   other origins but allows the page's inline script and style.
 - Plain HTTP: on an untrusted network keep it on 127.0.0.1 and use SSH (`ssh -L 8080:127.0.0.1:8080 router`).
@@ -163,7 +172,9 @@ role; `-adapter`, `-agent`, `-stall-timeout`, `-bluetoothd-restart` and `-raw-ad
   settings go in the settings file.
 - The settings page is on by default (127.0.0.1, free port; `-ui ""` turns it off). The tray opens it with a
   random URL token that becomes an HttpOnly, SameSite=Strict cookie, so other local users and sites cannot
-  use it.
+  use it. With `-tray=false` the link is printed to the console only, not to the log.
+- The settings page saves the settings file with access for its owner and SYSTEM only. A file written by hand
+  gets that on the first save; until then it has its directory's permissions.
 - Without a console, logs go to `%LOCALAPPDATA%\btproxy\btproxy.log` (rotated at 1 MB to `btproxy.log.1`,
   crash traces included); start errors show a message box.
 - One instance per listen address; a second one says so and exits.
@@ -191,19 +202,7 @@ Differences from BlueZ:
 - Other programs' watchers keep the radio scanning during the scan pause. A stopped watcher is restarted
   (checked every 10 s, retried every 5 s).
 
-### As a Windows service (not implemented)
-
-Untested, since it needs an elevated prompt to install. Microsoft documents session 0 services as
-[advertisement watcher users](https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.advertisement.bluetoothleadvertisementwatcher.start)
-(stop scanning on `PBT_APMSUSPEND`); GATT, pairing and connection parameters from session 0 are undocumented.
-Bonds are machine-wide (`bthserv`), so user-session pairings should carry over. A service would need: no tray,
-so a log file and `-ui-password`; settings and log in `%ProgramData%\btproxy`; a `Global\` single-instance
-mutex instead of `Local\`.
-
-Proposed `-service install|uninstall|run`: service `btproxy`, delayed auto start, depends on `bthserv`, restart
-on failure, LocalSystem or a virtual account, `-config %ProgramData%\btproxy\config.json`, firewall rule for TCP
-6053 and UDP 5353; Stop and Shutdown act like Quit; the watcher stops on suspend. To test as both accounts:
-scanning before logon, connecting, notifications, pairing, connection parameters, sleep and resume.
+Running as a Windows service is not implemented; see the [design notes](https://github.com/yuzi-co/btproxy/issues/15).
 
 ## mDNS
 
@@ -266,7 +265,8 @@ proxy, including bonded devices, unpair devices and read its logs. The proxy log
 listens on loopback only. With a key, only Noise (Noise_NNpsk0_25519_ChaChaPoly_SHA256, as ESPHome) clients are
 accepted. The key is 32 random bytes in base64 (`head -c 32 /dev/urandom | base64`):
 
-- `-encryption-key-file /etc/btproxy.key`: preferred; make it root-readable only.
+- `-encryption-key-file /etc/btproxy.key`: preferred; make it root-readable only
+  (`(umask 077; head -c 32 /dev/urandom | base64 > /etc/btproxy.key)`).
 - `-encryption-key <key>`: visible to local users in `ps`.
 - `$BTPROXY_ENCRYPTION_KEY`: used only when neither flag is set.
 
@@ -342,9 +342,13 @@ Integrations can request other parameters on a live connection (aioesphomeapi
   across proxies.
 - CCCD writes turn notifications on and off through BlueZ or Windows; cache clearing keeps bonds.
 - Connecting does not depend on the proxy's scan, so it works in passive mode and during the pause.
-- Dead API clients are found with TCP keepalive (30 s idle, 3 probes 10 s apart); there is no idle timeout.
+- At most 16 API clients; further connections are closed. A client has 30 s to finish the handshake and send
+  Hello. After that, dead clients are found with TCP keepalive (30 s idle, 3 probes 10 s apart); there is no idle
+  timeout.
 - Each client has a 256-message send queue. Advertisements and log lines are dropped once it is half full;
   anything else finding it full closes the client, as does a write over 10 s.
+- GATT requests wait in a queue per connection, of at most 256 requests and 1 MiB of write data; one over that
+  fails with a GATT error. A client with 32 device or connection parameter requests running is closed.
 
 ## Logs
 
@@ -390,7 +394,8 @@ systemd (Raspberry Pi OS, Debian): copy the binary to `/usr/local/bin/btproxy` a
 [contrib/systemd/btproxy.service](contrib/systemd/btproxy.service) to `/etc/systemd/system/`, then
 `systemctl enable --now btproxy`. The unit wants `bluetooth.service` without requiring it, so the proxy survives
 a `bluetoothd` restart. For encryption, put the key in `/etc/btproxy.key` (`chmod 600`) and use the two
-commented `ExecStart` lines, which pass it as a systemd credential.
+commented `ExecStart` lines, which pass it as a systemd credential. The unit runs as root with a read-only file
+system and other sandboxing; a settings file the page should save needs its directory in `ReadWritePaths=`.
 
 Windows: put the `-H windowsgui` build somewhere permanent, start it, allow it through the firewall (program
 rule, or TCP 6053 and UDP 5353), tick Start with Windows in the tray, and configure on the settings page.
@@ -411,8 +416,7 @@ succeeds.
 To pair outside Home Assistant, use `bluetoothctl`, or move a bond: stop `bluetoothd` on both machines (it
 rewrites `info` on exit), copy `/var/lib/bluetooth/<adapter MAC>/<device MAC>/` to the new adapter's directory,
 start `bluetoothd`. Bonds belong to an adapter address, so this only works for the same adapter (such as the same
-stick in another machine). A device can be bonded to several adapters: the Tion here is bonded to the router's
-stick and the Windows adapter, each paired while in pairing mode.
+stick in another machine). A device can be bonded to several adapters, each paired while it is in pairing mode.
 
 ## Test
 
@@ -429,6 +433,10 @@ Profiling: build with `-tags pprof` and without `-s -w`. The proxy serves Go's p
 reach it over an SSH tunnel (`ssh -L 16060:127.0.0.1:6060 root@router`) and run
 `go tool pprof -seconds 120 http://127.0.0.1:16060/debug/pprof/profile`
 with the unstripped binary.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems as described in [SECURITY.md](SECURITY.md).
 
 ## License
 

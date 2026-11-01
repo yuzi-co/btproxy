@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Cross-builds
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/btproxy
+          GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/btproxy
+          GOOS=linux GOARCH=arm GOARM=7 go build -o /dev/null ./cmd/btproxy
+          GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -o /dev/null ./cmd/btproxy
+          GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -tags nonoise -o /dev/null ./cmd/btproxy
+          GOOS=windows GOARCH=amd64 go build -ldflags=-H=windowsgui -o /dev/null ./cmd/btproxy
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  windows:
+    runs-on: windows-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: pip install aioesphomeapi
+      - run: go build -o btproxy ./cmd/btproxy
+      - name: Plaintext
+        run: |
+          ./btproxy -backend fake -mdns=false -name e2e -mac 02:00:00:00:00:01 -listen 127.0.0.1:16053 &
+          sleep 1
+          python test/e2e.py 127.0.0.1 16053
+      - name: Encrypted
+        run: |
+          key="$(head -c 32 /dev/urandom | base64)"
+          BTPROXY_ENCRYPTION_KEY="$key" ./btproxy -backend fake -mdns=false -name e2e -mac 02:00:00:00:00:01 -listen 127.0.0.1:16054 &
+          sleep 1
+          python test/e2e.py 127.0.0.1 16054 "$key"

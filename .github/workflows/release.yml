@@ -1,0 +1,36 @@
+name: Release
+
+# Pushing a tag such as v0.1.0 publishes a GitHub release with binaries for each platform and their checksums.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - name: Build
+        run: |
+          flags="-s -w -X main.version=${GITHUB_REF_NAME#v}"
+          build() { go build -trimpath -ldflags="$flags $2" -o "dist/$1" ./cmd/btproxy; }
+          GOOS=linux GOARCH=amd64 build btproxy-amd64
+          GOOS=linux GOARCH=arm64 build btproxy-arm64
+          GOOS=linux GOARCH=arm GOARM=7 build btproxy-armv7
+          GOOS=linux GOARCH=mipsle GOMIPS=softfloat build btproxy-mipsle
+          GOOS=windows GOARCH=amd64 build btproxy.exe "-H windowsgui"
+          (cd dist && sha256sum btproxy* > SHA256SUMS)
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
