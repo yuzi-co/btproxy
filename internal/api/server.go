@@ -23,7 +23,11 @@ type Config struct {
 	ProjectVersion string
 	MaxConnections int
 	ScanMode       ble.ScanMode // configured scanner mode; adapters without ble.ModeScanner scan actively
+	EncryptionKey  []byte       // 32-byte API encryption key; nil serves plaintext only
 }
+
+// handshakeTimeout bounds the encrypted handshake, so a client that opens a connection and stalls is dropped.
+const handshakeTimeout = 30 * time.Second
 
 // advBatchSize and advFlushInterval follow ESPHome's batching of raw advertisements.
 const (
@@ -323,19 +327,48 @@ type client struct {
 	log *slog.Logger
 
 	wmu           sync.Mutex
-	advSubscribed bool // guarded by s.mu
+	sendC         *noiseCipher // set when the encrypted handshake is done; guarded by wmu
+	recv          *noiseCipher // used by run only
+	advSubscribed bool         // guarded by s.mu
 	apiMajor      uint32
 	apiMinor      uint32 // set by HelloRequest, before any Bluetooth request
 }
 
+// send writes one message. With encryption on, messages before the end of the handshake are dropped, like the
+// broadcasts that reach every client.
 func (c *client) send(typ uint32, payload []byte) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	if c.s.cfg.EncryptionKey == nil {
+		c.write(AppendFrame(nil, typ, payload))
+		return
+	}
+	if c.sendC == nil {
+		return
+	}
+	b, err := c.appendNoise(nil, typ, payload)
+	if err != nil {
+		c.log.Warn("not sent", "type", typ, "err", err)
+		return
+	}
+	c.write(b)
+}
+
+// write sends bytes as they are, closing the connection on failure. Called with c.wmu held.
+func (c *client) write(b []byte) error {
 	c.c.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if _, err := c.c.Write(AppendFrame(nil, typ, payload)); err != nil {
+	_, err := c.c.Write(b)
+	if err != nil {
 		c.log.Debug("write", "err", err)
 		c.c.Close()
 	}
+	return err
+}
+
+func (c *client) writeRaw(b []byte) {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	c.write(b)
 }
 
 func (c *client) run() {
@@ -343,13 +376,29 @@ func (c *client) run() {
 	defer c.c.Close()
 	c.log.Info("client connected")
 	r := bufio.NewReader(c.c)
+	read := ReadFrame
+	if c.s.cfg.EncryptionKey != nil {
+		c.c.SetReadDeadline(time.Now().Add(handshakeTimeout))
+		if err := c.noiseHandshake(r); err != nil {
+			c.log.Warn("handshake failed", "err", err)
+			return
+		}
+		c.c.SetReadDeadline(time.Time{})
+		c.log.Debug("encrypted session established")
+		read = c.readNoise
+	}
 	for {
-		f, err := ReadFrame(r)
+		f, err := read(r)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				c.log.Info("client disconnected")
 			} else {
 				c.log.Warn("client dropped", "err", err)
+			}
+			if errors.Is(err, ErrEncrypted) {
+				// As ESPHome answers: a Noise client recognises the plaintext indicator and reports that the
+				// device does not use encryption.
+				c.writeRaw([]byte("\x00Bad indicator byte"))
 			}
 			return
 		}
@@ -385,6 +434,7 @@ func (c *client) handle(f Frame) bool {
 			BTMAC: ble.FormatMAC(s.adapter.MAC()), Version: s.cfg.Version, Model: "Linux",
 			Manufacturer: "btproxy", ProjectName: "yuzi.btproxy", ProjectVersion: s.cfg.ProjectVersion,
 			SuggestedArea: s.cfg.SuggestedArea, FeatureFlags: s.featureFlags(),
+			EncryptionSupported: s.cfg.EncryptionKey != nil,
 		}))
 	case msgDeviceCapabilitiesRequest:
 		c.send(msgDeviceCapabilitiesResponse, encCapabilities(s.featureFlags(), ble.FormatMAC(s.adapter.MAC())))
