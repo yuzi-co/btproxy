@@ -143,8 +143,9 @@ The binary is about 3.4 MB. It uses the default Bluetooth adapter, which must su
 `-adapter` and the BlueZ flags (`-agent`, `-stall-timeout`, `-bluetoothd-restart`, `-raw-adverts`,
 `-scan-pause-on-connect`) have no effect. Listening on all interfaces makes Windows Firewall ask on the first
 start; Home Assistant needs TCP 6053 in and, for discovery, UDP 5353. The default `-mac` is the first network
-interface with a MAC, which on a machine with Hyper-V is a virtual adapter: set `-mac` to a fixed value, since
-Home Assistant keys the device on it.
+interface whose MAC is neither locally administered nor a hypervisor's (Hyper-V, VMware, VirtualBox, Xen,
+Parallels). Home Assistant keys the device on it, so on a laptop that moves between Ethernet and Wi-Fi set
+`-mac` to a fixed value.
 
 Checked on Windows 11 with an Intel Wireless Bluetooth adapter: active and passive scanning, mode changes from
 the client, scanner state, RSSI and address type; connecting, service discovery, reading characteristics and
@@ -179,7 +180,7 @@ Differences from the BlueZ backend and an ESP32:
 btproxy advertises itself like an ESPHome device: `_esphomelib._tcp` service `<name>` on host `<name>.local`
 (`-name` reduced to a DNS label), with the TXT keys ESPHome's mdns component sends and Home Assistant reads:
 `friendly_name`, `version` (the ESPHome version btproxy reports), `mac` (the `-mac` value, lower case without
-colons), `platform=linux`, `board` (the Go architecture), `network=ethernet`, `project_name` and
+colons), `platform` (the Go OS: `linux`, `windows`), `board` (the Go architecture), `network=ethernet`, `project_name` and
 `project_version`. With an encryption key, `api_encryption=Noise_NNpsk0_25519_ChaChaPoly_SHA256` too, which
 tells Home Assistant to ask for the key when it discovers the proxy.
 

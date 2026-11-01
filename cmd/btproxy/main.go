@@ -183,7 +183,7 @@ func startMDNS(log *logx.Logger, name, friendly, mac string, port int, ifaces st
 		"friendly_name=" + friendly,
 		"version=" + esphomeVersion,
 		"mac=" + strings.ToLower(strings.NewReplacer(":", "", "-", "").Replace(mac)),
-		"platform=linux",
+		"platform=" + runtime.GOOS,
 		"board=" + runtime.GOARCH,
 		"network=ethernet",
 		"project_name=yuzi.btproxy", // as DeviceInfo reports it
@@ -243,12 +243,45 @@ func encryptionKey(flagValue, file, env string) ([]byte, error) {
 // hostMAC picks the first up, non-loopback interface with a hardware address; the adapter MAC is the fallback.
 func hostMAC(a ble.Adapter) string {
 	ifs, _ := net.Interfaces()
+	var virtual net.HardwareAddr
 	for _, i := range ifs {
-		if i.Flags&net.FlagUp != 0 && i.Flags&net.FlagLoopback == 0 && len(i.HardwareAddr) == 6 {
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 || len(i.HardwareAddr) != 6 {
+			continue
+		}
+		if !virtualMAC(i.HardwareAddr) {
 			return strings.ToUpper(i.HardwareAddr.String())
 		}
+		if virtual == nil {
+			virtual = i.HardwareAddr
+		}
+	}
+	if virtual != nil {
+		return strings.ToUpper(virtual.String())
 	}
 	return ble.FormatMAC(a.MAC())
+}
+
+// virtualOUIs are the vendor prefixes of hypervisors' virtual network adapters.
+var virtualOUIs = [][3]byte{
+	{0x00, 0x15, 0x5d},                                         // Hyper-V
+	{0x00, 0x50, 0x56}, {0x00, 0x0c, 0x29}, {0x00, 0x05, 0x69}, // VMware
+	{0x08, 0x00, 0x27}, // VirtualBox
+	{0x00, 0x16, 0x3e}, // Xen
+	{0x00, 0x1c, 0x42}, // Parallels
+}
+
+// virtualMAC tells whether a MAC is locally administered (bridges, containers, VPNs, randomized Wi-Fi) or
+// belongs to a hypervisor, so likely not the machine's own hardware.
+func virtualMAC(m net.HardwareAddr) bool {
+	if m[0]&0x02 != 0 {
+		return true
+	}
+	for _, o := range virtualOUIs {
+		if m[0] == o[0] && m[1] == o[1] && m[2] == o[2] {
+			return true
+		}
+	}
+	return false
 }
 
 func fatal(log *logx.Logger, msg string, args ...any) {
