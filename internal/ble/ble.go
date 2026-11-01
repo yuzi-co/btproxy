@@ -132,6 +132,21 @@ type ConnParamsSetter interface {
 	SetConnParams(addr uint64, p ConnParams) error
 }
 
+// ConnParamsSupport is implemented by ConnParamsSetters that only know at run time whether they can change
+// connection parameters (the Windows backend needs Windows 11). Without it, a ConnParamsSetter always can.
+type ConnParamsSupport interface {
+	ConnParamsSupported() bool
+}
+
+// CanSetConnParams returns the adapter's ConnParamsSetter if it has one that works here.
+func CanSetConnParams(a Adapter) (ConnParamsSetter, bool) {
+	cs, ok := a.(ConnParamsSetter)
+	if s, has := a.(ConnParamsSupport); ok && has && !s.ConnParamsSupported() {
+		return nil, false
+	}
+	return cs, ok
+}
+
 // RestartCounter is implemented by adapters whose watchdog restarts the Bluetooth stack, for the proxy's
 // diagnostic sensors.
 type RestartCounter interface {

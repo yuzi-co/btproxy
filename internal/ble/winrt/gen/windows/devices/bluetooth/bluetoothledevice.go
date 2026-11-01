@@ -62,6 +62,20 @@ func (impl *BluetoothLEDevice) GetBluetoothDeviceId() (*BluetoothDeviceId, error
 	return v.GetBluetoothDeviceId()
 }
 
+func (impl *BluetoothLEDevice) GetConnectionParameters() (*BluetoothLEConnectionParameters, error) {
+	itf := impl.MustQueryInterface(ole.NewGUID(GUIDiBluetoothLEDevice6))
+	defer itf.Release()
+	v := (*iBluetoothLEDevice6)(unsafe.Pointer(itf))
+	return v.GetConnectionParameters()
+}
+
+func (impl *BluetoothLEDevice) RequestPreferredConnectionParameters(preferredConnectionParameters *BluetoothLEPreferredConnectionParameters) (*BluetoothLEPreferredConnectionParametersRequest, error) {
+	itf := impl.MustQueryInterface(ole.NewGUID(GUIDiBluetoothLEDevice6))
+	defer itf.Release()
+	v := (*iBluetoothLEDevice6)(unsafe.Pointer(itf))
+	return v.RequestPreferredConnectionParameters(preferredConnectionParameters)
+}
+
 func (impl *BluetoothLEDevice) Close() error {
 	itf := impl.MustQueryInterface(ole.NewGUID(foundation.GUIDIClosable))
 	defer itf.Release()
@@ -284,6 +298,37 @@ type iBluetoothLEDevice6Vtbl struct {
 
 func (v *iBluetoothLEDevice6) VTable() *iBluetoothLEDevice6Vtbl {
 	return (*iBluetoothLEDevice6Vtbl)(unsafe.Pointer(v.RawVTable))
+}
+
+func (v *iBluetoothLEDevice6) GetConnectionParameters() (*BluetoothLEConnectionParameters, error) {
+	var out *BluetoothLEConnectionParameters
+	hr, _, _ := syscall.SyscallN(
+		v.VTable().GetConnectionParameters,
+		uintptr(unsafe.Pointer(v)),    // this
+		uintptr(unsafe.Pointer(&out)), // out BluetoothLEConnectionParameters
+	)
+
+	if hr != 0 {
+		return nil, ole.NewError(hr)
+	}
+
+	return out, nil
+}
+
+func (v *iBluetoothLEDevice6) RequestPreferredConnectionParameters(preferredConnectionParameters *BluetoothLEPreferredConnectionParameters) (*BluetoothLEPreferredConnectionParametersRequest, error) {
+	var out *BluetoothLEPreferredConnectionParametersRequest
+	hr, _, _ := syscall.SyscallN(
+		v.VTable().RequestPreferredConnectionParameters,
+		uintptr(unsafe.Pointer(v)),                             // this
+		uintptr(unsafe.Pointer(preferredConnectionParameters)), // in BluetoothLEPreferredConnectionParameters
+		uintptr(unsafe.Pointer(&out)),                          // out BluetoothLEPreferredConnectionParametersRequest
+	)
+
+	if hr != 0 {
+		return nil, ole.NewError(hr)
+	}
+
+	return out, nil
 }
 
 const GUIDiBluetoothLEDeviceStatics2 string = "5f12c06b-3bac-43e8-ad16-563271bd41c2"

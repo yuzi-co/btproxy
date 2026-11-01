@@ -44,6 +44,7 @@ type Adapter struct {
 	log       *logx.Logger
 	mac       uint64
 	connRetry ble.ConnectRetry
+	presets   []preset // connection parameter presets, Windows 11 and later
 	// newScanner starts a watcher; a field, so the tests can do without the radio.
 	newScanner     func(ble.ScanMode) (scanWatcher, error)
 	pauseOnConnect bool
@@ -101,6 +102,14 @@ func Open(opt Options) (*Adapter, error) {
 	}
 	a := &Adapter{log: log, mac: mac, connRetry: connectRetry(opt.ConnectRetries), pauseOnConnect: opt.PauseOnConnect,
 		mode: ble.ScanActive, conns: map[uint64]*conn{}, uncached: map[uint64]bool{}}
+	if a.presets, err = loadPresets(); err != nil {
+		log.Debug("no connection parameter presets (Windows 11 needed), not offering connection parameters", "err", err)
+	} else {
+		for _, p := range a.presets {
+			log.Debug("connection parameter preset", "preset", p.name, "min", p.MinInterval, "max", p.MaxInterval,
+				"latency", p.Latency, "timeout", p.Timeout)
+		}
+	}
 	a.newScanner = func(m ble.ScanMode) (scanWatcher, error) {
 		w, err := a.newWatcher(m)
 		if err != nil {

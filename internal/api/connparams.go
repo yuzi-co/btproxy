@@ -14,7 +14,7 @@ func (s *Server) setConnParams(c *client, addr uint64, p ble.ConnParams) {
 	s.mu.Unlock()
 	log := c.log.With("addr", ble.FormatMAC(addr), "min", p.MinInterval, "max", p.MaxInterval,
 		"latency", p.Latency, "timeout", p.Timeout)
-	cs, ok := s.adapter.(ble.ConnParamsSetter)
+	cs, ok := ble.CanSetConnParams(s.adapter)
 	code := int32(0)
 	switch {
 	case conn == nil:

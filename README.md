@@ -246,7 +246,9 @@ Differences from the BlueZ backend and an ESP32:
   tries again after 500 ms with new ones, unless the attempt took longer than 5 s, the next would start more
   than 8 s after the first, or the connect was withdrawn. The 30 s limit for the link to come up covers all
   attempts. Not found, access denied, cancelled operations, ATT errors and timeouts fail at once.
-- Connection parameters cannot be set (Windows offers presets only), so the feature is not advertised.
+- Connection parameters: Windows 11 offers three presets instead of free values, which the proxy picks from
+  for a client's request, see [Connection parameters](#connection-parameters). On Windows 10 the feature is
+  not advertised.
 - Scanning pauses while connecting (`-scan-pause-on-connect`, on by default), as with BlueZ: from the connect
   call until the services are resolved or the connect fails, the advertisement watcher is stopped and the
   scanner reported idle, then a new watcher starts. Overlapping connects share the pause, which ends after 60 s
@@ -475,6 +477,17 @@ Sending HCI commands on a raw socket needs `CAP_NET_RAW` (the init script and th
 as root). Without it, or when the controller refuses the parameters, Home Assistant gets error 0x85; a device
 that is not connected through the proxy gets -1, like on an ESP32. The feature is advertised regardless, since
 whether the command will be allowed is only known when it is sent.
+
+On Windows, apps cannot send the command either. Windows 11 (build 22000 and later) takes a preset instead,
+through `BluetoothLEDevice.RequestPreferredConnectionParameters`: ThroughputOptimized, Balanced or
+PowerOptimized. Build 26300 reports them as intervals of 15 ms, 30 to 60 ms and 90 to 180 ms, latency 0 and
+supervision timeouts of 2, 4 and 6 s. The proxy picks the preset whose interval range overlaps the requested one,
+or else is nearest to it on a log scale, so ESPHome's fast request (7.5 to 11.25 ms) gets ThroughputOptimized
+and a slow one PowerOptimized; latency and timeout come with the preset. The request stays in effect until the
+next one or the disconnect, and Windows weighs it against other apps' requests for the same device. The answer
+comes once Windows accepted the request; the debug log shows the preset and the parameters in use at that
+moment. The proxy looks the presets up at start and advertises the feature only when they exist, so not on
+Windows 10.
 
 ## Notes
 

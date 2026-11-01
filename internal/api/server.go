@@ -128,7 +128,7 @@ func (s *Server) Serve(l net.Listener) error {
 func (s *Server) featureFlags() uint32 {
 	f := uint32(featurePassiveScan | featureRawAdvertisements | featureStateAndMode |
 		featureActiveConnections | featureRemoteCaching | featureCacheClearing | featurePairing)
-	if _, ok := s.adapter.(ble.ConnParamsSetter); ok {
+	if _, ok := ble.CanSetConnParams(s.adapter); ok {
 		f |= featureConnParams
 	}
 	return f

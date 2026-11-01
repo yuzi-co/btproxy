@@ -39,6 +39,8 @@ type conn struct {
 	descs    map[uint16]*gatt.GattDescriptor
 	cccd     map[uint16]uint16 // CCCD handle -> characteristic value handle
 
+	cpReq *bluetooth.BluetoothLEPreferredConnectionParametersRequest // held while in effect; guarded by mu
+
 	ops      sync.RWMutex // held shared by every call into the WinRT objects, exclusively to release them
 	mu       sync.Mutex
 	up       bool // reported connected to the caller
@@ -757,6 +759,14 @@ func (c *conn) release() bool {
 // free closes the WinRT objects of the connection; it is called with c.ops held exclusively. A second call
 // does nothing.
 func (c *conn) free() {
+	c.mu.Lock()
+	req := c.cpReq
+	c.cpReq = nil
+	c.mu.Unlock()
+	if req != nil {
+		req.Close()
+		req.Release()
+	}
 	for h, ch := range c.chars {
 		if ch.h != nil {
 			ch.c.RemoveValueChanged(ch.tok)
