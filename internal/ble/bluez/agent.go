@@ -24,6 +24,9 @@ const (
 // Pairing works without an agent too, but BlueZ then refuses requests that need a confirmation. If another
 // program holds the default agent, ours stays registered and still serves the pairings the proxy starts.
 func (a *Adapter) RegisterAgent(log *slog.Logger) error {
+	a.mu.Lock()
+	a.agentLog = log // registered again when bluetoothd restarts
+	a.mu.Unlock()
 	ag := &agent{a: a, log: log}
 	// A method table rather than Export: Export looks methods up by reflection, which stops the linker from
 	// dropping unused methods anywhere in the program and adds about 700 KB to the binary.

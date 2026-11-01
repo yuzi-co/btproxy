@@ -44,6 +44,8 @@ type Adapter struct {
 	devices map[dbus.ObjectPath]*device // advertisement state of every device BlueZ reports
 	scanFn  func(ble.Advert)            // nil while not scanning
 	conns   map[dbus.ObjectPath]*conn
+
+	scanState // see watch.go
 }
 
 // device caches the Device1 properties an advertisement is rebuilt from.
@@ -101,6 +103,9 @@ func Open(name string) (*Adapter, error) {
 		}
 	}
 	a.mu.Unlock()
+	if err := a.initScan(); err != nil {
+		return nil, err
+	}
 	go a.dispatch(signals)
 	return a, nil
 }
@@ -118,31 +123,6 @@ func (a *Adapter) managedObjects() (map[dbus.ObjectPath]map[string]map[string]db
 }
 
 func (a *Adapter) MAC() uint64 { return a.mac }
-
-func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
-	filter := map[string]any{"Transport": "le", "DuplicateData": true}
-	if err := a.obj(a.path).Call(ifAdapter+".SetDiscoveryFilter", 0, filter).Err; err != nil {
-		return nil, fmt.Errorf("discovery filter: %w", err)
-	}
-	a.mu.Lock()
-	a.scanFn = fn
-	a.mu.Unlock()
-	if err := a.startDiscovery(); err != nil {
-		a.mu.Lock()
-		a.scanFn = nil
-		a.mu.Unlock()
-		return nil, err
-	}
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			a.mu.Lock()
-			a.scanFn = nil
-			a.mu.Unlock()
-			a.obj(a.path).Call(ifAdapter+".StopDiscovery", 0)
-		})
-	}, nil
-}
 
 func (a *Adapter) startDiscovery() error {
 	err := a.obj(a.path).Call(ifAdapter+".StartDiscovery", 0).Err
@@ -185,6 +165,7 @@ func (a *Adapter) ClearCache(addr uint64) error {
 // dispatch routes D-Bus signals to the scanner cache and to connections.
 func (a *Adapter) dispatch(signals <-chan *dbus.Signal) {
 	for s := range signals {
+		a.watch(s)
 		switch s.Name {
 		case ifProps + ".PropertiesChanged":
 			if len(s.Body) < 2 {
