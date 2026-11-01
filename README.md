@@ -347,3 +347,7 @@ python -m venv .venv && .venv/bin/pip install aioesphomeapi
 # encrypted: start btproxy with -encryption-key-file k (a test key), then
 .venv/bin/python test/e2e.py 127.0.0.1 16053 "$(cat k)"
 ```
+
+To profile on the target, build with `-tags pprof` (and without `-s -w`, so the profile has symbols). The proxy
+then serves Go's profiler on `127.0.0.1:6060`; reach it over an SSH tunnel and run
+`go tool pprof -seconds 120 http://127.0.0.1:16060/debug/pprof/profile` with the unstripped binary.
