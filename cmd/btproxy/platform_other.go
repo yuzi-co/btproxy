@@ -31,6 +31,9 @@ func setAutostartFromUI(bool) error    { return nil }
 // makeConfigDir does nothing: the settings file's directory (/etc) exists.
 func makeConfigDir(string) error { return nil }
 
+// protectFile does nothing: the file was created with mode 0600.
+func protectFile(string) error { return nil }
+
 // restartSelf replaces the process image with a fresh start of the same executable and arguments. The
 // process ID stays, so procd or systemd do not notice; every descriptor is close-on-exec, so the API port,
 // D-Bus and HCI sockets close with the old image.

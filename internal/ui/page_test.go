@@ -145,11 +145,53 @@ func TestHostCheck(t *testing.T) {
 	}
 }
 
+// An empty secret field keeps the stored value, the checkbox removes it, and a failed save never shows it.
+func TestSaveSecret(t *testing.T) {
+	const stored = `a"b<c>`
+	_, app, base := newTestServer(t, Options{})
+	_, page := get(t, base+"/", nil)
+	csrf := csrfRE.FindStringSubmatch(page)[1]
+	for _, c := range []struct {
+		name string
+		form url.Values
+		want string
+	}{
+		{"keep", url.Values{"key": {""}}, stored},
+		{"absent", url.Values{}, stored},
+		{"replace", url.Values{"key": {"new"}}, "new"},
+		{"remove", url.Values{"key": {""}, "key" + secretClear: {"true"}}, ""},
+		{"replace wins over remove", url.Values{"key": {"new"}, "key" + secretClear: {"true"}}, "new"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			form := url.Values{"csrf": {csrf}, "name": {"node-1"}}
+			for k, v := range c.form {
+				form[k] = v
+			}
+			app.mu.Lock()
+			app.errs = map[string]string{"name": "bad"} // answer with the page, instead of restarting
+			app.mu.Unlock()
+			r, body := post(t, base+"/save", form, nil)
+			if r.StatusCode != 400 {
+				t.Fatalf("status %d", r.StatusCode)
+			}
+			app.mu.Lock()
+			got := app.saved["key"]
+			app.mu.Unlock()
+			if got != c.want {
+				t.Errorf("saved %q, want %q", got, c.want)
+			}
+			if strings.Contains(body, `a&#34;b&lt;c&gt;`) {
+				t.Errorf("stored secret sent to the browser:\n%s", body)
+			}
+		})
+	}
+}
+
 func TestSave(t *testing.T) {
 	_, app, base := newTestServer(t, Options{})
 	_, page := get(t, base+"/", nil)
-	if !strings.Contains(page, `value="a&#34;b&lt;c&gt;"`) {
-		t.Errorf("secret value not escaped:\n%s", page)
+	if strings.Contains(page, `a&#34;b&lt;c&gt;`) || strings.Contains(page, `a"b<c>`) {
+		t.Errorf("stored secret sent to the browser:\n%s", page)
 	}
 	m := csrfRE.FindStringSubmatch(page)
 	if m == nil {

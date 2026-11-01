@@ -59,6 +59,21 @@ func dataDir() string {
 // makeConfigDir creates %LOCALAPPDATA%\btproxy or wherever the settings file goes.
 func makeConfigDir(path string) error { return os.MkdirAll(filepath.Dir(path), 0o755) }
 
+// protectFile gives a file a DACL for its owner and SYSTEM only, not inherited from its directory: Windows
+// ignores the mode os.OpenFile is given.
+func protectFile(path string) error {
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;OW)(A;;FA;;;SY)")
+	if err != nil {
+		return err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+}
+
 // logOutput is stderr, plus or instead the log file: with -log-file, or by default when stderr goes nowhere.
 func logOutput() io.Writer {
 	stderr := stdHandleOK(windows.STD_ERROR_HANDLE)
@@ -140,8 +155,10 @@ func waitExit(pid uint32, timeout time.Duration) {
 
 func startTray(log *logx.Logger) {
 	if !trayOn {
+		// To the console only: the URL can hold the login token, and the log also goes to a file and to API
+		// clients.
 		if u := settingsURL(); u != "" {
-			log.Info("settings page", "url", u)
+			fmt.Fprintln(os.Stderr, "settings page:", u)
 		}
 		return
 	}
@@ -167,6 +184,10 @@ func restartSelf(env []string) error {
 	return p.Release()
 }
 
+// noNUL removes NUL characters, on which windows.StringToUTF16 panics: a settings file edited by hand can put
+// them in a name.
+func noNUL(s string) string { return strings.ReplaceAll(s, "\x00", "") }
+
 // platformFatal shows why btproxy stops when nobody would see the log otherwise.
 func platformFatal(msg string, args []any) {
 	if !trayOn {
@@ -188,7 +209,7 @@ func messageBox(text string, isError bool) {
 	} else {
 		flags |= windows.MB_ICONINFORMATION
 	}
-	windows.MessageBox(0, windows.StringToUTF16Ptr(text), windows.StringToUTF16Ptr("btproxy"), flags)
+	windows.MessageBox(0, windows.StringToUTF16Ptr(noNUL(text)), windows.StringToUTF16Ptr("btproxy"), flags)
 }
 
 func autostartField() (ui.Field, bool) {

@@ -72,7 +72,7 @@ func main() {
 	debug := flag.Bool("debug", false, "debug logging")
 	configFile := flag.String("config", defaultConfig,
 		"settings file (flat JSON of flag values); flags on the command line override it, the settings page saves it")
-	uiAddr := flag.String("ui", defaultUI, "serve the settings page on this address, such as :8080 (needs -ui-password unless loopback)")
+	uiAddr := flag.String("ui", defaultUI, "serve the settings page on this address, such as :8080 (needs -ui-password, except on loopback on Windows)")
 	uiPass := flag.String("ui-password", "", "settings page password, any user name (prefer -ui-password-file or $BTPROXY_UI_PASSWORD)")
 	uiPassFile := flag.String("ui-password-file", "", "file holding the settings page password")
 	flag.BoolVar(&useAgent, "agent", true, "register a BlueZ pairing agent (bluez backend)")

@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // autostartFormValue is what the settings form sends for the autostart checkbox: its current state ("" is
@@ -91,5 +93,25 @@ func TestPickIcon(t *testing.T) {
 	}
 	if _, ok := pickIcon([]byte{0, 0, 1, 0, 1, 0}, 16); ok {
 		t.Error("truncated icon accepted")
+	}
+}
+
+// A saved settings file is for its owner and SYSTEM only, whatever its directory allows.
+func TestSaveConfigDACL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	for range 2 { // the second save replaces the protected file
+		if err := saveConfig(path, map[string]string{"encryption-key": "k"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sd.String(), "(A;;FA;;;OW)(A;;FA;;;SY)"; !strings.HasPrefix(got, "D:P") || !strings.HasSuffix(got, want) {
+		t.Fatalf("DACL %s, want it protected and ending in %s", got, want)
+	}
+	if m, err := loadConfig(path); err != nil || m["encryption-key"] != "k" {
+		t.Fatalf("reading it back: %v %v", m, err)
 	}
 }

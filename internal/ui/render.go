@@ -116,12 +116,27 @@ func (s *Server) field(w func(...string), f Field, v string, readOnly bool) {
 			}
 			w(`</select>`)
 		case Secret:
-			w(`<div class="row"><input type="password" autocomplete="off" value="`, esc(v), `" placeholder="`,
-				esc(f.Placeholder), `"`, attrs, `><button type="button" onclick="show('`, id, `',this)">Show</button>`)
+			// The stored value never goes to the browser; only a new one the form just sent comes back.
+			shown, placeholder := v, f.Placeholder
+			if v == f.Value {
+				shown = ""
+			}
+			if f.Value != "" {
+				placeholder = "set; leave empty to keep it"
+			}
+			w(`<div class="row"><input type="password" autocomplete="off" value="`, esc(shown), `" placeholder="`,
+				esc(placeholder), `"`, attrs, `><button type="button" onclick="show('`, id, `',this)">Show</button>`)
 			if dis == "" {
 				w(`<button type="button" onclick="gen('`, id, `')">Generate</button>`)
 			}
 			w(`</div>`)
+			if f.Value != "" && dis == "" {
+				checked := ""
+				if v == "" {
+					checked = " checked"
+				}
+				w(`<label><input type="checkbox" value="true" name="`, esc(f.Name), secretClear, `"`, checked, `> Remove</label>`)
+			}
 		default:
 			typ := "text"
 			if f.Kind == Number {

@@ -15,6 +15,17 @@ func autostartFormValue() string { return "" }
 // testChildArgs go to every proxy a test starts.
 var testChildArgs []string
 
+// The settings page needs a password, on loopback too.
+func TestUINeedsPassword(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-backend", "fake", "-mdns=false", "-name", "proxy",
+		"-mac", "02:00:00:00:00:01", "-listen", "127.0.0.1:"+freePort(t), "-ui", "127.0.0.1:"+freePort(t))
+	cmd.Env = append(os.Environ(), "BTPROXY_RUN_MAIN=1", "BTPROXY_UI_PASSWORD=")
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "needs a password") {
+		t.Fatalf("err %v, output:\n%s", err, out)
+	}
+}
+
 // The proxy warns at start when its API is plaintext and reachable from other hosts. Not run on Windows, where
 // listening on all interfaces would bring up a firewall prompt.
 func TestPlaintextWarning(t *testing.T) {

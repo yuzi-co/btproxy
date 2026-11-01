@@ -19,8 +19,11 @@ const (
 	Number
 	Bool
 	Select // one of Field.Options
-	Secret // shown masked, with buttons to reveal it and to generate a new one
+	Secret // never sent to the browser; a new value can be typed or generated, or the stored one removed
 )
+
+// secretClear is added to a Secret field's name for its checkbox that removes the stored value.
+const secretClear = ".clear"
 
 // Field is one setting on the page.
 type Field struct {
@@ -235,6 +238,15 @@ func (s *Server) save(r *Request) *Response {
 				continue
 			}
 			switch {
+			case f.Kind == Secret:
+				switch v := strings.TrimSpace(form.Get(f.Name)); {
+				case v != "":
+					values[f.Name] = v
+				case form.Get(f.Name+secretClear) != "":
+					values[f.Name] = ""
+				default:
+					values[f.Name] = f.Value // the page never holds the stored value, so empty keeps it
+				}
 			case f.Kind == Bool:
 				values[f.Name] = "false"
 				if form.Get(f.Name) != "" {

@@ -162,7 +162,7 @@ func runTray(log *logx.Logger) {
 	tray.nid = notifyIconData{wnd: wnd, id: 1, flags: nifMessage | nifIcon | nifTip, callbackMessage: wmTray,
 		icon: loadIcon()}
 	tray.nid.size = uint32(unsafe.Sizeof(tray.nid))
-	copy(tray.nid.tip[:len(tray.nid.tip)-1], windows.StringToUTF16(tooltip()))
+	copy(tray.nid.tip[:len(tray.nid.tip)-1], windows.StringToUTF16(noNUL(tooltip())))
 	tray.mu.Unlock()
 	addIcon()
 
@@ -293,7 +293,7 @@ func showMenu(wnd uintptr) {
 func appendMenu(menu uintptr, flags uint32, id int, text string) {
 	var p *uint16
 	if text != "" {
-		p = windows.StringToUTF16Ptr(text)
+		p = windows.StringToUTF16Ptr(noNUL(text))
 	}
 	pAppendMenu.Call(menu, uintptr(flags), uintptr(id), uintptr(unsafe.Pointer(p)))
 }

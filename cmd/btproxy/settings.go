@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/yuzi-co/btproxy/internal/api"
 	"github.com/yuzi-co/btproxy/internal/ble"
@@ -156,16 +157,31 @@ func loadConfig(path string) (map[string]string, error) {
 }
 
 // saveConfig writes a settings file through a temporary file, so a crash leaves the old one. It is
-// readable by its owner only: it may hold the encryption key.
+// readable by its owner only, set before anything is written: it may hold the encryption key.
 func saveConfig(path string, m map[string]string) error {
 	if err := makeConfigDir(path); err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, ui.EncodeFlat(m), 0o600); err != nil {
+	os.Remove(tmp) // left by a crash, possibly with other permissions
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	err = protectFile(tmp)
+	if err == nil {
+		_, err = f.Write(ui.EncodeFlat(m))
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
 }
 
 // applyConfig sets the flags named in cfg, except those in skip. Unknown names and values a flag rejects
@@ -201,8 +217,9 @@ func addNode(name string, adapter ble.Adapter, l net.Listener, srv *api.Server) 
 // envUI carries the settings page's address and token across a restart, so the open page finds it again.
 const envUI = "BTPROXY_UI_STATE"
 
-// startUI serves the settings page on addr. Without a password it serves on loopback addresses only; with
-// useToken (Windows) it then asks for a token, which the tray icon's menu passes.
+// startUI serves the settings page on addr. It needs a password, except with useToken (Windows) on a loopback
+// address, where it asks for a token instead, which the tray icon's menu passes. The page can show and change
+// the settings, so on loopback too it must keep out other local users.
 func startUI(log *logx.Logger, rs []*mdns.Responder, addr, password string, useToken bool) error {
 	app.mu.Lock()
 	app.responders = rs
@@ -217,9 +234,8 @@ func startUI(log *logx.Logger, rs []*mdns.Responder, addr, password string, useT
 	if addr == "" {
 		return nil
 	}
-	if password == "" && !loopbackAddr(addr) {
-		return fmt.Errorf("-ui %s is reachable from other machines: set -ui-password (or -ui-password-file, "+
-			"$BTPROXY_UI_PASSWORD), or listen on 127.0.0.1", addr)
+	if password == "" && !(useToken && loopbackAddr(addr)) {
+		return fmt.Errorf("-ui %s needs a password: set -ui-password-file (or $BTPROXY_UI_PASSWORD, -ui-password)", addr)
 	}
 	if !useToken || password != "" {
 		token = ""
@@ -522,7 +538,7 @@ func validateSettings(v map[string]string) map[string]string {
 				}
 				set(s.name, err)
 			case ui.Select:
-				if !strings.Contains(" "+strings.Join(s.options, " ")+" ", " "+val+" ") {
+				if !slices.Contains(s.options, val) {
 					set(s.name, fmt.Errorf("one of %s", strings.Join(s.options, ", ")))
 				}
 			}
@@ -530,6 +546,11 @@ func validateSettings(v map[string]string) map[string]string {
 	}
 	if v["name"] == "" {
 		set("name", errors.New("required"))
+	}
+	for _, name := range []string{"name", "friendly-name", "area"} {
+		if strings.ContainsFunc(v[name], unicode.IsControl) {
+			set(name, errors.New("control characters are not allowed"))
+		}
 	}
 	if m := v["mac"]; m != "" {
 		if hw, err := net.ParseMAC(m); err != nil || len(hw) != 6 {
