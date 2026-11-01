@@ -1,6 +1,6 @@
 // Package fake is an in-memory Bluetooth adapter for testing the API side without a radio. It advertises one
 // device, FakeAddr, with a battery service (read) and a test service whose characteristic echoes writes and
-// notifies a counter once a second.
+// notifies a counter once a second. Lose and Restore simulate the Bluetooth stack going away and coming back.
 package fake
 
 import (
@@ -44,11 +44,81 @@ func must(s string) ble.UUID {
 	return u
 }
 
-type Adapter struct{}
+// Adapter is the fake controller; the zero value is ready to use.
+type Adapter struct {
+	mu       sync.Mutex
+	down     bool
+	scanning bool
+	mode     ble.ScanMode
+	statusFn func(ble.ScanStatus)
+	conns    map[*conn]bool
+}
 
-func (Adapter) MAC() uint64 { return AdapterAddr }
+func (*Adapter) MAC() uint64 { return AdapterAddr }
 
-func (Adapter) Scan(fn func(ble.Advert)) (func(), error) {
+func (a *Adapter) SetScanMode(m ble.ScanMode) {
+	a.mu.Lock()
+	a.mode = m
+	a.mu.Unlock()
+	a.changed()
+}
+
+func (a *Adapter) ScanStatus() ble.ScanStatus {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	st := ble.ScanStatus{State: ble.ScanIdle, Mode: a.mode}
+	switch {
+	case a.scanning && a.down:
+		st.State = ble.ScanFailed
+	case a.scanning:
+		st.State = ble.ScanRunning
+	}
+	return st
+}
+
+func (a *Adapter) OnScanStatus(fn func(ble.ScanStatus)) {
+	a.mu.Lock()
+	a.statusFn = fn
+	a.mu.Unlock()
+}
+
+func (a *Adapter) changed() {
+	a.mu.Lock()
+	fn := a.statusFn
+	a.mu.Unlock()
+	if fn != nil {
+		fn(a.ScanStatus())
+	}
+}
+
+// Lose simulates bluetoothd or the controller going away: scanning fails and connections drop.
+func (a *Adapter) Lose() {
+	a.mu.Lock()
+	a.down = true
+	conns := a.conns
+	a.conns = nil
+	a.mu.Unlock()
+	for c := range conns {
+		if c.Disconnect() == nil {
+			c.ev.Disconnected(errors.New("adapter lost"))
+		}
+	}
+	a.changed()
+}
+
+// Restore brings the adapter back after Lose.
+func (a *Adapter) Restore() {
+	a.mu.Lock()
+	a.down = false
+	a.mu.Unlock()
+	a.changed()
+}
+
+func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
+	a.mu.Lock()
+	a.scanning = true
+	a.mu.Unlock()
+	a.changed()
 	done := make(chan struct{})
 	go func() {
 		t := time.NewTicker(500 * time.Millisecond)
@@ -60,15 +130,34 @@ func (Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 			case <-done:
 				return
 			case <-t.C:
-				fn(ble.Advert{Addr: FakeAddr, AddrType: ble.AddrRandom, RSSI: -60, Data: data})
+				a.mu.Lock()
+				down := a.down
+				a.mu.Unlock()
+				if !down {
+					fn(ble.Advert{Addr: FakeAddr, AddrType: ble.AddrRandom, RSSI: -60, Data: data})
+				}
 			}
 		}
 	}()
 	var once sync.Once
-	return func() { once.Do(func() { close(done) }) }, nil
+	return func() {
+		once.Do(func() {
+			close(done)
+			a.mu.Lock()
+			a.scanning = false
+			a.mu.Unlock()
+			a.changed()
+		})
+	}, nil
 }
 
-func (Adapter) Connect(addr uint64, _ uint32, ev ble.Events) (ble.Conn, error) {
+func (a *Adapter) Connect(addr uint64, _ uint32, ev ble.Events) (ble.Conn, error) {
+	a.mu.Lock()
+	down := a.down
+	a.mu.Unlock()
+	if down {
+		return nil, errors.New("adapter down")
+	}
 	if addr != FakeAddr {
 		time.Sleep(time.Second)
 		return nil, errors.New("device not found")
@@ -77,13 +166,19 @@ func (Adapter) Connect(addr uint64, _ uint32, ev ble.Events) (ble.Conn, error) {
 	live.Lock()
 	live.conn = c
 	live.Unlock()
+	a.mu.Lock()
+	if a.conns == nil {
+		a.conns = map[*conn]bool{}
+	}
+	a.conns[c] = true
+	a.mu.Unlock()
 	return c, nil
 }
 
-func (Adapter) ClearCache(uint64) error { return nil }
+func (*Adapter) ClearCache(uint64) error { return nil }
 
 // Unpair drops the connection to FakeAddr, as BlueZ does when it removes a device; other addresses fail.
-func (Adapter) Unpair(addr uint64) error {
+func (*Adapter) Unpair(addr uint64) error {
 	if addr != FakeAddr {
 		return errors.New("device not found")
 	}
@@ -202,9 +297,10 @@ func (c *conn) Pair() error {
 func (c *conn) Disconnect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.closed {
-		c.closed = true
-		close(c.done)
+	if c.closed {
+		return ble.ErrNotConnected
 	}
+	c.closed = true
+	close(c.done)
 	return nil
 }

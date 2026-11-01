@@ -7,7 +7,7 @@ import asyncio
 import inspect
 import sys
 
-from aioesphomeapi import APIClient
+from aioesphomeapi import APIClient, BluetoothScannerMode, BluetoothScannerState
 
 FAKE_ADDR = 0xAABBCCDDEE01
 BATTERY, ECHO, CCCD = 0x0003, 0x0013, 0x0014
@@ -32,6 +32,9 @@ async def main(host: str, port: int) -> None:
     entities, services = await cli.list_entities_services()
     assert entities == [] and services == []
 
+    scanner = []  # registered first: the state report answers the advertisement subscription
+    unsub_scanner = cli.subscribe_bluetooth_scanner_state(
+        lambda s: scanner.append((s.state, s.mode, s.configured_mode)))
     adverts = []
     unsub = cli.subscribe_bluetooth_le_raw_advertisements(lambda r: adverts.extend(r.advertisements))
     free = []
@@ -40,6 +43,18 @@ async def main(host: str, port: int) -> None:
     assert any(a.address == FAKE_ADDR and a.rssi == -60 for a in adverts), adverts
     print("adverts:", len(adverts), "first data", bytes(adverts[0].data).hex())
     assert free and free[0][:2] == (3, 3), free
+
+    # Started with the default -scan-mode active; Home Assistant may switch modes at run time, while the
+    # configured mode stays.
+    run, act, pas = BluetoothScannerState.RUNNING, BluetoothScannerMode.ACTIVE, BluetoothScannerMode.PASSIVE
+    assert scanner and scanner[-1] == (run, act, act), scanner
+    cli.bluetooth_scanner_set_mode(pas)
+    await asyncio.sleep(0.3)
+    assert scanner[-1] == (run, pas, act), scanner
+    cli.bluetooth_scanner_set_mode(act)
+    await asyncio.sleep(0.3)
+    assert scanner[-1] == (run, act, act), scanner
+    print("scanner states:", [(s.name, m.name, c.name) for s, m, c in scanner])
 
     states = []
 
@@ -120,6 +135,7 @@ async def main(host: str, port: int) -> None:
 
     unsub()
     unsub_free()
+    unsub_scanner()
     await cli.disconnect()
     print("E2E OK")
 

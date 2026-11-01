@@ -22,6 +22,7 @@ type Config struct {
 	Version        string // reported as esphome_version
 	ProjectVersion string
 	MaxConnections int
+	ScanMode       ble.ScanMode // configured scanner mode; adapters without ble.ModeScanner scan actively
 }
 
 // advBatchSize and advFlushInterval follow ESPHome's batching of raw advertisements.
@@ -41,6 +42,8 @@ type Server struct {
 	conns    map[uint64]*btConn
 	stopScan func()
 	pending  []ble.Advert
+
+	scanKick chan struct{} // scanner status changed: tell the subscribers
 }
 
 // btConn is a connection slot. conn is nil while the connection is being made; dropped records a link that
@@ -63,15 +66,18 @@ func NewServer(cfg Config, adapter ble.Adapter, log *slog.Logger) *Server {
 	if cfg.MaxConnections <= 0 {
 		cfg.MaxConnections = 3
 	}
-	return &Server{
+	s := &Server{
 		cfg: cfg, adapter: adapter, log: log,
-		clients: map[*client]bool{}, conns: map[uint64]*btConn{},
+		clients: map[*client]bool{}, conns: map[uint64]*btConn{}, scanKick: make(chan struct{}, 1),
 	}
+	s.initScanner()
+	return s
 }
 
 // Serve accepts clients until the listener is closed.
 func (s *Server) Serve(l net.Listener) error {
 	go s.flushLoop()
+	go s.scanStatusLoop()
 	for {
 		c, err := l.Accept()
 		if err != nil {
@@ -402,15 +408,19 @@ func (c *client) handle(f Frame) bool {
 		c.advSubscribed = true
 		s.updateScan()
 		s.mu.Unlock()
-		c.send(msgBTScannerStateResponse, encScannerState(scannerRunning, scannerActive, scannerActive))
+		c.send(msgBTScannerStateResponse, s.scannerState())
 	case msgUnsubscribeBTAdvertisements:
 		s.mu.Lock()
 		c.advSubscribed = false
 		s.updateScan()
 		s.mu.Unlock()
 	case msgBTScannerSetModeRequest:
-		// BlueZ scans actively; passive scanning would need its experimental advertisement monitor API.
-		c.send(msgBTScannerStateResponse, encScannerState(scannerRunning, scannerActive, scannerActive))
+		r, err := decRequest(f.Type, f.Payload)
+		if err != nil {
+			c.log.Warn("bad message", "type", f.Type, "err", err)
+			return false
+		}
+		s.setScanMode(ble.ScanMode(r.kind))
 	case msgSubscribeBTConnectionsFree:
 		c.send(msgBTConnectionsFreeResponse, s.connectionsFree())
 	case msgBTDeviceRequest, msgBTGATTGetServicesRequest, msgBTGATTReadRequest, msgBTGATTWriteRequest,

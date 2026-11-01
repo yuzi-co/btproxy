@@ -78,12 +78,6 @@ const (
 	reqClearCache            = 6
 )
 
-// Scanner states and modes.
-const (
-	scannerRunning = 2
-	scannerActive  = 1
-)
-
 // gattError is reported for failed GATT operations and connections (ESP_GATT_ERROR, 0x85).
 const gattError = 0x85
 
@@ -241,7 +235,7 @@ func encAddrResult(addr uint64, ok bool, code int32) []byte {
 	return e.b
 }
 
-func encScannerState(state, mode, configured uint32) []byte {
+func encScannerState(state ble.ScanState, mode, configured ble.ScanMode) []byte {
 	var e enc
 	e.uint(1, uint64(state))
 	e.uint(2, uint64(mode))
@@ -267,7 +261,7 @@ func decHello(b []byte) (major, minor uint32, err error) {
 type request struct {
 	addr     uint64
 	handle   uint16
-	kind     uint32 // request_type for device requests, flags for subscriptions
+	kind     uint32 // request_type for device requests, flags for subscriptions, scanner mode
 	addrType uint32
 	flag     bool // response for writes, enable for notify
 	data     []byte
@@ -291,7 +285,7 @@ func decRequest(typ uint32, b []byte) (request, error) {
 			case 4:
 				r.addrType = uint32(f.v)
 			}
-		case msgSubscribeBTAdvertisements:
+		case msgSubscribeBTAdvertisements, msgBTScannerSetModeRequest: // flags, mode
 			if f.num == 1 {
 				r.kind = uint32(f.v)
 			}

@@ -26,7 +26,7 @@ const esphomeVersion = "2026.10.0"
 
 // backends maps -backend names to constructors; bluez registers itself on Linux.
 var backends = map[string]func(adapter string) (ble.Adapter, error){
-	"fake": func(string) (ble.Adapter, error) { return fake.Adapter{}, nil },
+	"fake": func(string) (ble.Adapter, error) { return &fake.Adapter{}, nil },
 }
 
 // useAgent is the -agent flag, read by the bluez backend.
@@ -41,6 +41,7 @@ func main() {
 	backend := flag.String("backend", "bluez", "Bluetooth backend: bluez or fake")
 	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter (bluez backend)")
 	maxConns := flag.Int("connections", 3, "maximum simultaneous peripheral connections")
+	scanMode := flag.String("scan-mode", "active", "scanner mode: active or passive (bluez: needs bluetoothd --experimental, else active)")
 	mac := flag.String("mac", "", "MAC reported as the device's unique id (default: first network interface)")
 	mdnsOn := flag.Bool("mdns", true, "advertise the API over mDNS so Home Assistant discovers it")
 	mdnsIface := flag.String("mdns-iface", "", "comma-separated interfaces to advertise on (default: all with IPv4)")
@@ -55,6 +56,11 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(log)
 
+	scan := map[string]ble.ScanMode{"active": ble.ScanActive, "passive": ble.ScanPassive}
+	mode, ok := scan[*scanMode]
+	if !ok {
+		fatal(log, "unknown scan mode", "scan-mode", *scanMode)
+	}
 	newAdapter, ok := backends[*backend]
 	if !ok {
 		fatal(log, "unknown backend", "backend", *backend)
@@ -81,7 +87,7 @@ func main() {
 	}
 	srv := api.NewServer(api.Config{
 		Name: *name, FriendlyName: *friendly, MAC: *mac, SuggestedArea: *area,
-		Version: esphomeVersion, ProjectVersion: version, MaxConnections: *maxConns,
+		Version: esphomeVersion, ProjectVersion: version, MaxConnections: *maxConns, ScanMode: mode,
 	}, adapter, log)
 	fatal(log, "serve", "err", srv.Serve(l))
 }
