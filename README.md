@@ -260,6 +260,40 @@ Differences from the BlueZ backend and an ESP32:
   that cannot start again is retried every 5 s, and the proxy checks every 10 s that the running watcher has
   not stopped or aborted without telling, which it then replaces the same way.
 
+### As a Windows service (not implemented)
+
+btproxy runs per user, started at logon. Running it as a service (before logon, without a session) is
+untested, because installing a service needs an elevated prompt, and so there is no `-service` flag yet.
+What is known:
+
+- Microsoft's documentation of `BluetoothLEAdvertisementWatcher.Start` names session 0 services as watcher
+  users: whether a watcher gets advertisements during Modern Standby "depends on various factors such as
+  whether your app is running in an AppContainer, whether it's a session 0 service", and it suggests that such
+  services stop scanning on `PBT_APMSUSPEND` and resume afterwards
+  ([docs](https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.advertisement.bluetoothleadvertisementwatcher.start)).
+  So scanning from a service is an intended use. Nothing found documents GATT sessions, pairing or connection
+  parameter requests from session 0 either way.
+- Bonds are machine-wide (kept by `bthserv`, under `HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Keys`),
+  so a device paired from a user's session should stay usable from a service, and the reverse.
+  btproxy pairs through `DeviceInformationCustomPairing`, which needs no UI.
+- What would change for btproxy: no tray (session 0 has no desktop), so logs always go to a file and the
+  settings page needs `-ui-password` (the tray's token link is gone); `%LOCALAPPDATA%` of LocalSystem is
+  `C:\Windows\System32\config\systemprofile\AppData\Local`, so settings and log belong in
+  `%ProgramData%\btproxy`; the single-instance mutex is `Local\`, per session, so it would not stop the tray
+  build in a user session from starting next to the service (the port would, with a less clear message), and
+  should become `Global\`.
+
+Proposed design, to be tested on a machine where an elevated prompt is fine: `-service install` (elevated)
+creates service `btproxy` with `golang.org/x/sys/windows/svc/mgr`: the executable path plus `-config
+%ProgramData%\btproxy\config.json`, automatic (delayed) start, a dependency on `bthserv`, restart on failure,
+and LocalSystem, or better a virtual account (`NT SERVICE\btproxy`) if WinRT Bluetooth works under it. It
+would also add the firewall rule for TCP 6053 and UDP 5353, which a service never gets prompted for.
+`-service uninstall` removes both. `-service run` (what the service starts) runs the proxy under
+`svc.Run`, answers Stop and Shutdown the way Quit does (withdraw mDNS, exit), and on suspend and resume stops
+and restarts the watcher as Microsoft suggests. To test: scanning and its state after a reboot before logon,
+connecting, notifications, pairing and unpairing, connection parameter presets, and sleep and resume, first as
+LocalSystem and then as a virtual account.
+
 ## mDNS
 
 btproxy advertises itself like an ESPHome device: `_esphomelib._tcp` service `<name>` on host `<name>.local`
