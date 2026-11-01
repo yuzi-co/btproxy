@@ -1,11 +1,11 @@
 # btproxy
 
 An ESPHome-compatible Bluetooth proxy for Linux, written in Go. Home Assistant adds it through the ESPHome
-integration (port 6053) exactly like an ESP32 proxy, then scans and connects to BLE devices through the host's
-Bluetooth adapter. It talks to BlueZ over D-Bus, so the adapter stays usable by other programs at the same time.
+integration (port 6053) the same way it adds an ESP32 proxy, then scans and connects to BLE devices through the
+host's Bluetooth adapter. It talks to BlueZ over D-Bus, so other programs can use the adapter at the same time.
 
-Status: in daily use since 2026-10-31 on an OpenWrt 23.05 router (MT7620A, mipsle, 64 MB RAM) with a Realtek
-RTL8761B USB stick, serving Home Assistant 2026.10: advertisements for device tracking plus an active, bonded
+Status: in daily use since 2026-10-31 on an OpenWrt 23.05 router (MT7620A, mipsle, 128 MB RAM) with a Realtek
+RTL8761B USB stick. It serves Home Assistant 2026.11 with advertisements for device tracking and keeps a bonded
 connection to a Tion breezer. The fake backend passes an end-to-end test with `aioesphomeapi` (Home Assistant's
 client library).
 
@@ -21,12 +21,12 @@ client library).
   command (see [Connection parameters](#connection-parameters)).
 - Active and passive scanning, scanner state and mode reporting, and mode changes from Home Assistant (see
   [Scanning](#scanning)).
-- Recovery without a restart when `bluetoothd` restarts, the adapter disappears and returns, or it is powered
-  off: connections are reported dropped, then the adapter is powered on, scanning resumes and, after a
-  `bluetoothd` restart, the pairing agent is registered again. A `bluetoothd` that hangs is detected too (see
-  [Scanning](#scanning)) and, if `-bluetoothd-restart` is set, restarted.
-- Log streaming: Home Assistant (the ESPHome entry's option to subscribe to the device's logs) and `esphome logs` receive
-  btproxy's log lines like a device's (see [Logs](#logs)).
+- Recovery without a restart when `bluetoothd` restarts, the adapter disappears and returns, or someone powers
+  it off. The proxy reports the connections as dropped, powers the adapter on, resumes scanning and, after a
+  `bluetoothd` restart, registers the pairing agent again. It also detects a `bluetoothd` that hangs (see
+  [Scanning](#scanning)) and restarts it if `-bluetoothd-restart` is set.
+- Log streaming to Home Assistant (the ESPHome entry's option to subscribe to the device's logs) and to
+  `esphome logs`, formatted like an ESPHome device's (see [Logs](#logs)).
 - API encryption (Noise, as ESPHome's `api: encryption: key:`), off by default (see [Encryption](#encryption)).
 - Not supported: setting the encryption key from Home Assistant, IPv6 mDNS.
 
@@ -48,10 +48,16 @@ As of 2026-11, against ESPHome's `bluetooth_proxy` on an ESP32 and [denvera/bt-p
 | Log streaming to Home Assistant | yes | yes | ? |
 | mDNS discovery | yes (IPv4) | yes | yes |
 | Recovery from `bluetoothd` restarts and hangs | yes, optional restart command | n/a | restarts yes, hangs ? |
+| Hardware cost | a Linux box you already have | an ESP32 board, a few euros | a Linux box you already have |
 | Shares the adapter with other programs | yes, through BlueZ | n/a | yes, through BlueZ |
 
 Shelly Gen2+ devices, the Ruuvi Gateway and Theengs / OpenMQTTGateway also relay advertisements to Home
 Assistant, but cannot make connections.
+
+An ESP32 is still the better proxy where you have USB power and nothing else: it is cheap, and its radio
+handles BLE alone. btproxy makes sense where a Linux machine with a Bluetooth adapter already sits in the
+right room. On the router above, the USB stick sits next to the router's own 2.4 GHz radio, and many connection
+attempts fail at the radio level (HCI reason 0x3e), not in the software.
 
 ## Build
 
@@ -61,7 +67,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" 
 CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldflags="-s -w" -o dist/btproxy-mipsle ./cmd/btproxy
 ```
 
-The binaries are static, about 4 MB (4.9 MB for mipsle).
+The binaries are static, about 4 to 5 MB (5.0 MB for mipsle).
 
 ## Run
 
@@ -119,34 +125,36 @@ With `-raw-adverts auto` (the default) or `on`, the proxy opens the kernel's HCI
 socket `btmon` uses, and takes advertisements from the controller's LE Advertising Report and LE Extended
 Advertising Report events. Home Assistant then gets the bytes that were on the air: field order, address type,
 AD types BlueZ does not parse, and every report the controller passes up, including repeats BlueZ would have
-dropped as unchanged. `bluetoothd` keeps running the controller: it still starts and stops scanning and makes
-the connections; the monitor only listens. Without the monitor (`-raw-adverts off`, or `auto` when it cannot be
-opened), advertisements are rebuilt from BlueZ's parsed properties as before (see [Notes](#notes)).
+dropped as unchanged. `bluetoothd` still runs the controller. It starts and stops scanning and makes the
+connections, and the monitor only listens. Without the monitor (`-raw-adverts off`, or `auto` when it cannot be
+opened), the proxy rebuilds advertisements from BlueZ's parsed properties (see [Notes](#notes)).
 
 The monitor needs `CAP_NET_RAW` (root has it) and a kernel with Bluetooth sockets, which any kernel that runs
 BlueZ has. `auto` falls back to BlueZ's properties when the socket cannot be opened, when reading it fails, and
-when it delivers nothing while BlueZ reports 30 advertisements; `on` refuses to start without it but falls
-back on later failures all the same. The log says which source is in use. The proxy reads only the
+when it delivers nothing while BlueZ reports 30 advertisements. `on` refuses to start without the monitor, but
+still falls back on later failures. The log says which source is in use. The proxy reads only the
 `-adapter` controller (`hciN` is controller index N), and a socket filter in the kernel passes it only
 advertising reports, so connection traffic does not wake it up.
 
-Reports are passed on the way an ESP32 proxy passes them. During active scanning, an ESP32 holds the
-advertisement of a scannable device until the scan response arrives and sends both as one entry, data
-concatenated, with the response's RSSI; the proxy does the same, but sends a held advertisement alone if no
+The proxy forwards reports the way an ESP32 proxy does. During active scanning, an ESP32 holds the
+advertisement of a scannable device until the scan response arrives, then sends both as one entry with the data
+concatenated and the response's RSSI. The proxy does the same, but sends a held advertisement alone if no
 response follows within 200 ms or the device advertises again first. Other advertisements go out at once. An
-entry carries at most 62 bytes; longer extended advertisements keep the AD structures that fit, and only their
-first fragment is read. Anonymous advertisements and reports without RSSI are skipped. Address types are
-reported as public or random; for a controller-resolved private address, that of the identity address.
+entry carries at most 62 bytes. Longer extended advertisements keep the AD structures that fit, and the proxy
+reads only their first fragment. It skips anonymous advertisements and reports without RSSI. It reports
+address types as public or random, and for a private address the controller resolved, the identity address's
+type.
 
-How many advertisements reach the monitor is up to the controller. For active discovery the kernel turns the
+The controller decides how many advertisements reach the monitor. For active discovery the kernel turns the
 controller's duplicate filter on, so it may report a device about once per scan (controllers differ in what
-counts as a duplicate), except while an advertisement monitor is registered. With the HCI monitor in use, the
-proxy therefore also registers its advertisement monitors during active scanning, when `bluetoothd` has the
-monitor API (`--experimental`, see [Scanning](#scanning)), and asks BlueZ for discovery without
-`DuplicateData`, which it no longer needs. Passive scanning has no scan responses either way. Unlike
-`bluetoothd`, the monitor does not resolve private addresses: a bonded device that uses resolvable private
-addresses shows up under its current random address, not its identity address, unless the controller resolves
-it.
+counts as a duplicate). The kernel turns the filter off while an advertisement monitor is registered. So with
+the HCI monitor in use, the proxy also registers its advertisement monitors during active scanning, when
+`bluetoothd` has the monitor API (`--experimental`, see [Scanning](#scanning)), and asks BlueZ for discovery
+without `DuplicateData`, which it no longer needs. Passive scanning has no scan responses either way.
+
+Unlike `bluetoothd`, the monitor does not resolve private addresses. A bonded device that uses resolvable
+private addresses shows up under its current random address, not its identity address, unless the controller
+resolves it.
 
 ## Encryption
 
@@ -163,49 +171,53 @@ protocol ESPHome uses. The key is the same kind as ESPHome's, 32 random bytes in
 Setting both flags, or a key that is not base64 of 32 bytes, stops the proxy at start.
 
 The init script and the systemd unit in [contrib](contrib) show how to pass the file. Home Assistant needs the
-same key: for a new proxy it asks during setup; for one added before without encryption, the next connection
-fails with "requires encryption" and Home Assistant starts a reauthentication that asks for it. A client with
-another key is refused with the message ESPHome sends ("Handshake MAC failure"), which Home Assistant reports as
-a wrong key, and a plaintext client gets the reply that makes it report that encryption is required. Without a
-key, an encrypted client is told the device uses plaintext.
+same key. For a new proxy it asks during setup. For a proxy added earlier without encryption, the next
+connection fails with "requires encryption", and Home Assistant starts a reauthentication that asks for the key.
+
+The proxy answers clients the way ESPHome does. It refuses a client with another key with "Handshake MAC
+failure", which Home Assistant reports as a wrong key. A plaintext client gets the reply that makes Home
+Assistant report that encryption is required. Without a key, the proxy tells an encrypted client that the
+device uses plaintext.
 
 Home Assistant can also offer to set a key on a plaintext ESPHome device (`NoiseEncryptionSetKeyRequest`). The
-proxy refuses that, because it does not store a key itself, and does not claim `api_encryption_supported` in
-its device info unless it already runs with a key.
+proxy refuses, because it does not store a key itself. It claims `api_encryption_supported` in its device info
+only when it already runs with a key.
 
 ## Scanning
 
 `-scan-mode` is the configured mode Home Assistant reads back. Home Assistant can switch the mode at run time
-(its auto mode keeps a proxy passive and opens short active windows); the state reports carry the mode really
+(its auto mode keeps a proxy passive and opens short active windows). The state reports carry the mode actually
 in use, which is active whenever passive scanning is unavailable. States: running, idle (no subscriber), failed
 (`bluetoothd` or the adapter is gone, scanning could not start, `bluetoothd` did not answer, or scanning
 stalled; retried every 10 s), stopped (the adapter is powered off and could not be powered on).
 
-`bluetoothd` can hang while keeping its D-Bus name (seen with BlueZ 5.66 and an RTL8761B: `StartDiscovery`
-never replied). Every call the proxy makes to it that should be answered at once gives up after 10 s, which
-counts as a failure; GATT operations, connecting and pairing keep their own 30 s limits. In active mode a
+`bluetoothd` can hang while keeping its D-Bus name. With BlueZ 5.66 and an RTL8761B, `StartDiscovery` once
+never replied, and the proxy sat with no advertisements for hours. Every call the proxy makes that
+`bluetoothd` should answer at once now gives up after 10 s, which counts as a failure. GATT operations,
+connecting and pairing keep their own 30 s limits. In active mode a
 watchdog also stops and restarts discovery when no advertisement at all has arrived for `-stall-timeout`
 (3 minutes), reporting failed in between. It does not run in passive mode, where BlueZ reports a device only
 when its advertisement changes and long silences are normal. After two stalls or unanswered calls in a row,
 with no advertisement in between, the proxy runs the `-bluetoothd-restart` command (through `/bin/sh -c`, at
-most once every 10 minutes, killed after 30 s); the recovery from the restart then brings scanning back. The
-init script and the systemd unit in [contrib](contrib) set it. Without the command, the proxy keeps retrying
+most once every 10 minutes, killed after 30 s). The usual recovery after a `bluetoothd` restart then brings
+scanning back. The init script and the systemd unit in [contrib](contrib) set the command. Without the command, the proxy keeps retrying
 and reporting failed.
 
 Active scanning is BlueZ discovery (`StartDiscovery`, LE only, duplicate data on). Passive scanning registers
 advertisement monitors (`AdvertisementMonitorManager1`), with which the kernel scans passively and BlueZ
 updates the devices that match. This API needs BlueZ 5.56 or later, a kernel with advertisement monitor
-support (5.10 or later), and `bluetoothd --experimental` (`-E`): even current BlueZ registers the monitor
+support (5.10 or later), and `bluetoothd --experimental` (`-E`). Even current BlueZ registers the monitor
 manager only in experimental mode. OpenWrt's `bluez-daemon` init script starts `bluetoothd -n` without it, so
-there the proxy falls back to active scanning unless `/etc/init.d/bluetoothd` is changed to pass `-E` (which
-also enables `ConnectDevice`): `procd_set_param command "$PROG" -n -E`, and list the file in
-`/etc/sysupgrade.conf`. After `bluetoothd` restarts, passive scanning is tried again.
+there the proxy falls back to active scanning. To fix that, change the command in `/etc/init.d/bluetoothd` to
+`procd_set_param command "$PROG" -n -E` (which also enables `ConnectDevice`) and list the file in
+`/etc/sysupgrade.conf`. A `bluez-daemon` package upgrade overwrites the file. After `bluetoothd` restarts, the
+proxy tries passive scanning again.
 
-Passive scanning has limits that active scanning does not. The first two apply to advertisements rebuilt from
-BlueZ's properties; the HCI monitor sees what the controller reports, which, unless the controller filters
-monitor patterns itself (Microsoft's HCI extension, which some Intel and Realtek controllers have), is every
-advertisement in range; how often depends on the kernel's duplicate filter setting for passive scans, which
-5.15 turns off while monitors are registered and 6.x leaves on.
+Passive scanning has limits that active scanning does not. The first two apply only to advertisements rebuilt
+from BlueZ's properties. The HCI monitor sees every advertisement in range that the controller reports, unless
+the controller filters monitor patterns itself (Microsoft's HCI extension, which some Intel and Realtek
+controllers have). How often it reports a device depends on the kernel's duplicate filter for passive scans,
+which 5.15 turns off while monitors are registered and 6.x leaves on.
 
 - BlueZ has no match-all monitor, and 5.66 overflows a buffer for monitors with more than 7 patterns, so the
   proxy registers three: common Flags values, manufacturer data of common company ids (Apple, Microsoft,
@@ -227,7 +239,7 @@ command itself on a raw HCI socket, as `hcitool lecup` does: it looks up the con
 `HCIGETCONNINFO` ioctl, sends the command and answers once the controller's Command Status arrives, as an
 ESP32 does after `esp_ble_gap_update_conn_params`. The completion event, with the parameters the peripheral
 accepted, comes some connection events later and is only logged. The kernel keeps owning the connection and
-sees the controller's events as for its own commands.
+processes the controller's events as if it had sent the command.
 
 Sending HCI commands on a raw socket needs `CAP_NET_RAW` (the init script and the systemd unit run the proxy
 as root). Without it, or when the controller refuses the parameters, Home Assistant gets error 0x85; a device
@@ -238,15 +250,15 @@ whether the command will be allowed is only known when it is sent.
 
 - Without the HCI monitor (see [Advertisements](#advertisements)): BlueZ exposes advertisements only in parsed
   form (name, manufacturer data, service data, UUIDs, flags, TX power), so the raw AD structures are rebuilt
-  from those and capped at 62 bytes. Field order differs from the
-  air; Home Assistant parses the fields, so that does not matter. `UUIDs` can include services BlueZ learnt
+  from those and capped at 62 bytes. Field order differs from the air, which does not matter because Home
+  Assistant parses the fields. `UUIDs` can include services BlueZ learnt
   by connecting.
 - Attribute handles come from BlueZ's object paths (`service000a/char000b/desc000d`). BlueZ names a
   characteristic after its declaration handle; the proxy reports the value handle after it (`0x000c` here), as an
   ESP32 does, because Home Assistant shares one GATT cache per device between proxies.
 - BlueZ owns the CCCD descriptors, so a write to one turns notifications on or off with
   `StartNotify`/`StopNotify` instead.
-- Discovery keeps running while a connection is being made (ESPHome pauses it; BlueZ copes without).
+- Discovery keeps running while the proxy connects. ESPHome pauses it, BlueZ does not need that.
   Connecting does not depend on discovery: for `Device1.Connect` and `ConnectDevice` the kernel scans for the
   device itself, so connections work in passive mode too.
 - There is no idle timeout on API clients: Home Assistant does not ping while advertisements flow, so dead peers
