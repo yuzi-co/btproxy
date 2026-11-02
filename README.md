@@ -6,9 +6,9 @@ adapter: BlueZ over D-Bus on Linux, WinRT on Windows. Other programs can use the
 
 Not related to [conorpp/btproxy](https://github.com/conorpp/btproxy), a Bluetooth man-in-the-middle tool.
 
-Status: in use since 2026-10-31 on an OpenWrt 23.05 router (MT7620A, mipsle, 128 MB RAM, RTL8761B USB stick)
-and since 2026-11-01 on Windows 11 (Intel adapter), with Home Assistant 2026.11. The fake backend passes an
-end-to-end test with `aioesphomeapi`.
+Status: new. In use on an OpenWrt 23.05 router (MT7620A, mipsle, 128 MB RAM, RTL8761B USB stick) and on
+Windows 11 (Intel adapter), with Home Assistant 2026.11. The fake backend passes an end-to-end test with
+`aioesphomeapi`.
 
 ## Features
 
@@ -72,7 +72,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldfl
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H windowsgui" -o dist/btproxy.exe ./cmd/btproxy
 ```
 
-Sizes as of 2026-11-01: arm64 and armv7 3.6 MiB, amd64 3.8 MiB, mipsle 4.1 MiB, Windows 3.7 MiB. Without
+Sizes: arm64 and armv7 3.6 MiB, amd64 3.8 MiB, mipsle 4.1 MiB, Windows 3.7 MiB. Without
 `-H windowsgui` the Windows binary is a console program that logs like on Linux, with no tray.
 
 `-tags nonoise` leaves out API encryption (192 KiB less on mipsle, 3.9 MiB); such a build refuses to start when
@@ -403,7 +403,7 @@ rule, or TCP 6053 and UDP 5353), tick Start with Windows in the tray, and config
 
 ### Bonded devices
 
-Devices that need an encrypted link (such as a Tion breezer) must be bonded with the proxy's adapter. Home
+Devices that need an encrypted link must be bonded with the proxy's adapter. Home
 Assistant can pair a connected device through the proxy (`bluetooth_device_pair`); an already paired device is
 reported paired. The proxy never pairs on its own.
 
