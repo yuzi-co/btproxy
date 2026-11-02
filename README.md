@@ -57,7 +57,8 @@ where a Linux box or Windows PC with an adapter already sits in the right room. 
 
 ## Install
 
-Download a binary from the [releases](https://github.com/yuzi-co/btproxy/releases), then see [Deploy](#deploy).
+Download the archive for your platform from the [releases](https://github.com/yuzi-co/btproxy/releases) and
+unpack it (`tar xzf` on Linux and OpenWrt, a `.zip` on Windows), then see [Deploy](#deploy).
 With Go 1.27.3 or newer: `go install github.com/yuzi-co/btproxy/cmd/btproxy@latest`.
 
 ## Build
