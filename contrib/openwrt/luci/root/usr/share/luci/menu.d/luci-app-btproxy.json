@@ -1,0 +1,13 @@
+{
+	"admin/services/btproxy": {
+		"title": "Bluetooth proxy",
+		"action": {
+			"type": "view",
+			"path": "btproxy"
+		},
+		"depends": {
+			"acl": [ "luci-app-btproxy" ],
+			"uci": { "btproxy": true }
+		}
+	}
+}

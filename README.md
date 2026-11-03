@@ -478,15 +478,35 @@ opkg install /tmp/btproxy.ipk
   firmware. The package manager refuses when that does not fit. opkg asks for the whole package to be free even
   for an upgrade, which replaces the old copy: if `df /overlay` shows that it does fit, add `--force-space`.
 - The stick's firmware is yours to pick: install it too, such as `rtl8761bu-firmware`.
-- Settings: `/etc/config/btproxy`, then `uci commit btproxy && /etc/init.d/btproxy reload`. An option set there
-  locks that field on the settings page, and an empty one leaves the field to the page. `extra_args` takes any
-  other flag.
-- Encryption: put the key in `/etc/btproxy.key` (`chmod 600`), and the service passes it when the file exists.
-  OpenWrt's busybox has no `base64`, so generate the key elsewhere.
-- Settings page: set `ui` (such as `:8080`) and put a password in `/etc/btproxy.uipass` (`chmod 600`).
+- Settings: the LuCI page below, or `/etc/config/btproxy`, then `uci commit btproxy && /etc/init.d/btproxy reload`.
+  An option set there locks that field on the settings page, and an empty one leaves the field to the page.
+  `extra_args` takes any other flag.
+- An upgrade may print `resolve_conffiles: Existing conffile /etc/config/btproxy is different` under "Collected
+  errors", and leave the package's default as `/etc/config/btproxy-opkg`. That only means your settings were kept,
+  and the copy can go.
+- Encryption: the LuCI page generates a key. Or put the key in `/etc/btproxy.key` (`chmod 600`), and the service
+  passes it when the file exists. OpenWrt's busybox has no `base64`, so generate that one elsewhere.
+- Settings page: set `ui` (such as `:8080`) and put a password in `/etc/btproxy.uipass` (`chmod 600`). With LuCI
+  there is no need for it.
 - `/var/lib/bluetooth` is on tmpfs: link it to flash, to `/etc/bluetooth/keys`, so bonds survive a reboot.
 - `sysupgrade` keeps the settings, the key, the page password and `/etc/bluetooth/keys`. It does not keep packages,
   so install this one again afterwards.
+
+For a page in LuCI, under Services, Bluetooth proxy, add `luci-app-btproxy`, the same package for every instruction
+set. It took 24 KB of flash on the test router, plus `luci-base` if the router has no LuCI.
+
+```sh
+wget -O /tmp/luci-app-btproxy.ipk https://github.com/yuzi-co/btproxy/releases/latest/download/luci-app-btproxy.ipk
+opkg install /tmp/luci-app-btproxy.ipk
+```
+
+On 25.12 and newer, download `luci-app-btproxy.apk` the same way and use `apk add --allow-untrusted`.
+
+The page has the settings above, starts and stops the service, shows its recent log, and generates, replaces or
+removes the key in `/etc/btproxy.key`. It shows a new key once, in the browser that generated it, and its access
+rules do not let it read the key file. The key travels the way LuCI's own traffic does, so over plain HTTP unless
+LuCI uses HTTPS. Live figures such as clients and advertisement rate are in Home Assistant's diagnostic sensors, not
+on this page.
 
 To install by hand, copy the binary to `/usr/bin/btproxy`,
 [btproxy.init](contrib/openwrt/btproxy.init) to `/etc/init.d/btproxy` and

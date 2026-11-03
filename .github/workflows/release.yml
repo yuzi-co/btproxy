@@ -43,9 +43,10 @@ jobs:
             apk add -q tar
             for a in amd64 arm64 armv7 mipsle; do
               contrib/openwrt/package.sh "$VERSION" "$a" "pkg/linux-$a/btproxy" dist
-            done'
+            done
+            contrib/openwrt/package-luci.sh "$VERSION" dist'
           sudo chown -R "$(id -u):$(id -g)" dist
-          (cd dist && sha256sum btproxy* > SHA256SUMS)
+          (cd dist && sha256sum btproxy* luci-app-btproxy* > SHA256SUMS)
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
