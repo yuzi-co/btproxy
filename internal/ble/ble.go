@@ -154,6 +154,20 @@ type RestartCounter interface {
 	Restarts() uint64
 }
 
+// StackRestarter is implemented by adapters that can restart their Bluetooth stack on request.
+type StackRestarter interface {
+	// StackRestartable tells whether a restart is possible here, such as with a command configured.
+	StackRestartable() bool
+	// RestartStack restarts the stack and returns once that is done or refused.
+	RestartStack() error
+}
+
+// AdvertSourcer is implemented by adapters that have more than one source of advertisements.
+type AdvertSourcer interface {
+	// AdvertSource names where advertisements come from now, for a person to read.
+	AdvertSource() string
+}
+
 // ErrNotConnected is returned for requests on a closed connection.
 var ErrNotConnected = errors.New("not connected")
 

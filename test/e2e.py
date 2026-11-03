@@ -11,8 +11,9 @@ import base64
 import inspect
 import sys
 
-from aioesphomeapi import (APIClient, BluetoothScannerMode, BluetoothScannerState, EntityCategory,
-                           InvalidEncryptionKeyAPIError, LogLevel, RequiresEncryptionAPIError, SensorInfo)
+from aioesphomeapi import (APIClient, BinarySensorInfo, BluetoothScannerMode, BluetoothScannerState, ButtonInfo,
+                           EntityCategory, InvalidEncryptionKeyAPIError, LogLevel, RequiresEncryptionAPIError,
+                           SensorInfo, SwitchInfo, TextSensorInfo)
 from aioesphomeapi.core import BluetoothConnectionParamsAPIError
 
 FAKE_ADDR = 0xAABBCCDDEE01
@@ -55,18 +56,28 @@ async def main(host: str, port: int, key: str | None) -> None:
     assert services == []
     sensors = {e.object_id: e for e in entities if isinstance(e, SensorInfo)}
     print("sensors:", sorted(sensors))
-    assert len(sensors) == len(entities), "only sensors expected"
     for oid in ("uptime", "connection_attempts", "connections_made", "advertisement_rate", "free_connection_slots"):
         assert oid in sensors, f"sensor {oid} missing"
-    assert all(e.entity_category == EntityCategory.DIAGNOSTIC for e in entities)
+    assert all(e.entity_category == EntityCategory.DIAGNOSTIC for e in sensors.values())
+    by_id = {e.object_id: e for e in entities}
+    print("entities:", sorted(by_id))
+    stack, scanning = by_id["bluetooth_stack"], by_id["scanning"]
+    assert isinstance(stack, BinarySensorInfo) and stack.entity_category == EntityCategory.DIAGNOSTIC
+    assert isinstance(scanning, SwitchInfo) and scanning.entity_category == EntityCategory.CONFIG
+    for oid in ("adapter_address", "advertisement_source", "last_problem"):
+        assert isinstance(by_id[oid], TextSensorInfo), oid
+    for oid in ("restart_proxy", "restart_bluetooth"):
+        assert isinstance(by_id[oid], ButtonInfo) and by_id[oid].disabled_by_default, oid
     states = {}
     unsub_states = cli.subscribe_states(lambda s: states.__setitem__(s.key, s))
     await asyncio.sleep(0.3)
     uptime = states.get(sensors["uptime"].key)
     assert uptime is not None and not uptime.missing_state and uptime.state >= 0, f"uptime state {uptime}"
     assert states[sensors["free_connection_slots"].key].state == 3
-    if callable(unsub_states):
-        unsub_states()
+    assert states[stack.key].state is True, states[stack.key]
+    assert states[scanning.key].state is True, states[scanning.key]
+    assert states[by_id["adapter_address"].key].state == info.bluetooth_mac_address, states[by_id["adapter_address"].key]
+    assert states[by_id["advertisement_source"].key].state == "Fake"
 
     logs = []
     unsub_logs = cli.subscribe_logs(lambda m: logs.append((m.level, m.message.decode())),
@@ -98,6 +109,30 @@ async def main(host: str, port: int, key: str | None) -> None:
     await asyncio.sleep(0.3)
     assert scanner[-1] == (run, act, act), scanner
     print("scanner states:", [(s.name, m.name, c.name) for s, m, c in scanner])
+
+    # The scanning switch stops the advertisements, and the stack still counts as working.
+    cli.switch_command(scanning.key, False)
+    await asyncio.sleep(0.5)
+    assert scanner[-1] == (BluetoothScannerState.IDLE, act, act), scanner
+    assert states[scanning.key].state is False, states[scanning.key]
+    assert states[stack.key].state is True, states[stack.key]
+    adverts.clear()
+    await asyncio.sleep(1.5)
+    assert not adverts, adverts
+    cli.switch_command(scanning.key, True)
+    await asyncio.sleep(1.5)
+    assert scanner[-1] == (run, act, act), scanner
+    assert states[scanning.key].state is True, states[scanning.key]
+    assert adverts, "no advertisements after switching scanning back on"
+    print("scanning switch ok")
+
+    # The fake backend has nothing to restart; the press must not disturb the session.
+    cli.button_command(by_id["restart_bluetooth"].key)
+    await asyncio.sleep(0.2)
+    assert (await cli.device_info()).name == info.name
+    print("restart_bluetooth pressed")
+    if callable(unsub_states):
+        unsub_states()
 
     states = []
 
@@ -196,7 +231,21 @@ async def main(host: str, port: int, key: str | None) -> None:
     unsub()
     unsub_free()
     unsub_scanner()
-    await cli.disconnect()
+
+    # Last, as it ends this session: the proxy starts again on the same port.
+    cli.button_command(by_id["restart_proxy"].key)
+    await asyncio.sleep(0.5)
+    await cli.disconnect(force=True)
+    await asyncio.sleep(1)
+    again = APIClient(host, port, None, noise_psk=key or None)
+    await again.connect(login=True)
+    assert (await again.device_info()).name == info.name
+    restarted = {}
+    again.subscribe_states(lambda s: restarted.__setitem__(s.key, s))
+    await asyncio.sleep(0.3)
+    assert restarted[sensors["uptime"].key].state < 5, restarted[sensors["uptime"].key]
+    await again.disconnect()
+    print("restart_proxy ok")
     print("E2E OK")
 
 

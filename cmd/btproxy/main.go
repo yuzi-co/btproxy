@@ -23,7 +23,9 @@ import (
 	"github.com/yuzi-co/btproxy/internal/netif"
 )
 
-var version = "0.1.0"
+// version is set at build time for releases. Reading the module's version instead, for go install, would add
+// 64 KB for runtime/debug.
+var version = "dev"
 
 // esphomeVersion is the ESPHome release btproxy reports itself as (DeviceInfo and mDNS).
 const esphomeVersion = "2026.10.0"
@@ -184,6 +186,11 @@ func main() {
 			Version: esphomeVersion, ProjectVersion: version, MaxConnections: *maxConns, ScanMode: mode,
 			Logs: logs, Backend: *backend, Adapter: n.adapter,
 			EncryptionKey: key, AdvFilter: advFilter,
+			Restart: func() { stop("restart requested through the API", true) },
+			LastProblem: func() string {
+				line, _ := app.problems.lastProblem()
+				return line
+			},
 		}, adapter, nlog)
 		addNode(n.name, adapter, l, srv)
 		go func() { served <- srv.Serve(l) }()

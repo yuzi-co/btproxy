@@ -48,6 +48,7 @@ func (s *Server) sendScannerState() {
 func (s *Server) scanStatusLoop() {
 	for range s.scanKick {
 		s.sendScannerState()
+		s.pushStates() // the Bluetooth stack sensor follows the scanner
 	}
 }
 
