@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+// notEncryptedWarning is logged at every start of an API without a key. It reports a choice rather than a
+// fault, so problemWatch leaves it out.
+const notEncryptedWarning = "API is not encrypted: any host that can reach it can use the proxy and its bonded devices; " +
+	"see -encryption-key-file"
+
 // problemWatch passes log lines through and remembers the latest warning or error, for the tray and the
 // settings page.
 type problemWatch struct {
@@ -18,7 +23,8 @@ type problemWatch struct {
 }
 
 func (p *problemWatch) Write(b []byte) (int, error) {
-	if bytes.Contains(b, []byte(" level=ERROR ")) || bytes.Contains(b, []byte(" level=WARN ")) {
+	problem := bytes.Contains(b, []byte(" level=ERROR ")) || bytes.Contains(b, []byte(" level=WARN "))
+	if problem && !bytes.Contains(b, []byte(notEncryptedWarning)) {
 		line := strings.TrimSpace(string(b))
 		if i := strings.Index(line, " level="); i >= 0 {
 			line = line[i+1:] // the time is kept separately

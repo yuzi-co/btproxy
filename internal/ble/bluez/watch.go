@@ -24,6 +24,9 @@ var (
 	scanRetry      = 10 * time.Second
 	restartEvery   = 10 * time.Minute // at most one bluetoothd restart this often
 	restartTimeout = 30 * time.Second
+	// manualRestartEvery is how soon after any restart someone may ask for another. Shorter than restartEvery:
+	// a person who asks has looked, and may have just seen the last restart fail to help.
+	manualRestartEvery = time.Minute
 	// pingEvery is how often the supervisor checks that bluetoothd still answers. Advertisements are no proof
 	// once they come from the HCI monitor, which keeps reading the controller while bluetoothd hangs.
 	pingEvery = time.Minute
@@ -317,15 +320,21 @@ func (a *Adapter) strike() {
 		return
 	}
 	a.strikes = 0
-	a.restarts.Add(1)
 	a.log.Warn("bluetoothd not responding, restarting it")
+	if err := a.runRestart(); err != nil {
+		a.log.Warn("bluetoothd restart failed", "err", err)
+	}
+}
+
+// runRestart runs restartCmd and waits for it, up to restartTimeout.
+func (a *Adapter) runRestart() error {
+	a.restarts.Add(1)
 	// os.StartProcess rather than os/exec, which adds 128 KB to the binary. The command's output goes to
 	// ours, so nothing waits on a pipe that a daemon it starts may keep open.
 	p, err := os.StartProcess("/bin/sh", []string{"sh", "-c", a.restartCmd},
 		&os.ProcAttr{Env: restartEnv(os.Environ()), Files: []*os.File{nil, os.Stderr, os.Stderr}})
 	if err != nil {
-		a.log.Warn("bluetoothd restart failed", "err", err)
-		return
+		return err
 	}
 	t := time.AfterFunc(restartTimeout, func() { p.Kill() })
 	st, err := p.Wait()
@@ -333,9 +342,19 @@ func (a *Adapter) strike() {
 	if err == nil && !st.Success() {
 		err = errors.New(st.String())
 	}
-	if err != nil {
-		a.log.Warn("bluetoothd restart failed", "err", err)
+	return err
+}
+
+// StackRestartable implements ble.StackRestarter: a restart needs the command.
+func (a *Adapter) StackRestartable() bool { return a.restartCmd != "" }
+
+// RestartStack implements ble.StackRestarter. It counts for the watchdog's limit too, and the recovery from a
+// bluetoothd restart does the rest.
+func (a *Adapter) RestartStack() error {
+	if !bluetoothdRestarts.claimAfter(manualRestartEvery) {
+		return errors.New("bluetoothd was restarted less than a minute ago")
 	}
+	return a.runRestart()
 }
 
 // restartEnv is the environment for the restart command: btproxy's own variables hold the encryption key and
@@ -358,10 +377,13 @@ type restartGate struct {
 }
 
 // claim tells whether a restart may happen now, at most one per restartEvery, and if so records it.
-func (g *restartGate) claim() bool {
+func (g *restartGate) claim() bool { return g.claimAfter(restartEvery) }
+
+// claimAfter is claim with another spacing.
+func (g *restartGate) claimAfter(every time.Duration) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.last.IsZero() && time.Since(g.last) < restartEvery {
+	if !g.last.IsZero() && time.Since(g.last) < every {
 		return false
 	}
 	g.last = time.Now()

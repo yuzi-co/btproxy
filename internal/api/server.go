@@ -30,6 +30,8 @@ type Config struct {
 	Adapter        string
 	EncryptionKey  []byte         // 32-byte API encryption key; nil serves plaintext only
 	AdvFilter      *ble.AdvFilter // advertisements to forward; nil forwards all
+	Restart        func()         // restarts the proxy, for the restart button; nil leaves the button out
+	LastProblem    func() string  // the latest warning or error; nil leaves the sensor out
 }
 
 // setupTimeout bounds the time from accepting a client to its HelloRequest, including the encrypted handshake,
@@ -63,6 +65,7 @@ type Server struct {
 	clients  map[*client]bool
 	conns    map[uint64]*btConn
 	stopScan func()
+	scanOff  bool        // the scanning switch is off
 	pending  []byte      // the advertisements of the batch being collected, encoded
 	pendingN int         // and their number
 	pendingT time.Time   // when the batch started
@@ -70,8 +73,11 @@ type Server struct {
 
 	scanKick chan struct{} // scanner status changed: tell the subscribers
 
-	stats   stats    // see stats.go
-	sensors []sensor // fixed by NewServer
+	stats         stats    // see stats.go
+	sensors       []sensor // the entities are fixed by NewServer
+	binarySensors []binarySensor
+	textSensors   []textSensor
+	buttons       []button
 
 	setupTimeout time.Duration // a field so the tests can shorten it
 }
@@ -104,6 +110,7 @@ func NewServer(cfg Config, adapter ble.Adapter, log *logx.Logger) *Server {
 	}
 	s.initScanner()
 	s.initStats()
+	s.initEntities()
 	return s
 }
 
@@ -172,9 +179,9 @@ func (s *Server) advSubscribed() bool {
 }
 
 // updateScan starts scanning when the first client subscribes to advertisements and stops after the last
-// one leaves. Called with s.mu held.
+// one leaves, or while the scanning switch is off. Called with s.mu held.
 func (s *Server) updateScan() {
-	want := s.advSubscribed()
+	want := s.advSubscribed() && !s.scanOff
 	switch {
 	case want && s.stopScan == nil:
 		stop, err := s.adapter.Scan(s.onAdvert)
@@ -628,7 +635,21 @@ func (c *client) handle(f Frame) bool {
 		c.statesSubscribed = true
 		s.mu.Unlock()
 		for _, m := range s.states() {
-			c.send(msgSensorStateResponse, m)
+			c.send(m.typ, m.payload)
+		}
+	case msgSwitchCommandRequest:
+		if err := c.switchCommand(f.Payload); err != nil {
+			c.log.Warn("bad message", "type", f.Type, "err", err)
+			return false
+		}
+	case msgButtonCommandRequest:
+		ok, err := c.buttonCommand(f.Payload)
+		if err != nil {
+			c.log.Warn("bad message", "type", f.Type, "err", err)
+			return false
+		}
+		if !ok {
+			return false
 		}
 	case msgSubscribeHAServicesRequest, msgSubscribeHAStatesRequest:
 		// Nothing to report: the proxy has no services and needs no Home Assistant states.

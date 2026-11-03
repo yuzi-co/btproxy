@@ -63,6 +63,15 @@ func (a *Adapter) MAC() uint64 {
 	return AdapterAddr
 }
 
+// StackRestartable implements ble.StackRestarter, so the end-to-end test can press the button.
+func (*Adapter) StackRestartable() bool { return true }
+
+// RestartStack implements ble.StackRestarter; there is nothing to restart.
+func (*Adapter) RestartStack() error { return nil }
+
+// AdvertSource implements ble.AdvertSourcer.
+func (*Adapter) AdvertSource() string { return "Fake" }
+
 func (a *Adapter) SetScanMode(m ble.ScanMode) {
 	a.mu.Lock()
 	a.mode = m

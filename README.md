@@ -20,7 +20,8 @@ Windows 11 (Intel adapter), with Home Assistant 2026.11. The fake backend passes
 - Pairing and unpairing from Home Assistant ([Bonded devices](#bonded-devices)).
 - [Connection parameter](#connection-parameters) changes: exact on Linux, presets on Windows 11.
 - Active and passive scanning, mode changes from Home Assistant.
-- [Log streaming](#logs), diagnostic [sensors](#sensors), optional [encryption](#encryption).
+- [Log streaming](#logs), diagnostic [sensors](#sensors), a scanning switch and restart buttons
+  ([Controls](#controls)), optional [encryption](#encryption).
 - [mDNS](#mdns) discovery that skips container, VM and VPN interfaces.
 - A settings file and an optional password-protected [settings page](#settings-page).
 - Linux: raw advertisements from the HCI monitor, [several adapters](#several-adapters), recovery from
@@ -45,7 +46,8 @@ GATT connections and discover over mDNS. "?" means not checked.
 | Cache clearing | yes, bonds kept | yes | reported, nothing cleared |
 | Connection parameters | Linux: exact; Windows 11: nearest preset | yes | no |
 | API encryption | yes, off by default | yes | no |
-| Diagnostic sensors | proxy statistics | general ones if added in YAML | no |
+| Diagnostic sensors | proxy statistics and health | general ones if added in YAML | no |
+| Controls in Home Assistant | scanning switch, restart buttons | if added in YAML | no |
 | Advertisement filter | allow/deny lists | ? | no |
 | Several adapters | Linux: one device each | n/a | one per process |
 | Settings | flags, file, web page; Windows tray | YAML, compiled in | flags |
@@ -98,10 +100,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldfl
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H windowsgui" -o dist/btproxy.exe ./cmd/btproxy
 ```
 
-Sizes: arm64 and armv7 3.6 MiB, amd64 3.8 MiB, mipsle 4.1 MiB, Windows 3.7 MiB. Without
+Sizes: arm64 3.6 MiB, armv7 and amd64 3.8 MiB, mipsle 4.2 MiB, Windows 3.7 MiB. Without
 `-H windowsgui` the Windows binary is a console program that logs like on Linux, with no tray.
 
-`-tags nonoise` leaves out API encryption (192 KiB less on mipsle, 3.9 MiB); such a build refuses to start when
+`-tags nonoise` leaves out API encryption (192 KiB less on mipsle, 4.0 MiB); such a build refuses to start when
 given a key:
 
 ```sh
@@ -208,15 +210,15 @@ role; `-adapter`, `-agent`, `-stall-timeout`, `-bluetoothd-restart` and `-raw-ad
 - Home Assistant needs TCP 6053 in and, for discovery, UDP 5353; Windows Firewall asks on first start.
 - On a laptop that switches between Ethernet and Wi-Fi, set a fixed `-mac`.
 
-Tested on Windows 11 (Intel): scanning, mode changes, connecting, discovery, reads, notification on/off, MTU
+Tested on Windows 11 (Intel): scanning, mode changes, the scanning switch, connecting, discovery, reads, notification on/off, MTU
 247, cache clearing, disconnect. Not yet tried against a device: writes, notification delivery, pairing,
 unpairing a bonded device, link loss, radio off and on.
 
 Differences from BlueZ:
 
 - Advertisements are rebuilt from WinRT's parsed sections in original order, so bytes match the air. Scan
-  responses arrive as separate entries, as from an ESP32. Extended advertisements are included; PHYs are not
-  reported.
+  responses arrive as separate entries, as from an ESP32, except empty ones, which are dropped. Extended
+  advertisements are included; PHYs are not reported.
 - Windows owns connections: the link drops a few seconds after the proxy lets go, and stays up while another
   program or Windows uses the device. Services Windows keeps (such as HID) have no characteristics.
 - Windows connects only to devices it has seen advertising or paired ("device not found" right after a start).
@@ -402,6 +404,30 @@ at start. Entity keys are hashes of the object ids, stable across versions.
 | `bluetoothd_restarts` | | restarts by the watchdog (`-bluetoothd-restart`); bluez backend only |
 | `memory` | MiB | resident memory, from `/proc/self/statm`; Linux only |
 
+These report health. A change of the Bluetooth stack's state is sent at once, so an automation can alert on it.
+
+| Object id | Kind | What |
+|---|---|---|
+| `bluetooth_stack` | binary sensor | on while the stack works, also while scanning is idle, paused or switched off; off when the scanner has failed or the adapter is off |
+| `adapter_address` | text | the adapter's Bluetooth address |
+| `advertisement_source` | text | `HCI monitor` or `Rebuilt from BlueZ`; Linux only |
+| `last_problem` | text | the latest warning or error logged, cut to 255 characters, or `none`; the warning about an unencrypted API does not count |
+
+### Controls
+
+These apply to one adapter, except that a restart restarts the whole proxy.
+
+- **Scanning** (switch): stops and starts scanning. It is on after every start of the proxy. Home Assistant connects
+  through a proxy that heard the device recently, so with scanning off it stops choosing this one once the device's
+  advertisements age. Existing connections stay up.
+- **Restart proxy** (button): drops the connections, waiting at most 5 s, and restarts as the settings page does.
+- **Restart Bluetooth stack** (button): runs `-bluetoothd-restart`, and is only offered when that is set. It is
+  refused within a minute of the last restart, and holds off the watchdog's next restart for 10 minutes.
+
+The buttons are disabled by default in Home Assistant. Without an [encryption](#encryption) key any host that can
+reach the API can use them, as it can the rest of the API. Do not press Restart proxy from an automation that
+triggers on the proxy's own problems: that can restart it in a loop.
+
 ## Deploy
 
 OpenWrt 23.05:
@@ -442,8 +468,9 @@ Or use [contrib/docker/compose.yaml](contrib/docker/compose.yaml). Flags go afte
 
 - Docker Desktop on Windows or macOS cannot reach the host's adapter, because containers run in a VM. Use the
   Windows binary instead.
-- The proxy cannot restart a hung `bluetoothd` on the host: the image has no shell for `-bluetoothd-restart`. It
-  keeps retrying and reports failed until the host's `bluetoothd` is restarted.
+- The proxy cannot restart a hung `bluetoothd` on the host: the image has no shell for `-bluetoothd-restart`, so
+  there is no Restart Bluetooth stack button either. It keeps retrying and reports failed until the host's
+  `bluetoothd` is restarted.
 - Passive scanning and `ConnectDevice` depend on the host's `bluetoothd --experimental`, as in [Run](#run).
 - For encryption, mount the key file read-only and pass `-encryption-key-file`. For the settings page, pass
   `-ui`, `-ui-password-file` and a `-config` file in a mounted directory.

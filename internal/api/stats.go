@@ -56,16 +56,8 @@ type sensor struct {
 	value                       func() (float32, bool)
 }
 
-// key is the entity key, an FNV-1 hash of the object id as ESPHome computes it, so it stays the same
-// across restarts and versions.
-func (e *sensor) key() uint32 {
-	h := uint32(2166136261)
-	for i := 0; i < len(e.id); i++ {
-		h *= 16777619
-		h ^= uint32(e.id[i])
-	}
-	return h
-}
+// key is the entity key.
+func (e *sensor) key() uint32 { return entityKey(e.id) }
 
 // initStats starts the counters and builds the sensor list. The bluetoothd restart count is listed only
 // for adapters that report it, the memory only where /proc/self/statm is readable (Linux).
@@ -204,23 +196,51 @@ func rssMiB() (float32, bool) {
 
 // sendEntities answers ListEntitiesRequest.
 func (c *client) sendEntities() {
-	for i := range c.s.sensors {
-		c.send(msgListEntitiesSensorResponse, encSensorInfo(&c.s.sensors[i]))
+	s := c.s
+	for i := range s.sensors {
+		c.send(msgListEntitiesSensorResponse, encSensorInfo(&s.sensors[i]))
+	}
+	for i := range s.binarySensors {
+		c.send(msgListEntitiesBinarySensorResponse, encBinarySensorInfo(&s.binarySensors[i]))
+	}
+	for i := range s.textSensors {
+		c.send(msgListEntitiesTextSensorResponse, encTextSensorInfo(&s.textSensors[i]))
+	}
+	c.send(msgListEntitiesSwitchResponse, encScanSwitchInfo())
+	for i := range s.buttons {
+		c.send(msgListEntitiesButtonResponse, encButtonInfo(&s.buttons[i]))
 	}
 	c.send(msgListEntitiesDoneResponse, nil)
 }
 
-// states encodes the state of every sensor. Values are read without Server.mu held.
-func (s *Server) states() [][]byte {
-	out := make([][]byte, len(s.sensors))
-	for i := range s.sensors {
-		v, ok := s.sensors[i].value()
-		out[i] = encSensorState(s.sensors[i].key(), v, ok)
-	}
-	return out
+// stateMsg is one entity's state, ready to send.
+type stateMsg struct {
+	typ     uint32
+	payload []byte
 }
 
-// pushStates sends every sensor's state to the clients subscribed to states. They may be dropped for a
+// states encodes the state of every entity. Values are read without Server.mu held, except the switch's.
+func (s *Server) states() []stateMsg {
+	out := make([]stateMsg, 0, len(s.sensors)+len(s.binarySensors)+len(s.textSensors)+1)
+	for i := range s.sensors {
+		v, ok := s.sensors[i].value()
+		out = append(out, stateMsg{msgSensorStateResponse, encSensorState(s.sensors[i].key(), v, ok)})
+	}
+	for i := range s.binarySensors {
+		e := &s.binarySensors[i]
+		out = append(out, stateMsg{msgBinarySensorStateResponse, encBinarySensorState(entityKey(e.id), e.value())})
+	}
+	for i := range s.textSensors {
+		e := &s.textSensors[i]
+		out = append(out, stateMsg{msgTextSensorStateResponse, encTextSensorState(entityKey(e.id), e.value())})
+	}
+	s.mu.Lock()
+	on := !s.scanOff
+	s.mu.Unlock()
+	return append(out, stateMsg{msgSwitchStateResponse, encSwitchState(entityKey(scanSwitchID), on)})
+}
+
+// pushStates sends every entity's state to the clients subscribed to states. They may be dropped for a
 // client that is behind: the next push brings them again.
 func (s *Server) pushStates() {
 	msgs := s.states()
@@ -229,7 +249,7 @@ func (s *Server) pushStates() {
 	for c := range s.clients {
 		if c.statesSubscribed {
 			for _, m := range msgs {
-				c.sendDroppable(msgSensorStateResponse, m)
+				c.sendDroppable(m.typ, m.payload)
 			}
 		}
 	}

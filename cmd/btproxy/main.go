@@ -23,7 +23,9 @@ import (
 	"github.com/yuzi-co/btproxy/internal/netif"
 )
 
-var version = "0.1.0"
+// version is set at build time for releases. Reading the module's version instead, for go install, would add
+// 64 KB for runtime/debug.
+var version = "dev"
 
 // esphomeVersion is the ESPHome release btproxy reports itself as (DeviceInfo and mDNS).
 const esphomeVersion = "2026.10.0"
@@ -165,8 +167,7 @@ func main() {
 			fatal(log, "listen", "adapter", n.adapter, "err", err)
 		}
 		if key == nil && !loopbackAddr(l.Addr().String()) {
-			log.Warn("API is not encrypted: any host that can reach it can use the proxy and its bonded devices; "+
-				"see -encryption-key-file", "listen", l.Addr().String())
+			log.Warn(notEncryptedWarning, "listen", l.Addr().String())
 		}
 		log.Info("btproxy started", "version", version, "listen", l.Addr().String(), "name", n.name,
 			"adapter", n.adapter, "bt_mac", ble.FormatMAC(adapter.MAC()), "encryption", key != nil)
@@ -184,6 +185,11 @@ func main() {
 			Version: esphomeVersion, ProjectVersion: version, MaxConnections: *maxConns, ScanMode: mode,
 			Logs: logs, Backend: *backend, Adapter: n.adapter,
 			EncryptionKey: key, AdvFilter: advFilter,
+			Restart: func() { stop("restart requested through the API", true) },
+			LastProblem: func() string {
+				line, _ := app.problems.lastProblem()
+				return line
+			},
 		}, adapter, nlog)
 		addNode(n.name, adapter, l, srv)
 		go func() { served <- srv.Serve(l) }()

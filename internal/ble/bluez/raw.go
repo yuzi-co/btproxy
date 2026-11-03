@@ -101,6 +101,16 @@ func (a *Adapter) initRaw(name string, mode RawMode) error {
 	return nil
 }
 
+// AdvertSource implements ble.AdvertSourcer.
+func (a *Adapter) AdvertSource() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.raw != nil {
+		return "HCI monitor"
+	}
+	return "Rebuilt from BlueZ"
+}
+
 // rawAdvert delivers an advertisement from the monitor. The callback runs without a.mu: the API server calls
 // Scan and stop with its own lock held, which the callback takes too.
 func (a *Adapter) rawAdvert(ad ble.Advert) {
