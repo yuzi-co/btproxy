@@ -201,6 +201,22 @@ func TestAdvertSourceSensor(t *testing.T) {
 	}
 }
 
+// settingAdapter says how it scans.
+type settingAdapter struct{ testAdapter }
+
+func (settingAdapter) ScanSetting() string { return "Active, passive unavailable" }
+
+func TestScanSettingSensor(t *testing.T) {
+	if _, ok := startServer(t, testAdapter{}).listAll()["scan_setting"]; ok {
+		t.Error("listed for an adapter that does not report it")
+	}
+	tc := startServer(t, settingAdapter{})
+	tc.send(msgSubscribeStatesRequest, nil)
+	if got := tc.textOf("scan_setting"); got != "Active, passive unavailable" {
+		t.Errorf("setting %q", got)
+	}
+}
+
 func TestLastProblemSensor(t *testing.T) {
 	if _, ok := startServer(t, testAdapter{}).listAll()["last_problem"]; ok {
 		t.Error("listed without a source")

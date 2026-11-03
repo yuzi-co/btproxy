@@ -24,6 +24,7 @@ func init() {
 	scanRetry = 50 * time.Millisecond
 	callTimeout = 300 * time.Millisecond
 	pingEvery = 100 * time.Millisecond
+	monitorRetry = 400 * time.Millisecond
 }
 
 // fakeBlueZ is a minimal org.bluez on a private bus: one adapter, discovery and, if monitors is set, the
@@ -49,6 +50,7 @@ type fakeBlueZ struct {
 	dropLinks   int                      // this many connects succeed, then lose the link before services resolve
 	rssi        int16                    // RSSI threshold of the last discovery filter, 0 for none
 	quietMons   bool                     // the monitors registered match nothing
+	monSender   string                   // who registered the monitors
 	connects    []string                 // Device1.Connect and Adapter1.ConnectDevice calls, by method
 	hold        chan struct{}            // while set, connecting waits for a value from it
 	scanning    []bool                   // per connect: discovering or monitors registered when it started
@@ -346,16 +348,31 @@ func (m fakeMonitorMgr) RegisterMonitor(sender dbus.Sender, root dbus.ObjectPath
 		}
 	}
 	m.f.mu.Lock()
-	m.f.registered, m.f.quietMons = n, quiet && n > 0
+	m.f.registered, m.f.quietMons, m.f.monSender = n, quiet && n > 0, string(sender)
 	m.f.mu.Unlock()
 	return nil
 }
 
+// UnregisterMonitor tells each monitor it is released, as BlueZ does, without waiting for an answer.
 func (m fakeMonitorMgr) UnregisterMonitor(dbus.ObjectPath) *dbus.Error {
 	m.f.mu.Lock()
-	m.f.registered = 0
+	hung := m.f.hung
 	m.f.mu.Unlock()
+	if hung != nil {
+		<-hung
+	}
+	m.f.releaseMonitors()
 	return nil
+}
+
+func (f *fakeBlueZ) releaseMonitors() {
+	f.mu.Lock()
+	n, sender := f.registered, f.monSender
+	f.registered = 0
+	f.mu.Unlock()
+	for i := 0; i < n; i++ {
+		f.bus.Object(sender, monitorPath(i)).Go(ifMonitor+".Release", dbus.FlagNoReplyExpected, nil)
+	}
 }
 
 // startBus runs a private dbus-daemon and points the system bus address at it.

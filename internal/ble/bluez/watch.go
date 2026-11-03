@@ -55,10 +55,15 @@ type scanState struct {
 	gone      bool         // bluetoothd or the adapter is not on the bus
 	off       bool         // the adapter is powered off
 	epoch     int          // bumped whenever BlueZ may have dropped our discovery session or monitor
-	noMonitor bool         // the monitor API is missing or failed: scan actively until bluetoothd restarts
+	noMonitor bool         // the monitor API is missing or failed: scan actively until bluetoothd restarts, or retryMonitorAt
 	monitorUp bool         // the monitor is (being) registered; a Release then means BlueZ dropped it
 	agentLog  *logx.Logger // set once RegisterAgent was called
-	adverts   int          // advertisements delivered, for the stall watchdog
+
+	retryMonitorAt  time.Time     // when to try the monitors again after BlueZ dropped them; zero for never
+	releaseWait     time.Duration // the wait until retryMonitorAt
+	lastRelease     time.Time     // when BlueZ last dropped the monitors
+	ownReleaseUntil time.Time     // until when a Release comes from our own UnregisterMonitor
+	adverts         int           // advertisements delivered, for the stall watchdog
 
 	connecting   int             // connects in progress, which pause scanning (see pause.go)
 	pauseWaiters []chan struct{} // connects waiting for the supervisor to stop scanning
@@ -203,6 +208,7 @@ func (a *Adapter) reconcile() {
 	}
 	paused, waiters := a.takePause()
 	defer release(waiters) // once scanning is stopped, or cannot be
+	a.retryMonitors()
 	a.mu.Lock()
 	want := a.scanFn != nil
 	gone, off, epoch, adverts, raw := a.gone, a.off, a.epoch, a.adverts, a.rawProven()
@@ -521,6 +527,20 @@ func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 	return nil
 }
 
+// ScanSetting implements ble.ScanSettinger. The fallback gets its own wording because active scanning without
+// monitors is the one that costs advertisements: the controller then filters duplicates (see dupFilterOff).
+func (a *Adapter) ScanSetting() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch {
+	case a.noMonitor:
+		return "Active, passive unavailable"
+	case a.mode == ble.ScanActive:
+		return "Active"
+	}
+	return "Passive"
+}
+
 // quietRSSI is the discovery RSSI threshold that keeps every device from bluetoothd: BlueZ accepts at most
 // 20 dBm, which no advertisement reaches.
 const quietRSSI = 20
@@ -642,6 +662,7 @@ func (a *Adapter) watch(s *dbus.Signal) {
 			a.log.Info("bluetoothd started")
 			a.mu.Lock()
 			a.noMonitor = false // it may have been restarted with --experimental
+			a.retryMonitorAt = time.Time{}
 			agentLog := a.agentLog
 			a.mu.Unlock()
 			go func() {

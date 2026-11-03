@@ -4,6 +4,8 @@ package bluez
 
 import (
 	"errors"
+	"time"
+
 	"github.com/godbus/dbus/v5"
 )
 
@@ -117,6 +119,13 @@ func (monitorProps) Set(string, string, dbus.Variant) *dbus.Error {
 	return dbus.NewError("org.freedesktop.DBus.Error.PropertyReadOnly", []any{"read-only"})
 }
 
+var (
+	monitorRetry    = time.Minute      // the first wait before trying monitors BlueZ dropped again
+	monitorRetryMax = 30 * time.Minute // the longest; twice this without a drop starts over
+	ownRelease      = 2 * time.Second  // how long Release calls can trail our UnregisterMonitor's reply
+	lateOwnRelease  = time.Minute      // the same when the call timed out, and runs when bluetoothd gets to it
+)
+
 // monitor receives BlueZ's calls on one monitor object.
 type monitor struct{ a *Adapter }
 
@@ -175,7 +184,7 @@ func (a *Adapter) registerMonitors(quiet bool) error {
 	if errors.As(err, &de) && de.Name == "org.bluez.Error.AlreadyExists" {
 		// BlueZ kept the application, as across a power cycle, and the scanner did not unregister it. Start over,
 		// so that BlueZ reads the monitors as they are now.
-		a.call(a.path, ifMonitorManager+".UnregisterMonitor", monitorRoot)
+		a.callUnregister()
 		err = a.call(a.path, ifMonitorManager+".RegisterMonitor", monitorRoot).Err
 	}
 	if err != nil {
@@ -190,22 +199,63 @@ func (a *Adapter) unregisterMonitors() {
 	a.mu.Lock()
 	a.monitorUp = false // the Release calls that follow are ours
 	a.mu.Unlock()
-	a.call(a.path, ifMonitorManager+".UnregisterMonitor", monitorRoot)
+	a.callUnregister()
+}
+
+// callUnregister asks BlueZ to drop the monitors, and it calls Release on each of them. Those calls can arrive
+// after the scanner has registered the monitors again: right after the reply, as they run on their own goroutines,
+// or much later when the call timed out, since a slow bluetoothd still runs it when it gets to it. They must not
+// read as BlueZ dropping the monitors.
+func (a *Adapter) callUnregister() {
+	a.expectRelease(callTimeout + ownRelease)
+	if isTimeout(a.call(a.path, ifMonitorManager+".UnregisterMonitor", monitorRoot).Err) {
+		a.expectRelease(lateOwnRelease)
+	} else {
+		a.expectRelease(ownRelease)
+	}
+}
+
+func (a *Adapter) expectRelease(d time.Duration) {
+	a.mu.Lock()
+	a.ownReleaseUntil = time.Now().Add(d)
+	a.mu.Unlock()
 }
 
 // monitorReleased handles BlueZ dropping a monitor it had accepted, for example because the kernel refused
-// it: passive scanning is given up until bluetoothd restarts.
+// it: the scanner scans actively, and tries the monitors again later, less often each time it goes on.
 func (a *Adapter) monitorReleased() {
+	now := time.Now()
 	a.mu.Lock()
-	up := a.monitorUp
+	up := a.monitorUp && !now.Before(a.ownReleaseUntil)
+	var wait time.Duration
 	if up {
 		a.monitorUp = false
 		a.noMonitor = true
 		a.epoch++
+		wait = monitorRetry
+		if now.Sub(a.lastRelease) < 2*monitorRetryMax {
+			wait = min(2*a.releaseWait, monitorRetryMax)
+		}
+		a.releaseWait, a.lastRelease, a.retryMonitorAt = wait, now, now.Add(wait)
 	}
 	a.mu.Unlock()
 	if up {
-		a.log.Warn("bluetoothd released the advertisement monitor, scanning actively")
+		a.log.Warn("bluetoothd released the advertisement monitor, scanning actively", "retry_in", wait)
 		a.kickScan()
+	}
+}
+
+// retryMonitors ends the fallback of monitorReleased when its time is up. The new epoch makes reconcile arm again.
+func (a *Adapter) retryMonitors() {
+	a.mu.Lock()
+	due := a.noMonitor && !a.retryMonitorAt.IsZero() && !time.Now().Before(a.retryMonitorAt)
+	if due {
+		a.noMonitor = false
+		a.retryMonitorAt = time.Time{}
+		a.epoch++
+	}
+	a.mu.Unlock()
+	if due {
+		a.log.Info("trying the advertisement monitor again")
 	}
 }
