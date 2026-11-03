@@ -84,7 +84,8 @@ Raspberry Pi is not among the tested setups above yet.
 
 Download the archive for your platform from the [releases](https://github.com/yuzi-co/btproxy/releases) and
 unpack it (`tar xzf` on Linux and OpenWrt, a `.zip` on Windows), then see [Deploy](#deploy).
-With Go 1.27.3 or newer: `go install github.com/yuzi-co/btproxy/cmd/btproxy@latest`.
+With Go 1.27.3 or newer: `go install github.com/yuzi-co/btproxy/cmd/btproxy@latest`. There is also a
+[Docker image](#docker) for Linux hosts.
 
 ## Build
 
@@ -425,6 +426,27 @@ system and other sandboxing; a settings file the page should save needs its dire
 
 Windows: put the `-H windowsgui` build somewhere permanent, start it, allow it through the firewall (program
 rule, or TCP 6053 and UDP 5353), tick Start with Windows in the tray, and configure on the settings page.
+
+### Docker
+
+The image is for Linux hosts on amd64, arm64 and armv7, with BlueZ running on the host. It has not been tried
+against a real adapter yet.
+
+```sh
+docker run -d --name btproxy --restart unless-stopped --network host -v /run/dbus:/run/dbus:ro \
+  --read-only --cap-drop ALL --cap-add NET_RAW --security-opt no-new-privileges \
+  ghcr.io/yuzi-co/btproxy -name btproxy-docker
+```
+
+Or use [contrib/docker/compose.yaml](contrib/docker/compose.yaml). Flags go after the image name.
+
+- Docker Desktop on Windows or macOS cannot reach the host's adapter, because containers run in a VM. Use the
+  Windows binary instead.
+- The proxy cannot restart a hung `bluetoothd` on the host: the image has no shell for `-bluetoothd-restart`. It
+  keeps retrying and reports failed until the host's `bluetoothd` is restarted.
+- Passive scanning and `ConnectDevice` depend on the host's `bluetoothd --experimental`, as in [Run](#run).
+- For encryption, mount the key file read-only and pass `-encryption-key-file`. For the settings page, pass
+  `-ui`, `-ui-password-file` and a `-config` file in a mounted directory.
 
 ### Bonded devices
 

@@ -1,0 +1,21 @@
+# Needs BlueZ running on the host. See "Docker" in the README for what this setup cannot do.
+services:
+  btproxy:
+    image: ghcr.io/yuzi-co/btproxy:latest
+    container_name: btproxy
+    restart: unless-stopped
+    # Bluetooth sockets only work in the initial network namespace, and mDNS needs the LAN.
+    network_mode: host
+    volumes:
+      # The directory rather than the socket, so the mount survives a restart of the host's D-Bus.
+      - /run/dbus:/run/dbus:ro
+      # API encryption: put the key in ./btproxy.key, then uncomment this line and the argument below.
+      # - ./btproxy.key:/btproxy.key:ro
+    read_only: true
+    cap_drop: [ALL]
+    # Raw advertisements and connection parameters. Without it the proxy rebuilds advertisements from BlueZ.
+    cap_add: [NET_RAW]
+    security_opt: ["no-new-privileges:true"]
+    command:
+      - -name=btproxy-docker
+      # - -encryption-key-file=/btproxy.key

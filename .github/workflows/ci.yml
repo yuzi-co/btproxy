@@ -70,3 +70,10 @@ jobs:
           BTPROXY_ENCRYPTION_KEY="$key" ./btproxy -backend fake -mdns=false -name e2e -mac 02:00:00:00:00:01 -listen 127.0.0.1:16054 &
           sleep 1
           python test/e2e.py 127.0.0.1 16054 "$key"
+      - name: Container image
+        run: |
+          docker build -t btproxy:test .
+          docker run -d --network host --read-only --cap-drop ALL --security-opt no-new-privileges btproxy:test \
+            -backend fake -mdns=false -name e2e -mac 02:00:00:00:00:01 -listen 127.0.0.1:16055
+          sleep 1
+          python test/e2e.py 127.0.0.1 16055
