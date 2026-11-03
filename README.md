@@ -457,17 +457,19 @@ OpenWrt 25.12 and newer:
 
 ```sh
 apk update
-apk add --allow-untrusted https://github.com/yuzi-co/btproxy/releases/latest/download/btproxy-linux-mipsle.apk
+wget -O /tmp/btproxy.apk https://github.com/yuzi-co/btproxy/releases/latest/download/btproxy-linux-mipsle.apk
+apk add --allow-untrusted /tmp/btproxy.apk
 ```
 
 OpenWrt 24.10 and older, tested on 23.05 and 24.10:
 
 ```sh
 opkg update
-opkg install https://github.com/yuzi-co/btproxy/releases/latest/download/btproxy-linux-mipsle.ipk
+wget -O /tmp/btproxy.ipk https://github.com/yuzi-co/btproxy/releases/latest/download/btproxy-linux-mipsle.ipk
+opkg install /tmp/btproxy.ipk
 ```
 
-`--allow-untrusted` is there because the packages are not signed. Run the same commands to upgrade: settings stay.
+`--allow-untrusted` is there because the packages are not signed. Run the same commands to upgrade: settings stay. Neither package manager fetches from an `https://` URL itself, hence `wget`.
 
 - Flash: the package takes about 1.6 MB and BlueZ with its dependencies roughly 3 to 5 MB, on top of the stick's
   firmware. The package manager refuses when that does not fit. opkg asks for the whole package to be free even
