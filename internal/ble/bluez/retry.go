@@ -15,8 +15,9 @@ import (
 // Many connects fail within half a second with HCI reason 0x3e (connection failed to be established): the
 // controller sent LE Create Connection, but the first connection events did not get through. BlueZ reports
 // that as "le-connection-abort-by-local", and sometimes as an error without a message. A second try a moment
-// later often succeeds, so Connect retries these, with scanning still paused, before failing. Timeouts and
-// every other error fail at once.
+// later often succeeds, so Connect retries these, with scanning still paused, before failing. A link can also
+// come up and drop a few seconds later, before the services are resolved, which on a router next to its Wi-Fi
+// radio is as common. Connect retries that too, however long it took. Timeouts and every other error fail at once.
 
 const (
 	retryDelay  = 200 * time.Millisecond
@@ -24,8 +25,12 @@ const (
 	retryBudget = 5 * time.Second // leaves most of the time a client gives a connect to the last attempt
 )
 
+var errLinkLost = errors.New("link lost while resolving services")
+
 func connectRetry(retries int) ble.ConnectRetry {
-	return ble.ConnectRetry{Retries: max(retries, 0), Delay: retryDelay, Fast: retryFast, Budget: retryBudget}
+	// Fast only keeps out what the budget would anyway: Connect applies retryFast to radio failures alone, as a
+	// lost link takes as long as the link was up.
+	return ble.ConnectRetry{Retries: max(retries, 0), Delay: retryDelay, Fast: retryBudget, Budget: retryBudget}
 }
 
 // radioFailure tells whether a connect error is one the radio may not repeat: BlueZ's

@@ -46,6 +46,7 @@ type fakeBlueZ struct {
 	onPowerOff  func()                   // called when a client powers the adapter off
 	devices     map[dbus.ObjectPath]bool // announced with InterfacesAdded
 	connectFail bool                     // Device1.Connect fails
+	dropLinks   int                      // this many connects succeed, then lose the link before services resolve
 	rssi        int16                    // RSSI threshold of the last discovery filter, 0 for none
 	quietMons   bool                     // the monitors registered match nothing
 	connects    []string                 // Device1.Connect and Adapter1.ConnectDevice calls, by method
@@ -291,9 +292,23 @@ func (d fakeDeviceIf) connected() *dbus.Error {
 	}
 	d.f.mu.Lock()
 	fail := d.f.connectFail
+	drop := d.f.dropLinks > 0
+	if drop {
+		d.f.dropLinks--
+	}
 	d.f.mu.Unlock()
 	if fail {
 		return dbus.NewError("org.bluez.Error.Failed", []any{"le-connection-abort-by-local"})
+	}
+	if drop {
+		d.f.bus.Emit(d.p, ifProps+".PropertiesChanged", ifDevice, map[string]dbus.Variant{
+			"Connected": dbus.MakeVariant(true)}, []string{})
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			d.f.bus.Emit(d.p, ifProps+".PropertiesChanged", ifDevice, map[string]dbus.Variant{
+				"Connected": dbus.MakeVariant(false)}, []string{})
+		}()
+		return nil
 	}
 	d.f.bus.Emit(d.p, ifProps+".PropertiesChanged", ifDevice, map[string]dbus.Variant{
 		"Connected": dbus.MakeVariant(true), "ServicesResolved": dbus.MakeVariant(true)}, []string{})
