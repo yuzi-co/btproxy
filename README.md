@@ -1,8 +1,10 @@
 # btproxy
 
-An ESPHome-compatible Bluetooth proxy for Linux and Windows, written in Go. Home Assistant adds it through the
-ESPHome integration (port 6053) like an ESP32 proxy, then scans and connects to BLE devices through the host's
-adapter: BlueZ over D-Bus on Linux, WinRT on Windows. Other programs can use the adapter at the same time.
+A Bluetooth proxy for Home Assistant that runs without an ESP32. It turns a Linux machine, OpenWrt router or
+Windows PC with a built-in adapter or USB Bluetooth dongle into an ESPHome-compatible BLE proxy, written in Go.
+Home Assistant adds it through the ESPHome integration (port 6053) like an ESP32 proxy, then scans and connects to
+BLE devices through the host's adapter: BlueZ over D-Bus on Linux, WinRT on Windows. Other programs can use the
+adapter at the same time.
 
 Not related to [conorpp/btproxy](https://github.com/conorpp/btproxy), a Bluetooth man-in-the-middle tool.
 
@@ -54,6 +56,29 @@ Shelly Gen2+, the Ruuvi Gateway and Theengs / OpenMQTTGateway relay advertisemen
 An ESP32 is the better proxy where you only have USB power: cheap, and its radio does BLE alone. btproxy fits
 where a Linux box or Windows PC with an adapter already sits in the right room. A USB stick next to a router's
 2.4 GHz radio can do badly: on the router above, many connects fail at the radio level (HCI reason 0x3e).
+
+## FAQ
+
+### Can Home Assistant use a Bluetooth proxy without an ESP32?
+
+Yes. btproxy speaks the same ESPHome API, so Home Assistant treats it like an ESP32 proxy, with no ESPHome
+firmware or YAML involved. See [Compared with other proxies](#compared-with-other-proxies) for where an ESP32 is
+still the better choice.
+
+### Can a USB Bluetooth dongle on a router be a proxy?
+
+Yes, if BlueZ can use the dongle. The tested setup is an RTL8761B stick on OpenWrt 23.05; [Deploy](#deploy) lists
+the packages. Expect some failed connects with the stick next to the router's 2.4 GHz radio.
+
+### Does it run on a Windows PC?
+
+Yes, with no drivers or runtime to install beyond an LE adapter. Windows 11 is tested and Windows 10 2004+ is not.
+[Windows](#windows) lists what has not been tried against a real device yet.
+
+### Does it run on a Raspberry Pi?
+
+The releases include Linux arm64 and armv7 builds, and [Deploy](#deploy) has a systemd unit for Raspberry Pi OS. A
+Raspberry Pi is not among the tested setups above yet.
 
 ## Install
 
