@@ -39,6 +39,12 @@ jobs:
             tar -C "$d" --owner=0 --group=0 -cf - btproxy LICENSE README.md | gzip -9 > "dist/btproxy-${d#pkg/}.tar.gz"
           done
           (cd pkg/windows-amd64 && zip -9q ../../dist/btproxy-windows-amd64.zip btproxy.exe LICENSE README.md)
+          docker run --rm -v "$PWD:/src" -w /src -e "VERSION=${GITHUB_REF_NAME#v}" alpine:3.23 sh -c '
+            apk add -q tar
+            for a in amd64 arm64 armv7 mipsle; do
+              contrib/openwrt/package.sh "$VERSION" "$a" "pkg/linux-$a/btproxy" dist
+            done'
+          sudo chown -R "$(id -u):$(id -g)" dist
           (cd dist && sha256sum btproxy* > SHA256SUMS)
       - name: Publish
         env:

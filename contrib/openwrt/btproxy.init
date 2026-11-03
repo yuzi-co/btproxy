@@ -1,36 +1,39 @@
 #!/bin/sh /etc/rc.common
 # btproxy: ESPHome-compatible Bluetooth proxy. Home Assistant connects to port 6053.
-# Install as /etc/init.d/btproxy, then: /etc/init.d/btproxy enable && /etc/init.d/btproxy start
+# Settings are in /etc/config/btproxy.
 
 START=99
 USE_PROCD=1
 
-# Flags given here override the settings file and lock those fields on the settings page; empty ones are left
-# out, so set NAME, FRIENDLY_NAME and AREA to "" to manage them on the page instead.
-NAME=btproxy-openwrt
-FRIENDLY_NAME="OpenWrt Bluetooth proxy"
-AREA=
-# Settings file, flat JSON of flag values ({"connections": "3"}); the settings page saves it. Missing is empty.
-CONFIG=/etc/btproxy.json
-# Settings page address, such as :8080; empty turns it off. It needs a password (any user name):
-# (umask 077; echo 'a long password' > /etc/btproxy.uipass)
-UI=
-UI_PASSWORD_FILE=/etc/btproxy.uipass
-# API encryption key (base64 of 32 bytes, like ESPHome's api: encryption: key:). The API is encrypted when this
-# file exists; create it with: (umask 077; head -c 32 /dev/urandom | base64 > /etc/btproxy.key)
-# (generate the key elsewhere if busybox has no base64). A file keeps the key out of ps, unlike -encryption-key.
-KEY_FILE=/etc/btproxy.key
-
 start_service() {
+	local name friendly_name area ui ui_password_file encryption_key_file config bluetoothd_restart extra_args
+	config_load btproxy
+	config_get name main name ''
+	config_get friendly_name main friendly_name ''
+	config_get area main area ''
+	config_get ui main ui ''
+	config_get ui_password_file main ui_password_file /etc/btproxy.uipass
+	config_get encryption_key_file main encryption_key_file /etc/btproxy.key
+	config_get config main config /etc/btproxy.json
+	config_get bluetoothd_restart main bluetoothd_restart # no default: empty turns it off
+	config_get extra_args main extra_args ''
+
 	procd_open_instance
-	procd_set_param command /usr/bin/btproxy -config "$CONFIG" -bluetoothd-restart "/etc/init.d/bluetoothd restart"
-	[ -n "$NAME" ] && procd_append_param command -name "$NAME"
-	[ -n "$FRIENDLY_NAME" ] && procd_append_param command -friendly-name "$FRIENDLY_NAME"
-	[ -n "$AREA" ] && procd_append_param command -area "$AREA"
-	[ -n "$UI" ] && procd_append_param command -ui "$UI"
-	[ -n "$UI" ] && [ -f "$UI_PASSWORD_FILE" ] && procd_append_param command -ui-password-file "$UI_PASSWORD_FILE"
-	[ -f "$KEY_FILE" ] && procd_append_param command -encryption-key-file "$KEY_FILE"
+	procd_set_param command /usr/bin/btproxy -config "$config"
+	[ -n "$name" ] && procd_append_param command -name "$name"
+	[ -n "$friendly_name" ] && procd_append_param command -friendly-name "$friendly_name"
+	[ -n "$area" ] && procd_append_param command -area "$area"
+	[ -n "$bluetoothd_restart" ] && procd_append_param command -bluetoothd-restart "$bluetoothd_restart"
+	[ -n "$ui" ] && procd_append_param command -ui "$ui"
+	[ -n "$ui" ] && [ -f "$ui_password_file" ] && procd_append_param command -ui-password-file "$ui_password_file"
+	[ -f "$encryption_key_file" ] && procd_append_param command -encryption-key-file "$encryption_key_file"
+	# shellcheck disable=SC2086 # one option holds several flags
+	[ -n "$extra_args" ] && procd_append_param command $extra_args
 	procd_set_param respawn 3600 10 0
 	procd_set_param stderr 1
 	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger btproxy
 }

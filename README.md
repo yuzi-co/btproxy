@@ -84,8 +84,9 @@ Raspberry Pi is not among the tested setups above yet.
 
 ## Install
 
-Download the archive for your platform from the [releases](https://github.com/yuzi-co/btproxy/releases) and
-unpack it (`tar xzf` on Linux and OpenWrt, a `.zip` on Windows), then see [Deploy](#deploy).
+OpenWrt has packages: see [Deploy](#deploy). Otherwise, download the archive for your platform from the
+[releases](https://github.com/yuzi-co/btproxy/releases) and unpack it (`tar xzf` on Linux, a `.zip` on Windows),
+then see [Deploy](#deploy).
 With Go 1.27.3 or newer: `go install github.com/yuzi-co/btproxy/cmd/btproxy@latest`. There is also a
 [Docker image](#docker) for Linux hosts.
 
@@ -430,18 +431,45 @@ triggers on the proxy's own problems: that can restart it in a loop.
 
 ## Deploy
 
-OpenWrt 23.05:
+### OpenWrt
 
-- `opkg install kmod-bluetooth bluez-daemon` and the stick's firmware (such as `rtl8761bu-firmware`).
-- Copy the build (`dist/btproxy-mipsle` for MT7620/MT7621) to `/usr/bin/btproxy` and
-  [contrib/openwrt/btproxy.init](contrib/openwrt/btproxy.init) to `/etc/init.d/btproxy`.
-- Encryption: key in `/etc/btproxy.key` (`chmod 600`); the init script passes it when present.
-- `/var/lib/bluetooth` is on tmpfs: link it to flash (such as `/etc/bluetooth/keys`) so bonds survive a reboot.
-- Settings page: the init script passes `-config /etc/btproxy.json`. Set `UI` in it (such as `UI=:8080`), put a
-  password in `/etc/btproxy.uipass` (`chmod 600`), set `NAME`, `FRIENDLY_NAME` and `AREA` to `""` to make them
-  editable, then `/etc/init.d/btproxy restart`. An older init script without `-config` makes the page read-only.
-- List the binary, init script, bonds directory, key, `/etc/btproxy.json` and `/etc/btproxy.uipass` in
-  `/etc/sysupgrade.conf`.
+Install the package for your router's instruction set: `mipsle` (such as MT7620 and MT7621), `armv7`, `arm64` or
+`amd64`. There is no build for big-endian MIPS, which includes ath79. The dependencies, BlueZ and the kernel's
+Bluetooth support, come from OpenWrt's feeds, and the service starts straight away.
+
+OpenWrt 25.12 and newer:
+
+```sh
+apk update
+apk add --allow-untrusted https://github.com/yuzi-co/btproxy/releases/latest/download/btproxy-linux-mipsle.apk
+```
+
+OpenWrt 24.10 and older, tested on 23.05 and 24.10:
+
+```sh
+opkg update
+opkg install https://github.com/yuzi-co/btproxy/releases/latest/download/btproxy-linux-mipsle.ipk
+```
+
+`--allow-untrusted` is there because the packages are not signed. Run the same commands to upgrade: settings stay.
+
+- Flash: the package takes about 1.6 MB and BlueZ with its dependencies roughly 3 to 5 MB, on top of the stick's
+  firmware. The package manager stops if that does not fit, which can leave a partial install: check `df /overlay`
+  first. The service stops during an upgrade, so an upgrade needs no more free space than it adds.
+- The stick's firmware is yours to pick: install it too, such as `rtl8761bu-firmware`.
+- Settings: `/etc/config/btproxy`, then `uci commit btproxy && /etc/init.d/btproxy reload`. An option set there
+  locks that field on the settings page, and an empty one leaves the field to the page. `extra_args` takes any
+  other flag.
+- Encryption: put the key in `/etc/btproxy.key` (`chmod 600`), and the service passes it when the file exists.
+  OpenWrt's busybox has no `base64`, so generate the key elsewhere.
+- Settings page: set `ui` (such as `:8080`) and put a password in `/etc/btproxy.uipass` (`chmod 600`).
+- `/var/lib/bluetooth` is on tmpfs: link it to flash, to `/etc/bluetooth/keys`, so bonds survive a reboot.
+- `sysupgrade` keeps the settings, the key, the page password and `/etc/bluetooth/keys`. It does not keep packages,
+  so install this one again afterwards.
+
+To install by hand, copy the binary to `/usr/bin/btproxy`,
+[btproxy.init](contrib/openwrt/btproxy.init) to `/etc/init.d/btproxy` and
+[btproxy.config](contrib/openwrt/btproxy.config) to `/etc/config/btproxy`.
 
 systemd (Raspberry Pi OS, Debian): copy the binary to `/usr/local/bin/btproxy` and
 [contrib/systemd/btproxy.service](contrib/systemd/btproxy.service) to `/etc/systemd/system/`, then
