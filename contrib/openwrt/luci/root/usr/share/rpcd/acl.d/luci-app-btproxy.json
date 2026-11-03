@@ -1,0 +1,31 @@
+{
+	"luci-app-btproxy": {
+		"description": "Configure and control btproxy. Can replace the encryption key, but not read it.",
+		"read": {
+			"uci": [ "btproxy" ],
+			"ubus": {
+				"service": [ "list" ],
+				"file": [ "exec", "stat" ]
+			},
+			"file": {
+				"/etc/init.d/btproxy enabled": [ "exec" ],
+				"/sbin/logread -e btproxy": [ "exec" ],
+				"/etc/btproxy.key": [ "list" ]
+			}
+		},
+		"write": {
+			"uci": [ "btproxy" ],
+			"ubus": {
+				"file": [ "exec", "write", "remove" ]
+			},
+			"file": {
+				"/etc/init.d/btproxy start": [ "exec" ],
+				"/etc/init.d/btproxy stop": [ "exec" ],
+				"/etc/init.d/btproxy restart": [ "exec" ],
+				"/etc/init.d/btproxy enable": [ "exec" ],
+				"/etc/init.d/btproxy disable": [ "exec" ],
+				"/etc/btproxy.key": [ "write" ]
+			}
+		}
+	}
+}

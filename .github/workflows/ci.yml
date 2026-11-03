@@ -100,5 +100,8 @@ jobs:
             apk add -q tar
             contrib/openwrt/package.sh 0.0.1 amd64 work/amd64-old work/old
             contrib/openwrt/package.sh 0.0.2 amd64 work/amd64-new work/new
-            contrib/openwrt/package.sh 0.0.2 mipsle work/mipsle-new work/new'
+            contrib/openwrt/package.sh 0.0.2 mipsle work/mipsle-new work/new
+            contrib/openwrt/package-luci.sh 0.0.2 work/new'
+      - name: Check the LuCI view's syntax
+        run: node -e "new Function(require('fs').readFileSync('contrib/openwrt/luci/htdocs/luci-static/resources/view/btproxy.js', 'utf8'))"
       - run: test/openwrt_package.sh "${{ matrix.version }}" work/new work/old
