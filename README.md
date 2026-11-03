@@ -411,7 +411,7 @@ These report health. A change of the Bluetooth stack's state is sent at once, so
 | `bluetooth_stack` | binary sensor | on while the stack works, also while scanning is idle, paused or switched off; off when the scanner has failed or the adapter is off |
 | `adapter_address` | text | the adapter's Bluetooth address |
 | `advertisement_source` | text | `HCI monitor` or `Rebuilt from BlueZ`; Linux only |
-| `last_problem` | text | the latest warning or error logged, cut to 255 characters, or `none` |
+| `last_problem` | text | the latest warning or error logged, cut to 255 characters, or `none`; the warning about an unencrypted API does not count |
 
 ### Controls
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -258,5 +259,20 @@ func TestProblemWatch(t *testing.T) {
 	p.Write([]byte("time=x level=WARN msg=\"scanning stopped\" err=y\n"))
 	if l, _ := p.lastProblem(); l != `level=WARN msg="scanning stopped" err=y` {
 		t.Fatalf("%q", l)
+	}
+}
+
+// The warning about an unencrypted API is a choice made at install time, and logged at every start: as the
+// latest problem it would hide that nothing has gone wrong.
+func TestProblemWatchIgnoresTheEncryptionWarning(t *testing.T) {
+	var out bytes.Buffer
+	p := problemWatch{w: &out}
+	line := "time=x level=WARN msg=\"" + notEncryptedWarning + "\" listen=[::]:6053\n"
+	p.Write([]byte(line))
+	if l, _ := p.lastProblem(); l != "" {
+		t.Errorf("counted as a problem: %q", l)
+	}
+	if out.String() != line {
+		t.Errorf("not logged: %q", out.String())
 	}
 }

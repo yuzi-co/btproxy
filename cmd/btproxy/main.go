@@ -167,8 +167,7 @@ func main() {
 			fatal(log, "listen", "adapter", n.adapter, "err", err)
 		}
 		if key == nil && !loopbackAddr(l.Addr().String()) {
-			log.Warn("API is not encrypted: any host that can reach it can use the proxy and its bonded devices; "+
-				"see -encryption-key-file", "listen", l.Addr().String())
+			log.Warn(notEncryptedWarning, "listen", l.Addr().String())
 		}
 		log.Info("btproxy started", "version", version, "listen", l.Addr().String(), "name", n.name,
 			"adapter", n.adapter, "bt_mac", ble.FormatMAC(adapter.MAC()), "encryption", key != nil)
