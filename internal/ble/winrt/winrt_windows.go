@@ -375,8 +375,7 @@ func (a *Adapter) watcherStopped(w *watcher, code bluetooth.BluetoothError) {
 
 // received turns one WinRT advertisement event into an Advert. It runs on a WinRT thread.
 func (a *Adapter) received(args *advertisement.BluetoothLEAdvertisementReceivedEventArgs) {
-	fn := a.fn.Load()
-	if fn == nil {
+	if a.fn.Load() == nil {
 		return
 	}
 	addr, err := args.GetBluetoothAddress()
@@ -394,7 +393,17 @@ func (a *Adapter) received(args *advertisement.BluetoothLEAdvertisementReceivedE
 		data = appendSections(data, adv)
 		adv.Release()
 	}
-	(*fn)(ble.Advert{Addr: addr, AddrType: at, RSSI: int8(max(rssi, -128)), Data: data})
+	a.deliver(ble.Advert{Addr: addr, AddrType: at, RSSI: int8(max(rssi, -128)), Data: data})
+}
+
+// deliver passes an advertisement on, unless it is empty. Windows reports a scan response as an entry of its own
+// in active mode, and an empty one tells Home Assistant nothing: the device's advertisements arrive anyway.
+func (a *Adapter) deliver(ad ble.Advert) {
+	fn := a.fn.Load()
+	if fn == nil || len(ad.Data) == 0 {
+		return
+	}
+	(*fn)(ad)
 }
 
 // appendSections rebuilds the raw AD structures of an advertisement from its data sections.
