@@ -33,18 +33,21 @@ func TestRecoverySteps(t *testing.T) {
 		defer mu.Unlock()
 		steps = append(steps, s)
 	}
+	bz.mu.Lock()
 	bz.onPowerOff = func() { step("power") }
+	bz.mu.Unlock()
 	marker := filepath.Join(t.TempDir(), "restarted")
-	a, err := Open("hci0", Options{RestartCmd: "touch '" + marker + "'"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	a.resetUSB = func() error {
+	resetUSBDevice = func(string) error {
 		if _, err := os.Stat(marker); err == nil {
 			step("restart")
 		}
 		step("usb")
 		return nil
+	}
+	t.Cleanup(func() { resetUSBDevice = usbReset })
+	a, err := Open("hci0", Options{RestartCmd: "touch '" + marker + "'", USBReset: true})
+	if err != nil {
+		t.Fatal(err)
 	}
 	a.SetScanMode(ble.ScanActive)
 	stop, _ := a.Scan(func(ble.Advert) {})
@@ -76,7 +79,9 @@ func TestRecoveryWithOnlyThePowerStep(t *testing.T) {
 	defer bz.bus.Close()
 	bz.setWedged(true)
 	off := make(chan struct{}, 8)
+	bz.mu.Lock()
 	bz.onPowerOff = func() { off <- struct{}{} }
+	bz.mu.Unlock()
 	a, err := Open("hci0", Options{})
 	if err != nil {
 		t.Fatal(err)
