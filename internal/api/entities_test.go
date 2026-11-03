@@ -18,13 +18,18 @@ import (
 
 func startServerConfig(t *testing.T, cfg Config, a ble.Adapter) *testClient {
 	t.Helper()
+	return startServerLog(t, cfg, a, logx.Discard())
+}
+
+func startServerLog(t *testing.T, cfg Config, a ble.Adapter, log *logx.Logger) *testClient {
+	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
 	cfg.Name = "test"
-	go NewServer(cfg, a, logx.Discard()).Serve(l)
+	go NewServer(cfg, a, log).Serve(l)
 	c, err := net.Dial("tcp", l.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -395,6 +400,56 @@ func TestRestartButtonDoesNotWaitForAStuckDisconnect(t *testing.T) {
 	case <-restarted:
 	case <-time.After(5 * time.Second):
 		t.Fatal("restart waited for the stuck disconnect")
+	}
+}
+
+// logBuffer collects log lines from the server's goroutines.
+type logBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// Pressing a button is not a problem, so it must not show up as the last problem.
+func TestRestartButtonPressesAreNotWarnings(t *testing.T) {
+	var logs logBuffer
+	restarted := make(chan struct{})
+	a := &stackAdapter{available: true, pressed: make(chan struct{}, 1)}
+	cfg := Config{Restart: func() { close(restarted) }}
+	tc := startServerLog(t, cfg, a, logx.New(&logs, logx.LevelInfo, nil))
+	tc.pressButton("restart_bluetooth")
+	<-a.pressed
+	tc.pressButton("restart_proxy")
+	<-restarted
+	if got := logs.String(); !strings.Contains(got, "restart requested") || strings.Contains(got, "level=WARN") {
+		t.Errorf("log:\n%s", got)
+	}
+}
+
+// A press that is refused is a problem: the stack that needed restarting did not get restarted.
+func TestRefusedStackRestartIsAWarning(t *testing.T) {
+	var logs logBuffer
+	a := &stackAdapter{available: true, err: errors.New("too soon"), pressed: make(chan struct{}, 1)}
+	tc := startServerLog(t, Config{}, a, logx.New(&logs, logx.LevelInfo, nil))
+	tc.pressButton("restart_bluetooth")
+	<-a.pressed
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(logs.String(), "level=WARN") {
+		if time.Now().After(deadline) {
+			t.Fatalf("log:\n%s", logs.String())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

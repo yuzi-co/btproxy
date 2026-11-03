@@ -82,7 +82,7 @@ func (s *Server) initEntities() {
 	if sr, ok := s.adapter.(ble.StackRestarter); ok && sr.StackRestartable() {
 		s.buttons = append(s.buttons, button{id: "restart_bluetooth", name: "Restart Bluetooth stack",
 			icon: "mdi:bluetooth-off", press: func(c *client) {
-				c.log.Warn("Bluetooth stack restart requested through the API")
+				c.log.Info("Bluetooth stack restart requested through the API")
 				if err := sr.RestartStack(); err != nil {
 					c.log.Warn("Bluetooth stack not restarted", "err", err)
 				}
@@ -111,7 +111,7 @@ func stateText(t string) string {
 
 // restartProxy drops the connections, so the devices are free for whoever connects next, and restarts.
 func (s *Server) restartProxy(c *client) {
-	c.log.Warn("restart requested through the API")
+	c.log.Info("restart requested through the API")
 	done := make(chan struct{})
 	go func() {
 		s.disconnectAll()
