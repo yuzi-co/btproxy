@@ -175,6 +175,12 @@ type AdvertSourcer interface {
 	AdvertSource() string
 }
 
+// ScanSettinger is implemented by adapters that can fall back from the scan mode asked for.
+type ScanSettinger interface {
+	// ScanSetting names how the adapter scans, for a person to read.
+	ScanSetting() string
+}
+
 // ErrNotConnected is returned for requests on a closed connection.
 var ErrNotConnected = errors.New("not connected")
 

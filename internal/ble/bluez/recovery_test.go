@@ -159,6 +159,129 @@ func TestPowerCycleKeepsPassiveScanning(t *testing.T) {
 	}
 }
 
+func noMonitor(a *Adapter) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.noMonitor
+}
+
+// A monitor call that timed out still runs when bluetoothd wakes up, and its Release then comes while the scanner
+// has registered the monitors again. Seen on a real router, where it cost two thirds of the advertisements until
+// bluetoothd restarted.
+func TestLateReleaseOfOurOwnCallKeepsPassiveScanning(t *testing.T) {
+	addr := startBus(t)
+	bz := startFakeBlueZ(t, addr, true)
+	defer bz.bus.Close()
+	a, err := Open("hci0", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetScanMode(ble.ScanPassive)
+	stop, _ := a.Scan(func(ble.Advert) {})
+	defer stop()
+	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+
+	hung := make(chan struct{})
+	bz.mu.Lock()
+	bz.hung = hung
+	bz.mu.Unlock()
+	a.unregisterMonitors() // times out
+	bz.mu.Lock()
+	bz.hung = nil
+	bz.mu.Unlock()
+	a.mu.Lock()
+	a.monitorUp = true
+	a.mu.Unlock()
+	close(hung)
+	time.Sleep(200 * time.Millisecond)
+	if noMonitor(a) {
+		t.Error("passive scanning given up over our own call")
+	}
+}
+
+// Whatever made BlueZ drop the monitor, the scanner tries again: giving up until bluetoothd restarts cost two
+// thirds of the advertisements for as long as nobody noticed.
+func TestReleasedMonitorIsTriedAgain(t *testing.T) {
+	addr := startBus(t)
+	bz := startFakeBlueZ(t, addr, true)
+	defer bz.bus.Close()
+	a, err := Open("hci0", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.ScanSetting(); got != "Passive" && got != "Active" {
+		t.Errorf("setting %q before scanning", got)
+	}
+	a.SetScanMode(ble.ScanPassive)
+	stop, _ := a.Scan(func(ble.Advert) {})
+	defer stop()
+	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	if got := a.ScanSetting(); got != "Passive" {
+		t.Errorf("setting %q while passive", got)
+	}
+
+	bz.releaseMonitors()
+	waitFor(t, "active after the release", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	if got := a.ScanSetting(); got != "Active, passive unavailable" {
+		t.Errorf("setting %q in the fallback", got)
+	}
+	waitFor(t, "passive again", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	if got := a.ScanSetting(); got != "Passive" {
+		t.Errorf("setting %q after the retry", got)
+	}
+}
+
+// A monitor BlueZ keeps refusing must not make the scanner restart every minute for ever.
+func TestMonitorRetryBacksOff(t *testing.T) {
+	saved := monitorRetry
+	monitorRetry = time.Minute
+	defer func() { monitorRetry = saved }()
+	a := &Adapter{}
+	a.log = logx.Discard()
+	a.kick = make(chan struct{}, 1)
+	now := time.Now()
+	for _, want := range []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute} {
+		a.monitorUp = true
+		a.monitorReleased()
+		if got := a.retryMonitorAt.Sub(now); got < want || got > want+time.Second {
+			t.Errorf("retry in %v, want %v", got, want)
+		}
+	}
+	for range 10 {
+		a.monitorUp = true
+		a.monitorReleased()
+	}
+	if got := time.Until(a.retryMonitorAt); got > monitorRetryMax {
+		t.Errorf("retry in %v, past the limit", got)
+	}
+	a.lastRelease = time.Now().Add(-2 * monitorRetryMax) // it held for a long time, so start over
+	a.monitorUp = true
+	a.monitorReleased()
+	if got := time.Until(a.retryMonitorAt); got > time.Minute+time.Second {
+		t.Errorf("retry in %v after a long quiet time", got)
+	}
+}
+
+// Without the monitor API nothing changes by retrying, so only a bluetoothd restart clears that.
+func TestMissingMonitorAPIIsNotTriedAgain(t *testing.T) {
+	addr := startBus(t)
+	bz := startFakeBlueZ(t, addr, false)
+	defer bz.bus.Close()
+	a, err := Open("hci0", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetScanMode(ble.ScanPassive)
+	stop, _ := a.Scan(func(ble.Advert) {})
+	defer stop()
+	waitFor(t, "active", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	starts, _ := bz.calls()
+	time.Sleep(3 * monitorRetry)
+	if now, _ := bz.calls(); now != starts {
+		t.Errorf("discovery restarted %d times", now-starts)
+	}
+}
+
 // No step while a connect runs: each one would end it.
 func TestNoRecoveryDuringAConnect(t *testing.T) {
 	a := &Adapter{}

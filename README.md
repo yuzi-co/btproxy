@@ -313,7 +313,10 @@ is unavailable): running, idle (no subscriber or paused for a connect), failed (
 (adapter off and cannot be powered on).
 
 Passive scanning uses BlueZ advertisement monitors: BlueZ 5.56+, kernel 5.10+ and `bluetoothd --experimental`
-(`-E`); otherwise the proxy scans actively and retries passive after a `bluetoothd` restart. OpenWrt's
+(`-E`); otherwise the proxy scans actively and retries passive after a `bluetoothd` restart. If BlueZ drops monitors
+it had accepted, the proxy scans actively for a minute and tries again, waiting longer each time up to 30 minutes.
+Active scanning without monitors can cost most of the advertisements with the HCI monitor, since the controller then
+filters duplicates: the `scan_setting` sensor shows it. OpenWrt's
 `bluez-daemon` starts `bluetoothd -n`: change `/etc/init.d/bluetoothd` to
 `procd_set_param command "$PROG" -n -E` (also enables `ConnectDevice`) and list it in `/etc/sysupgrade.conf`;
 a package upgrade overwrites it.
@@ -431,6 +434,7 @@ These report health. A change of the Bluetooth stack's state is sent at once, so
 | `bluetooth_stack` | binary sensor | on while the stack works, also while scanning is idle, paused or switched off; off when the scanner has failed or the adapter is off |
 | `adapter_address` | text | the adapter's Bluetooth address |
 | `advertisement_source` | text | `HCI monitor` or `Rebuilt from BlueZ`; Linux only |
+| `scan_setting` | text | `Passive`, `Active` or `Active, passive unavailable`; Linux only |
 | `last_problem` | text | the latest warning or error logged, cut to 255 characters, or `none`; the warning about an unencrypted API does not count |
 
 ### Controls

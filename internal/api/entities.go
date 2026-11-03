@@ -66,6 +66,10 @@ func (s *Server) initEntities() {
 		s.textSensors = append(s.textSensors, textSensor{id: "advertisement_source", name: "Advertisement source",
 			icon: "mdi:access-point", value: as.AdvertSource})
 	}
+	if ss, ok := s.adapter.(ble.ScanSettinger); ok {
+		s.textSensors = append(s.textSensors, textSensor{id: "scan_setting", name: "Scan setting",
+			icon: "mdi:radar", value: ss.ScanSetting})
+	}
 	if s.cfg.LastProblem != nil {
 		s.textSensors = append(s.textSensors, textSensor{id: "last_problem", name: "Last problem",
 			icon: "mdi:alert-circle-outline", value: func() string {
