@@ -80,7 +80,7 @@ type Options struct {
 	RawAdverts RawMode
 	// PauseOnConnect stops scanning while a connect is in progress (see pause.go).
 	PauseOnConnect bool
-	// ConnectRetries is how often a connect that failed at once on the radio is retried (see retry.go).
+	// ConnectRetries is how often a connect that failed on the radio or lost the link early is retried (see retry.go).
 	ConnectRetries int
 	// Log receives the adapter's log lines; nil discards them.
 	Log *logx.Logger
@@ -560,7 +560,9 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	// One deadline for every attempt, retries included.
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	log := a.log.With("addr", ble.FormatMAC(addr))
+	var connectTook time.Duration
 	retries, err := a.retry.Do(func() error {
+		start := time.Now()
 		err := a.connect(ctx, p, addr, addrType, known)
 		var de dbus.Error
 		if errors.As(err, &de) && (known && noObject(de.Name) || !known && de.Name == "org.bluez.Error.AlreadyExists") {
@@ -568,9 +570,13 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 			known = !known
 			err = a.connect(ctx, p, addr, addrType, known)
 		}
-		return err
+		connectTook = time.Since(start)
+		if err != nil {
+			return err
+		}
+		return c.awaitResolved()
 	}, func(err error) bool {
-		if !radioFailure(err) {
+		if !errors.Is(err, errLinkLost) && !(radioFailure(err) && connectTook <= retryFast) {
 			var de dbus.Error
 			errors.As(err, &de)
 			log.Debug("connect failed, not a radio failure", "err", err, "name", de.Name)
@@ -601,17 +607,6 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		log.Info("connected after retries", "retries", retries)
 	}
 
-	v, err := a.getProperty(p, ifDevice+".ServicesResolved")
-	if err == nil && v.Value() == true {
-		c.markResolved()
-	}
-	select {
-	case <-c.resolved:
-	case <-c.lostCh():
-		return fail(errors.New("link lost while resolving services"))
-	case <-time.After(resolveTimeout):
-		return fail(errors.New("services not resolved in time"))
-	}
 	if err := c.loadGATT(); err != nil {
 		return fail(err)
 	}
@@ -624,6 +619,29 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		return fail(errors.New("link lost while connecting"))
 	}
 	return c, nil
+}
+
+// awaitResolved waits for the services of a link that just came up. A link that dropped counts as lost even if
+// the services resolved first, since they went with it.
+func (c *conn) awaitResolved() error {
+	v, err := c.a.getProperty(c.path, ifDevice+".ServicesResolved")
+	if err == nil && v.Value() == true {
+		c.markResolved()
+	}
+	lost := c.lostCh()
+	select {
+	case <-c.resolvedCh():
+		select {
+		case <-lost:
+			return errLinkLost
+		default:
+			return nil
+		}
+	case <-lost:
+		return errLinkLost
+	case <-time.After(resolveTimeout):
+		return errors.New("services not resolved in time")
+	}
 }
 
 // connect connects a device BlueZ has an object for through Device1.Connect. For one it has none for, which
@@ -659,9 +677,6 @@ type conn struct {
 	path dbus.ObjectPath
 	ev   ble.Events
 
-	resolved     chan struct{}
-	resolvedOnce sync.Once
-
 	gattDB // set before Connect returns, read-only afterwards
 
 	evMu sync.Mutex // serializes notification delivery, so held values do not overtake later ones
@@ -669,6 +684,7 @@ type conn struct {
 	mu        sync.Mutex
 	up        bool // connected and reported to the caller
 	closed    bool
+	resolved  chan struct{} // closed when the services are resolved; replaced by rearm
 	lost      chan struct{} // closed when the link goes down; replaced by rearm
 	watched   bool          // the device's match rule is in place (see watchDevice)
 	notifying map[uint16]bool
@@ -688,7 +704,21 @@ type echo struct {
 	expires time.Time
 }
 
-func (c *conn) markResolved() { c.resolvedOnce.Do(func() { close(c.resolved) }) }
+func (c *conn) markResolved() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	select {
+	case <-c.resolved:
+	default:
+		close(c.resolved)
+	}
+}
+
+func (c *conn) resolvedCh() chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resolved
+}
 
 // unwatch drops the connection's match rule (see watchDevice) when it ends, whichever way.
 func (c *conn) unwatch() {
@@ -708,7 +738,7 @@ func (c *conn) lostCh() chan struct{} {
 }
 
 // rearm sets a connection that went down while connecting up for another attempt: the match rule, its
-// place in a.conns and a fresh lost channel.
+// place in a.conns and fresh channels.
 func (c *conn) rearm() error {
 	if err := c.a.watchDevice(c.path); err != nil {
 		return fmt.Errorf("match rule: %w", err)
@@ -724,6 +754,7 @@ func (c *conn) rearm() error {
 	c.mu.Lock()
 	c.watched = true
 	c.closed = false
+	c.resolved = make(chan struct{})
 	c.lost = make(chan struct{})
 	c.mu.Unlock()
 	return nil

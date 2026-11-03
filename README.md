@@ -142,7 +142,7 @@ Home Assistant discovers it over mDNS. Otherwise add it by hand: Add integration
 | `-scan-mode` | `active` | `active` or `passive` |
 | `-raw-adverts` | `auto` | `auto`, `on`, `off`: use the HCI monitor (bluez), see [Advertisements](#advertisements) |
 | `-scan-pause-on-connect` | `true` | stop scanning while connecting |
-| `-connect-retries` | 4 | retries of a connect that fails at once on the radio; `0` disables |
+| `-connect-retries` | 4 | retries of a connect that fails at once on the radio or, on BlueZ, loses the link before services resolve; `0` disables |
 | `-stall-timeout` | `3m` | restart active scanning after this long without advertisements; `0` disables (bluez) |
 | `-bluetoothd-restart` | | command run when `bluetoothd` hangs, such as `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"` |
 | `-usb-reset` | `false` | reset the adapter's USB device when nothing else brings scanning back (bluez); see [Hangs and recovery](#hangs-and-recovery) |
@@ -360,12 +360,15 @@ not pause scanning. Windows pauses the same way.
 
 On a router the stick also shares the air with the router's own 2.4 GHz Wi-Fi. On a test router with an RTL8761B a
 single attempt succeeded about 30% of the time, 45% with the Bluetooth channels under the router's Wi-Fi left out
-by hand. With retries a connect succeeded 45% of the time at two retries and 56% at four. Moving the stick away
-from the antennas with a USB extension cable is worth trying, though that has not been measured.
+by hand. With retries a connect succeeded 45% of the time at two retries and 56% at four. Retrying a link that
+dropped before its services resolved as well took it from 39 of 60 connects to 51 of 60, in alternating runs on
+the same evening. Moving the stick away from the antennas with a USB extension cable is worth trying, though that
+has not been measured.
 
 Connects that still fail within about half a second (`le-connection-abort-by-local`, or an error without
-message) are retried after 200 ms, still paused, up to `-connect-retries` times. Not retried: failures after
-3 s, other errors, withdrawn connects, and retries more than 5 s after the first attempt. A retried connect logs
+message) are retried after 200 ms, still paused, up to `-connect-retries` times. So is a link that comes up and
+drops before its services are resolved, usually a few seconds later. Not retried: those radio errors after 3 s,
+other errors, withdrawn connects, and retries more than 5 s after the first attempt. A retried connect logs
 `connected after retries`.
 
 ## Connection parameters
