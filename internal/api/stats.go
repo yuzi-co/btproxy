@@ -99,6 +99,11 @@ func (s *Server) initStats() {
 			icon: "mdi:restart", stateClass: stateTotalIncreasing,
 			value: func() (float32, bool) { return float32(rc.Restarts()), true }})
 	}
+	if rc, ok := s.adapter.(ble.RecoveryCounter); ok {
+		s.sensors = append(s.sensors, sensor{id: "adapter_recoveries", name: "Adapter recoveries",
+			icon: "mdi:restart-alert", stateClass: stateTotalIncreasing,
+			value: func() (float32, bool) { return float32(rc.Recoveries()), true }})
+	}
 	if _, ok := rssMiB(); ok {
 		s.sensors = append(s.sensors, sensor{id: "memory", name: "Memory", icon: "mdi:memory", unit: "MiB",
 			class: "data_size", accuracy: 1, stateClass: stateMeasurement, value: rssMiB})

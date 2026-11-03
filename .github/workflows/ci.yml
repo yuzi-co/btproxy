@@ -77,3 +77,28 @@ jobs:
             -backend fake -mdns=false -name e2e -mac 02:00:00:00:00:01 -listen 127.0.0.1:16055
           sleep 1
           python test/e2e.py 127.0.0.1 16055
+
+  openwrt:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["23.05.5", "24.10.8", "25.12.6"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build packages
+        run: |
+          mkdir -p work/new work/old
+          export CGO_ENABLED=0 GOOS=linux
+          GOARCH=amd64 go build -ldflags="-X main.version=0.0.1" -o work/amd64-old ./cmd/btproxy
+          GOARCH=amd64 go build -ldflags="-X main.version=0.0.2" -o work/amd64-new ./cmd/btproxy
+          GOARCH=mipsle GOMIPS=softfloat go build -ldflags="-X main.version=0.0.2" -o work/mipsle-new ./cmd/btproxy
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.23 sh -c '
+            apk add -q tar
+            contrib/openwrt/package.sh 0.0.1 amd64 work/amd64-old work/old
+            contrib/openwrt/package.sh 0.0.2 amd64 work/amd64-new work/new
+            contrib/openwrt/package.sh 0.0.2 mipsle work/mipsle-new work/new'
+      - run: test/openwrt_package.sh "${{ matrix.version }}" work/new work/old

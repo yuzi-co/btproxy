@@ -84,8 +84,9 @@ Raspberry Pi is not among the tested setups above yet.
 
 ## Install
 
-Download the archive for your platform from the [releases](https://github.com/yuzi-co/btproxy/releases) and
-unpack it (`tar xzf` on Linux and OpenWrt, a `.zip` on Windows), then see [Deploy](#deploy).
+OpenWrt has packages: see [Deploy](#deploy). Otherwise, download the archive for your platform from the
+[releases](https://github.com/yuzi-co/btproxy/releases) and unpack it (`tar xzf` on Linux, a `.zip` on Windows),
+then see [Deploy](#deploy).
 With Go 1.27.3 or newer: `go install github.com/yuzi-co/btproxy/cmd/btproxy@latest`. There is also a
 [Docker image](#docker) for Linux hosts.
 
@@ -141,9 +142,10 @@ Home Assistant discovers it over mDNS. Otherwise add it by hand: Add integration
 | `-scan-mode` | `active` | `active` or `passive` |
 | `-raw-adverts` | `auto` | `auto`, `on`, `off`: use the HCI monitor (bluez), see [Advertisements](#advertisements) |
 | `-scan-pause-on-connect` | `true` | stop scanning while connecting |
-| `-connect-retries` | 2 | retries of a connect that fails at once on the radio; `0` disables |
+| `-connect-retries` | 4 | retries of a connect that fails at once on the radio; `0` disables |
 | `-stall-timeout` | `3m` | restart active scanning after this long without advertisements; `0` disables (bluez) |
 | `-bluetoothd-restart` | | command run when `bluetoothd` hangs, such as `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"` |
+| `-usb-reset` | `false` | reset the adapter's USB device when nothing else brings scanning back (bluez); see [Hangs and recovery](#hangs-and-recovery) |
 | `-agent` | `true` | register a BlueZ pairing agent |
 | `-adv-allow`, `-adv-deny`, `-adv-deny-random` | | see [Advertisement filter](#advertisement-filter) |
 | `-encryption-key`, `-encryption-key-file` | | see [Encryption](#encryption); also `$BTPROXY_ENCRYPTION_KEY` |
@@ -194,7 +196,7 @@ without `-ui`): one request per connection, 16 KB body, 10 s per exchange, 8 con
 ## Windows
 
 Windows 11 (tested) and Windows 10 2004+ (untested), pure Go over WinRT. Uses the default adapter, which must support LE and the central
-role; `-adapter`, `-agent`, `-stall-timeout`, `-bluetoothd-restart` and `-raw-adverts` have no effect.
+role; `-adapter`, `-agent`, `-stall-timeout`, `-bluetoothd-restart`, `-usb-reset` and `-raw-adverts` have no effect.
 
 - Tray menu: status, Start with Windows, Settings..., Open log, Quit. Quit, logoff and shutdown withdraw mDNS.
 - Start with Windows writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\btproxy` without flags, so
@@ -333,11 +335,20 @@ proxy detects it by: D-Bus calls timing out after 10 s (disconnects after 30 s; 
 own 30 s limits), a health-check property read every minute, and in active mode no advertisement for
 `-stall-timeout` (which restarts discovery).
 
-After two stalls or timeouts, each within 10 minutes of the previous (and, without the HCI monitor, no
-advertisement in between), it runs `-bluetoothd-restart` via `/bin/sh -c` (at most every 10 minutes, killed
-after 30 s); the contrib scripts set it. Without it the proxy keeps retrying and reporting failed. After a
-restart, adapter loss or power-off, it reports connections dropped, powers the adapter on, resumes scanning and
-registers the agent again.
+From the second stall or timeout, each within 10 minutes of the previous (and, without the HCI monitor, no
+advertisement in between), every further one takes the next step:
+
+1. Power-cycle the adapter through BlueZ. If `bluetoothd` does not answer, this goes straight to step 2.
+2. Run `-bluetoothd-restart` via `/bin/sh -c`, killed after 30 s; the contrib scripts set it.
+3. With `-usb-reset`, reset the adapter's USB device: the driver sets the adapter up again, loading its firmware
+   if it uses any.
+
+Each step runs at most every 10 minutes and logs a warning, and none runs during a connect. All of them drop the
+connections. Without a step left the proxy keeps retrying and reporting failed. After a restart, adapter loss or
+power-off, it reports connections dropped, powers the adapter on, resumes scanning and registers the agent again.
+
+`-usb-reset` is off by default: a reset that fails can lose the adapter until it is plugged in again. It needs
+write access to `/dev/bus/usb`, which the Docker example does not give.
 
 ### Scan pause and connect retries
 
@@ -346,6 +357,11 @@ scanning and reports idle. Otherwise the kernel resumes scanning once the link i
 half the connects then failed with HCI reason 0x3e. Overlapping connects share one pause, capped at 60 s. It
 cannot stop scanning the kernel does for another pending connect or a `bluetoothd` auto-reconnect. Pairing does
 not pause scanning. Windows pauses the same way.
+
+On a router the stick also shares the air with the router's own 2.4 GHz Wi-Fi. On a test router with an RTL8761B a
+single attempt succeeded about 30% of the time, 45% with the Bluetooth channels under the router's Wi-Fi left out
+by hand. With retries a connect succeeded 45% of the time at two retries and 56% at four. Moving the stick away
+from the antennas with a USB extension cable is worth trying, though that has not been measured.
 
 Connects that still fail within about half a second (`le-connection-abort-by-local`, or an error without
 message) are retried after 200 ms, still paused, up to `-connect-retries` times. Not retried: failures after
@@ -402,6 +418,7 @@ at start. Entity keys are hashes of the object ids, stable across versions.
 | `active_connections` | | established connections |
 | `free_connection_slots` | | of `-connections` |
 | `bluetoothd_restarts` | | restarts by the watchdog (`-bluetoothd-restart`); bluez backend only |
+| `adapter_recoveries` | | power cycles and USB resets by the watchdog; bluez backend only |
 | `memory` | MiB | resident memory, from `/proc/self/statm`; Linux only |
 
 These report health. A change of the Bluetooth stack's state is sent at once, so an automation can alert on it.
@@ -430,18 +447,45 @@ triggers on the proxy's own problems: that can restart it in a loop.
 
 ## Deploy
 
-OpenWrt 23.05:
+### OpenWrt
 
-- `opkg install kmod-bluetooth bluez-daemon` and the stick's firmware (such as `rtl8761bu-firmware`).
-- Copy the build (`dist/btproxy-mipsle` for MT7620/MT7621) to `/usr/bin/btproxy` and
-  [contrib/openwrt/btproxy.init](contrib/openwrt/btproxy.init) to `/etc/init.d/btproxy`.
-- Encryption: key in `/etc/btproxy.key` (`chmod 600`); the init script passes it when present.
-- `/var/lib/bluetooth` is on tmpfs: link it to flash (such as `/etc/bluetooth/keys`) so bonds survive a reboot.
-- Settings page: the init script passes `-config /etc/btproxy.json`. Set `UI` in it (such as `UI=:8080`), put a
-  password in `/etc/btproxy.uipass` (`chmod 600`), set `NAME`, `FRIENDLY_NAME` and `AREA` to `""` to make them
-  editable, then `/etc/init.d/btproxy restart`. An older init script without `-config` makes the page read-only.
-- List the binary, init script, bonds directory, key, `/etc/btproxy.json` and `/etc/btproxy.uipass` in
-  `/etc/sysupgrade.conf`.
+Install the package for your router's instruction set: `mipsle` (such as MT7620 and MT7621), `armv7`, `arm64` or
+`amd64`. There is no build for big-endian MIPS, which includes ath79. The dependencies, BlueZ and the kernel's
+Bluetooth support, come from OpenWrt's feeds, and the service starts straight away.
+
+OpenWrt 25.12 and newer:
+
+```sh
+apk update
+apk add --allow-untrusted https://github.com/yuzi-co/btproxy/releases/latest/download/btproxy-linux-mipsle.apk
+```
+
+OpenWrt 24.10 and older, tested on 23.05 and 24.10:
+
+```sh
+opkg update
+opkg install https://github.com/yuzi-co/btproxy/releases/latest/download/btproxy-linux-mipsle.ipk
+```
+
+`--allow-untrusted` is there because the packages are not signed. Run the same commands to upgrade: settings stay.
+
+- Flash: the package takes about 1.6 MB and BlueZ with its dependencies roughly 3 to 5 MB, on top of the stick's
+  firmware. The package manager refuses when that does not fit. opkg asks for the whole package to be free even
+  for an upgrade, which replaces the old copy: if `df /overlay` shows that it does fit, add `--force-space`.
+- The stick's firmware is yours to pick: install it too, such as `rtl8761bu-firmware`.
+- Settings: `/etc/config/btproxy`, then `uci commit btproxy && /etc/init.d/btproxy reload`. An option set there
+  locks that field on the settings page, and an empty one leaves the field to the page. `extra_args` takes any
+  other flag.
+- Encryption: put the key in `/etc/btproxy.key` (`chmod 600`), and the service passes it when the file exists.
+  OpenWrt's busybox has no `base64`, so generate the key elsewhere.
+- Settings page: set `ui` (such as `:8080`) and put a password in `/etc/btproxy.uipass` (`chmod 600`).
+- `/var/lib/bluetooth` is on tmpfs: link it to flash, to `/etc/bluetooth/keys`, so bonds survive a reboot.
+- `sysupgrade` keeps the settings, the key, the page password and `/etc/bluetooth/keys`. It does not keep packages,
+  so install this one again afterwards.
+
+To install by hand, copy the binary to `/usr/bin/btproxy`,
+[btproxy.init](contrib/openwrt/btproxy.init) to `/etc/init.d/btproxy` and
+[btproxy.config](contrib/openwrt/btproxy.config) to `/etc/config/btproxy`.
 
 systemd (Raspberry Pi OS, Debian): copy the binary to `/usr/local/bin/btproxy` and
 [contrib/systemd/btproxy.service](contrib/systemd/btproxy.service) to `/etc/systemd/system/`, then
@@ -469,8 +513,8 @@ Or use [contrib/docker/compose.yaml](contrib/docker/compose.yaml). Flags go afte
 - Docker Desktop on Windows or macOS cannot reach the host's adapter, because containers run in a VM. Use the
   Windows binary instead.
 - The proxy cannot restart a hung `bluetoothd` on the host: the image has no shell for `-bluetoothd-restart`, so
-  there is no Restart Bluetooth stack button either. It keeps retrying and reports failed until the host's
-  `bluetoothd` is restarted.
+  there is no Restart Bluetooth stack button either. It power-cycles the adapter, then keeps retrying and reports
+  failed until the host's `bluetoothd` is restarted.
 - Passive scanning and `ConnectDevice` depend on the host's `bluetoothd --experimental`, as in [Run](#run).
 - For encryption, mount the key file read-only and pass `-encryption-key-file`. For the settings page, pass
   `-ui`, `-ui-password-file` and a `-config` file in a mounted directory.

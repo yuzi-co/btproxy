@@ -42,7 +42,8 @@ type fakeBlueZ struct {
 	stops       int                      // StopDiscovery calls
 	dupData     bool                     // DuplicateData of the last discovery filter
 	wedge       chan struct{}            // while set, StartDiscovery waits for it to close, as a wedged bluetoothd does
-	hung        chan struct{}            // while set, property reads wait for it to close too
+	hung        chan struct{}            // while set, property reads and writes wait for it to close too
+	onPowerOff  func()                   // called when a client powers the adapter off
 	devices     map[dbus.ObjectPath]bool // announced with InterfacesAdded
 	connectFail bool                     // Device1.Connect fails
 	rssi        int16                    // RSSI threshold of the last discovery filter, 0 for none
@@ -181,7 +182,16 @@ func (p fakeProps) Get(iface, name string) (dbus.Variant, *dbus.Error) {
 }
 
 func (p fakeProps) Set(iface, name string, v dbus.Variant) *dbus.Error {
+	p.f.mu.Lock()
+	hung, onOff := p.f.hung, p.f.onPowerOff
+	p.f.mu.Unlock()
+	if hung != nil {
+		<-hung
+	}
 	if name == "Powered" {
+		if v.Value() != true && onOff != nil {
+			onOff()
+		}
 		go p.f.setPowered(v.Value() == true)
 	}
 	return nil
@@ -300,6 +310,12 @@ type fakeMonitorMgr struct{ f *fakeBlueZ }
 
 // RegisterMonitor reads the application's objects as BlueZ does and counts the valid monitors.
 func (m fakeMonitorMgr) RegisterMonitor(sender dbus.Sender, root dbus.ObjectPath) *dbus.Error {
+	m.f.mu.Lock()
+	already := m.f.registered > 0
+	m.f.mu.Unlock()
+	if already {
+		return dbus.NewError("org.bluez.Error.AlreadyExists", []any{"Already Exists"})
+	}
 	var objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant
 	if err := m.f.bus.Object(string(sender), root).Call(ifObjManager+".GetManagedObjects", 0).Store(&objs); err != nil {
 		return dbus.NewError("org.bluez.Error.Failed", []any{err.Error()})

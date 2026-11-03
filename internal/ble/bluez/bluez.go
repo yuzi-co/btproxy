@@ -74,6 +74,8 @@ type Options struct {
 	// RestartCmd is a shell command that restarts bluetoothd when scanning stalls or bluetoothd stops
 	// answering repeatedly; empty disables it.
 	RestartCmd string
+	// USBReset lets the watchdog reset the adapter's USB device when nothing else brought scanning back.
+	USBReset bool
 	// RawAdverts selects where advertisements come from (see raw.go).
 	RawAdverts RawMode
 	// PauseOnConnect stops scanning while a connect is in progress (see pause.go).
@@ -114,6 +116,9 @@ func Open(name string, opt Options) (*Adapter, error) {
 	a.log = opt.Log.With("adapter", string(a.path))
 	a.stallTimeout, a.restartCmd, a.pauseOnConnect = opt.StallTimeout, opt.RestartCmd, opt.PauseOnConnect
 	a.retry = connectRetry(opt.ConnectRetries)
+	if opt.USBReset {
+		a.resetUSB = func() error { return resetUSBDevice(name) }
+	}
 	v, err := a.getProperty(a.path, ifAdapter+".Address")
 	if err != nil {
 		return nil, fmt.Errorf("adapter %s: %w", name, err)

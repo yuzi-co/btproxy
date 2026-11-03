@@ -44,6 +44,7 @@ var backends = map[string]func(adapter string, log *logx.Logger) (ble.Adapter, e
 var (
 	useAgent          bool
 	stallTimeout      time.Duration
+	usbReset          bool
 	bluetoothdRestart string
 	rawAdverts        string
 	scanPause         bool
@@ -82,11 +83,13 @@ func main() {
 		"restart active scanning after this long without advertisements, 0 to disable (bluez backend)")
 	flag.StringVar(&bluetoothdRestart, "bluetoothd-restart", "",
 		"shell command that restarts bluetoothd when scanning keeps stalling or it stops answering (bluez backend)")
+	flag.BoolVar(&usbReset, "usb-reset", false,
+		"reset the adapter's USB device when nothing else brings scanning back (bluez backend)")
 	flag.StringVar(&rawAdverts, "raw-adverts", "auto",
 		"read advertisements from the HCI monitor: auto, on or off (bluez backend; needs CAP_NET_RAW)")
 	flag.BoolVar(&scanPause, "scan-pause-on-connect", true,
 		"stop scanning while a connection is being made, like ESPHome (bluez and winrt backends)")
-	flag.IntVar(&connectRetries, "connect-retries", 2,
+	flag.IntVar(&connectRetries, "connect-retries", 4,
 		"retry a connect that fails at once on the radio (HCI 0x3e) this many times, 0 to disable (bluez and winrt backends)")
 	flag.Parse()
 	settingsErr := loadSettings(*configFile)
