@@ -154,6 +154,13 @@ type RestartCounter interface {
 	Restarts() uint64
 }
 
+// RecoveryCounter is implemented by adapters whose watchdog can do more than restart the Bluetooth stack, for
+// the proxy's diagnostic sensors.
+type RecoveryCounter interface {
+	// Recoveries is how many times the adapter was power-cycled or reset since it was opened.
+	Recoveries() uint64
+}
+
 // StackRestarter is implemented by adapters that can restart their Bluetooth stack on request.
 type StackRestarter interface {
 	// StackRestartable tells whether a restart is possible here, such as with a command configured.

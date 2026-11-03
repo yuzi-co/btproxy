@@ -32,8 +32,15 @@ var (
 	pingEvery = time.Minute
 )
 
-// restartAfter is how many stalls or unanswered calls in a row make the supervisor restart bluetoothd.
+// restartAfter is how many stalls or unanswered calls in a row make the supervisor start on the recovery steps.
 const restartAfter = 2
+
+// The recovery steps, in the order they are tried, each only when the one before did not bring scanning back.
+const (
+	stepPowerCycle = iota // the adapter's power, through BlueZ: needs no setup
+	stepRestart           // restartCmd
+	stepUSB               // the stick's USB device, which also loads its firmware again: only with resetUSB
+)
 
 // scanState is the scanner part of Adapter. One goroutine, supervise, makes every scan-related D-Bus call,
 // so mode switches, recovery and scan start and stop never race. Fields are guarded by Adapter.mu except
@@ -59,23 +66,28 @@ type scanState struct {
 	// Set by Open.
 	stallTimeout   time.Duration
 	restartCmd     string
+	resetUSB       func() error // nil turns the USB step off
 	pauseOnConnect bool
 
 	// The supervisor's own.
-	armed      bool
-	armedMode  ble.ScanMode
-	armedEpoch int
-	armedMons  bool        // monitors registered next to active discovery (see dupFilterOff)
-	quietMons  atomic.Bool // the monitors registered match nothing (see quiet); read by the monitor objects
-	lastErr    string
-	seen       int       // adverts when reconcile last looked
-	quietSince time.Time // when seen last changed or the scan was armed
-	strikes    int       // stalls and unanswered calls since bluetoothd last answered, or the last restart
-	lastStrike time.Time
-	lastPing   time.Time     // when bluetoothd was last checked; zero forces a check
-	unanswered atomic.Int32  // calls from connections that bluetoothd did not answer, for the supervisor to count
-	pausedAt   time.Time     // when scanning was stopped for a connect; zero when not paused
-	restarts   atomic.Uint64 // bluetoothd restarts started, for Restarts
+	armed          bool
+	armedMode      ble.ScanMode
+	armedEpoch     int
+	armedMons      bool        // monitors registered next to active discovery (see dupFilterOff)
+	quietMons      atomic.Bool // the monitors registered match nothing (see quiet); read by the monitor objects
+	lastErr        string
+	seen           int       // adverts when reconcile last looked
+	quietSince     time.Time // when seen last changed or the scan was armed
+	strikes        int       // stalls and unanswered calls since bluetoothd last answered, or the last step
+	step           int       // the recovery step to try next
+	lastStrike     time.Time
+	lastPowerCycle time.Time
+	lastUSBReset   time.Time
+	lastPing       time.Time     // when bluetoothd was last checked; zero forces a check
+	unanswered     atomic.Int32  // calls from connections that bluetoothd did not answer, for the supervisor to count
+	pausedAt       time.Time     // when scanning was stopped for a connect; zero when not paused
+	restarts       atomic.Uint64 // bluetoothd restarts started, for Restarts
+	recoveries     atomic.Uint64 // power cycles and USB resets done, for Recoveries
 }
 
 func (a *Adapter) initScan() error {
@@ -308,22 +320,81 @@ func (a *Adapter) stalled(want bool) bool {
 }
 
 // strike counts a stall or a call bluetoothd did not answer. After restartAfter in a row, each within
-// restartEvery of the one before, it restarts bluetoothd with restartCmd, at most once per restartEvery for
-// all adapters together (see bluetoothdRestarts); the recovery from a bluetoothd restart does the rest.
+// restartEvery of the one before, every further strike takes a recovery step. Every step drops the connections,
+// so none runs while a connect is in progress, and the strike stays counted for the next time.
 func (a *Adapter) strike() {
 	if time.Since(a.lastStrike) > restartEvery { // strikes far apart are unrelated
-		a.strikes = 0
+		a.strikes, a.step = 0, stepPowerCycle
 	}
 	a.lastStrike = time.Now()
 	a.strikes++
-	if a.restartCmd == "" || a.strikes < restartAfter || !bluetoothdRestarts.claim() {
+	if a.strikes < restartAfter {
 		return
 	}
-	a.strikes = 0
-	a.log.Warn("bluetoothd not responding, restarting it")
-	if err := a.runRestart(); err != nil {
-		a.log.Warn("bluetoothd restart failed", "err", err)
+	a.mu.Lock()
+	connecting := a.connecting > 0
+	a.mu.Unlock()
+	if !connecting {
+		a.takeStep()
 	}
+}
+
+// takeStep takes the next recovery step. Each is limited to once per restartEvery, the restart command for all
+// adapters together (see bluetoothdRestarts); the recovery from a bluetoothd restart or an adapter coming back
+// does the rest.
+func (a *Adapter) takeStep() {
+	if a.step == stepPowerCycle {
+		a.step = stepRestart
+		if a.powerCycle() {
+			return
+		}
+	}
+	if a.step == stepRestart {
+		if a.restartCmd != "" {
+			if !bluetoothdRestarts.claim() {
+				return
+			}
+			a.step = stepUSB
+			a.log.Warn("bluetoothd not responding, restarting it")
+			if err := a.runRestart(); err != nil {
+				a.log.Warn("bluetoothd restart failed", "err", err)
+			}
+			return
+		}
+		a.step = stepUSB
+	}
+	a.step, a.strikes = stepPowerCycle, 0
+	if a.resetUSB == nil || !a.lastUSBReset.IsZero() && time.Since(a.lastUSBReset) < restartEvery {
+		return
+	}
+	a.lastUSBReset = time.Now()
+	a.log.Warn("still no scanning, resetting the USB device")
+	if err := a.resetUSB(); err != nil {
+		a.log.Warn("USB reset failed", "err", err)
+		return
+	}
+	a.recoveries.Add(1)
+}
+
+// powerCycle turns the adapter off and on through BlueZ, and tells whether it did. A bluetoothd that does not
+// answer cannot do this, so it says no at the first timeout and the caller goes on to restarting it.
+func (a *Adapter) powerCycle() bool {
+	if !a.lastPowerCycle.IsZero() && time.Since(a.lastPowerCycle) < restartEvery {
+		return false
+	}
+	a.lastPowerCycle = time.Now()
+	a.log.Warn("no scanning, power-cycling the adapter")
+	if err := a.setProperty(a.path, ifAdapter+".Powered", false); err != nil {
+		a.log.Warn("power-cycling the adapter failed", "err", err)
+		return false
+	}
+	// If this fails the adapter stays off, and reconcile keeps trying to power it on.
+	if err := a.setProperty(a.path, ifAdapter+".Powered", true); err != nil {
+		a.log.Warn("power-cycling the adapter failed", "err", err)
+		return false
+	}
+	a.recoveries.Add(1)
+	return true
 }
 
 // runRestart runs restartCmd and waits for it, up to restartTimeout.
@@ -365,6 +436,9 @@ func restartEnv(env []string) []string {
 
 // Restarts implements ble.RestartCounter: the bluetoothd restarts the supervisor started.
 func (a *Adapter) Restarts() uint64 { return a.restarts.Load() }
+
+// Recoveries implements ble.RecoveryCounter: the power cycles and USB resets the supervisor did.
+func (a *Adapter) Recoveries() uint64 { return a.recoveries.Load() }
 
 // bluetoothdRestarts spaces bluetoothd restarts across the adapters of the process. There is one bluetoothd:
 // a restart one adapter's supervisor asks for is a restart for all of them, and the others recover from it

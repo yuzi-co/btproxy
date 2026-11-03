@@ -3,6 +3,7 @@
 package bluez
 
 import (
+	"errors"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -170,6 +171,13 @@ func (a *Adapter) registerMonitors(quiet bool) error {
 	a.monitorUp = true
 	a.mu.Unlock()
 	err := a.call(a.path, ifMonitorManager+".RegisterMonitor", monitorRoot).Err
+	var de dbus.Error
+	if errors.As(err, &de) && de.Name == "org.bluez.Error.AlreadyExists" {
+		// BlueZ kept the application, as across a power cycle, and the scanner did not unregister it. Start over,
+		// so that BlueZ reads the monitors as they are now.
+		a.call(a.path, ifMonitorManager+".UnregisterMonitor", monitorRoot)
+		err = a.call(a.path, ifMonitorManager+".RegisterMonitor", monitorRoot).Err
+	}
 	if err != nil {
 		a.mu.Lock()
 		a.monitorUp = false
