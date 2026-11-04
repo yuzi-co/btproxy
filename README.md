@@ -200,6 +200,7 @@ Then check the log for `backend chosen`. The first start that finds BlueZ bonds 
 `/var/lib/bluetooth`, so bonded devices do not need pairing again. Once this backend has a bond file for the adapter,
 later BlueZ bonds are not copied. To go back, enable and start
 `bluetoothd` (on systemd, `systemctl unmask bluetooth` first) and restart the proxy. Devices paired since then need pairing again, as BlueZ does not have their keys.
+[Moving from BlueZ](docs/migrating-from-bluez.md) has the full steps.
 
 ### Several adapters
 
@@ -533,7 +534,8 @@ dependency: both package managers remove `bluez-daemon` as no longer needed. Bon
 start, though `/var/lib/bluetooth` must be on flash for that, as described below. A `bluez-daemon` you installed by
 name stays, and so does the use of BlueZ. To keep BlueZ, on apk run `apk add bluez-daemon` before the upgrade; on opkg
 run `opkg install bluez-daemon` after it, then `/etc/init.d/bluetoothd enable`, `/etc/init.d/bluetoothd start` and
-`/etc/init.d/btproxy restart`. opkg leaves `dbus` and some libraries behind, which `opkg remove` can clear.
+`/etc/init.d/btproxy restart`. opkg leaves `dbus` and some libraries behind, which `opkg remove` can clear. See
+[Moving from BlueZ](docs/migrating-from-bluez.md).
 
 OpenWrt 25.12 and newer:
 
