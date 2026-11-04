@@ -1,6 +1,8 @@
 [Unit]
 Description=btproxy, ESPHome-compatible Bluetooth proxy
-Wants=bluetooth.service network-online.target
+# Starts after bluetoothd if that is enabled, without starting it: Wants= would bring back a bluetoothd stopped for the
+# kernel backend.
+Wants=network-online.target
 After=bluetooth.service network-online.target
 
 [Service]

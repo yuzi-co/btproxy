@@ -173,23 +173,23 @@ On Linux, the default `-backend auto` picks one at start and logs why:
 container. A `bluetoothd` that starts after the proxy is not stopped: the proxy logs an error within a minute, and
 needs a restart to change backend. The contrib scripts start the proxy after `bluetoothd`.
 
-The kernel backend has run on one setup so far: the router under Status, as root, with bonds copied from BlueZ. It has
-not been tried on a Raspberry Pi's built-in adapter, in Docker, without root, or pairing a new device. It does not
-reduce the radio failures described under
-[Scan pause and connect retries](#scan-pause-and-connect-retries): they came at about the same rate as on BlueZ.
+The kernel backend has run on the router under Status and on a Raspberry Pi 3's built-in adapter, as root. It has not
+been tried in Docker, without root, or pairing a new device. It does not reduce the radio failures described under
+[Scan pause and connect retries](#scan-pause-and-connect-retries): on the router they came at about the same rate as
+on BlueZ.
 
 To move to it, stop `bluetoothd` and restart the proxy:
 
 ```sh
 # OpenWrt
 /etc/init.d/bluetoothd stop; /etc/init.d/bluetoothd disable; /etc/init.d/btproxy restart
-# systemd
-systemctl disable --now bluetooth; systemctl restart btproxy
+# systemd: mask, as a unit that wants bluetooth.service starts it again if it is only disabled
+systemctl mask --now bluetooth; systemctl restart btproxy
 ```
 
 Then check the log for `backend chosen`. The first start with an adapter copies its bonds from `/var/lib/bluetooth`,
 so bonded devices do not need pairing again; later BlueZ bonds are not copied. To go back, enable and start
-`bluetoothd` and restart the proxy. Devices paired since then need pairing again, as BlueZ does not have their keys.
+`bluetoothd` (on systemd, `systemctl unmask bluetooth` first) and restart the proxy. Devices paired since then need pairing again, as BlueZ does not have their keys.
 
 ### Several adapters
 
@@ -617,6 +617,10 @@ On BlueZ, to pair outside Home Assistant, use `bluetoothctl`, or move a bond: st
 rewrites `info` on exit), copy `/var/lib/bluetooth/<adapter MAC>/<device MAC>/` to the new adapter's directory,
 start `bluetoothd`. Bonds belong to an adapter address, so this only works for the same adapter (such as the same
 stick in another machine). A device can be bonded to several adapters, each paired while it is in pairing mode.
+
+A bonded device may ignore every other adapter, which then sees HCI reason 0x3e on every connect, whatever the signal.
+A Tion Breezer 4S did: 52 of 52 links failed from a Raspberry Pi at -39 to -52 dBm, and all 9 worked once the Pi's
+adapter had the bonded adapter's address and key.
 
 ## Test
 
