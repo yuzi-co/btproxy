@@ -23,6 +23,8 @@ const (
 	defaultMaxStall = 30 * time.Minute
 	// defaultPauseWait is how long a connect waits for scanning to stop before it goes ahead anyway.
 	defaultPauseWait = 2 * time.Second
+	// defaultStackCheck is how often the supervisor looks for a bluetoothd that started after the proxy.
+	defaultStackCheck = time.Minute
 
 	mtuTimeout = 10 * time.Second
 )
@@ -70,6 +72,7 @@ type Options struct {
 	tick            time.Duration
 	maxStallBackoff time.Duration
 	pauseWait       time.Duration
+	stackCheck      time.Duration
 	resetUSB        func(adapter string) error
 }
 
@@ -128,6 +131,7 @@ type Adapter struct {
 	stallStep   int
 	stallNext   time.Time
 	stallWait   time.Duration
+	stackSeen   bool // bluetoothd was running at the last check
 
 	lastAdvert atomic.Int64 // UnixNano
 	activeScan atomic.Bool
@@ -165,6 +169,9 @@ func open(name string, opt Options, sys system) (*Adapter, error) {
 	}
 	if opt.pauseWait == 0 {
 		opt.pauseWait = defaultPauseWait
+	}
+	if opt.stackCheck == 0 {
+		opt.stackCheck = defaultStackCheck
 	}
 	a := &Adapter{name: name, index: uint16(idx), opt: opt, log: opt.Log, sys: sys, mode: ble.ScanPassive,
 		conns: map[uint64]*conn{}, kick: make(chan struct{}, 1), stop: make(chan struct{}),
@@ -424,6 +431,8 @@ func (a *Adapter) supervise() {
 	defer close(a.stopped)
 	t := time.NewTicker(a.opt.tick)
 	defer t.Stop()
+	stack := time.NewTicker(a.opt.stackCheck)
+	defer stack.Stop()
 	for {
 		a.reconcile()
 		select {
@@ -431,8 +440,20 @@ func (a *Adapter) supervise() {
 			return
 		case <-a.kick:
 		case <-t.C:
+		case <-stack.C:
+			a.checkStack()
 		}
 	}
+}
+
+// checkStack reports a bluetoothd that started after the proxy, which open cannot refuse. Nothing here can stop it,
+// and exiting would only take the proxy away too, so this leaves the choice to whoever reads the error.
+func (a *Adapter) checkStack() {
+	running := a.sys.stackRunning()
+	if running && !a.stackSeen {
+		a.log.Error("bluetoothd started and now drives the adapter too, which can break scanning and connections: stop it, or restart the proxy with -backend bluez")
+	}
+	a.stackSeen = running
 }
 
 func (a *Adapter) reconcile() {

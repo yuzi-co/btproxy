@@ -70,6 +70,8 @@ var settings = []struct {
 		{name: "stall-timeout", label: "Restart scanning after silence", backend: "bluez,kernel",
 			help: "Such as 3m; 0 disables."},
 		{name: "bluetoothd-restart", label: "bluetoothd restart command", backend: "bluez", readOnly: true},
+		{name: "bond-dir", label: "Directory for bonded devices' keys", backend: "kernel",
+			help: "Bonds already in the old directory stay there, so devices may need pairing again."},
 	}},
 	{"Logging", []setting{
 		{name: "debug", label: "Debug logging", kind: ui.Bool},

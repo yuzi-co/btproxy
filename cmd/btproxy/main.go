@@ -30,8 +30,9 @@ var version = "dev"
 // esphomeVersion is the ESPHome release btproxy reports itself as (DeviceInfo and mDNS).
 const esphomeVersion = "2026.10.0"
 
-// defaultBackend is the -backend default; the winrt backend makes itself the default on Windows.
-var defaultBackend = "bluez"
+// defaultBackend is the -backend default; winrt makes itself the default on Windows, and a build without BlueZ
+// makes kernel the default.
+var defaultBackend = "auto"
 
 // backends maps -backend names to constructors; bluez and kernel register themselves on Linux, winrt on Windows.
 var backends = map[string]func(adapter string, log *logx.Logger) (ble.Adapter, error){
@@ -40,9 +41,13 @@ var backends = map[string]func(adapter string, log *logx.Logger) (ble.Adapter, e
 	},
 }
 
+// autoBackend picks the backend for -backend auto; set on Linux, the only place with a choice.
+var autoBackend func(log *logx.Logger) string
+
 // Flags read by the bluez backend; scan-pause-on-connect and connect-retries also by winrt; stall-timeout, usb-reset,
-// scan-pause-on-connect and connect-retries also by kernel.
+// scan-pause-on-connect and connect-retries also by kernel. bond-dir only by kernel.
 var (
+	bondDir           string
 	useAgent          bool
 	stallTimeout      time.Duration
 	usbReset          bool
@@ -58,7 +63,8 @@ func main() {
 	friendly := flag.String("friendly-name", "", "friendly name (default: the node name)")
 	area := flag.String("area", "", "suggested area")
 	listen := flag.String("listen", ":6053", "API listen address; with several adapters, the first of consecutive ports, or a comma-separated list")
-	backend := flag.String("backend", defaultBackend, "Bluetooth backend: bluez or kernel (Linux), winrt (Windows) or fake")
+	backend := flag.String("backend", defaultBackend,
+		"Bluetooth backend: auto (kernel, or bluez while bluetoothd runs), kernel or bluez (deprecated) on Linux, winrt on Windows, or fake")
 	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter, or a comma-separated list served as one device each (bluez and kernel backends)")
 	maxConns := flag.Int("connections", 3, "maximum simultaneous peripheral connections")
 	scanMode := flag.String("scan-mode", "active", "scanner mode: active or passive (bluez: needs bluetoothd --experimental, else active)")
@@ -79,6 +85,7 @@ func main() {
 	uiAddr := flag.String("ui", defaultUI, "serve the settings page on this address, such as :8080 (needs -ui-password, except on loopback on Windows)")
 	uiPass := flag.String("ui-password", "", "settings page password, any user name (prefer -ui-password-file or $BTPROXY_UI_PASSWORD)")
 	uiPassFile := flag.String("ui-password-file", "", "file holding the settings page password")
+	flag.StringVar(&bondDir, "bond-dir", "/etc/btproxy", "directory for the keys of bonded devices (kernel backend)")
 	flag.BoolVar(&useAgent, "agent", true, "register a BlueZ pairing agent (bluez backend)")
 	flag.DurationVar(&stallTimeout, "stall-timeout", 3*time.Minute,
 		"restart active scanning after this long without advertisements, 0 to disable (bluez and kernel backends)")
@@ -132,9 +139,15 @@ func main() {
 	if err != nil {
 		fatal(log, "advertisement filter", "err", err)
 	}
+	if *backend == "auto" && autoBackend != nil {
+		*backend = autoBackend(log) // the settings page and the sensors go by the flag's value
+	}
 	newAdapter, ok := backends[*backend]
 	if !ok {
 		fatal(log, "unknown backend", "backend", *backend)
+	}
+	if *backend == "bluez" {
+		log.Warn(bluezDeprecatedWarning)
 	}
 	if advFilter != nil {
 		log.Info("advertisement filter", "filter", advFilter.String())

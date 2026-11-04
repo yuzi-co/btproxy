@@ -46,16 +46,22 @@ type linuxSystem struct{}
 
 func (linuxSystem) openMonitor(index uint16) (advSource, error) { return hci.Open(index) }
 
-// stackRunning looks for bluetoothd among the processes. It may be in another namespace and not visible here,
-// as with a container, in which case the two will conflict: the documentation says so.
 func (linuxSystem) stackRunning() bool {
+	running, _ := StackRunning()
+	return running
+}
+
+// StackRunning tells whether bluetoothd is running. The error says that the kernel could not be asked, which is also
+// a reason this backend cannot work, as it reads the same monitor. The processes are checked as well, for a
+// bluetoothd that has not opened its control socket yet.
+func StackRunning() (bool, error) {
 	comms, _ := filepath.Glob("/proc/[0-9]*/comm")
 	for _, p := range comms {
 		if b, err := os.ReadFile(p); err == nil && strings.TrimSpace(string(b)) == "bluetoothd" {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return hci.StackRunning()
 }
 
 func (linuxSystem) openMgmt(index uint16, onEvent func(uint16, []byte)) (mgmtConn, error) {

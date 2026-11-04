@@ -33,7 +33,7 @@ type fakeKernel struct {
 	monitors  int
 	nextMon   uint16
 	discovery bool
-	running   bool // bluetoothd
+	running   atomic.Bool // bluetoothd
 
 	dial     func(sec bool) (socket, error)
 	dials    atomic.Int32
@@ -136,7 +136,7 @@ func (k *fakeKernel) dialATT(_, _ uint64, _ uint32, secure bool, _ func() bool) 
 	return k.dial(secure)
 }
 
-func (k *fakeKernel) stackRunning() bool { return k.running }
+func (k *fakeKernel) stackRunning() bool { return k.running.Load() }
 
 type fakeMonitor struct {
 	emit atomic.Pointer[func(ble.Advert)]
@@ -216,7 +216,7 @@ func TestOpenSetsUpController(t *testing.T) {
 
 func TestOpenRefusesWithBluetoothd(t *testing.T) {
 	k := newFakeKernel()
-	k.running = true
+	k.running.Store(true)
 	_, err := open("hci0", Options{BondDir: t.TempDir(), Log: logx.Discard()}, k)
 	if err == nil || !strings.Contains(err.Error(), "bluetoothd") {
 		t.Fatalf("got %v", err)
@@ -800,4 +800,43 @@ func TestRetryable(t *testing.T) {
 			t.Errorf("%s: %v", tc.name, got)
 		}
 	}
+}
+
+// syncBuffer collects log lines from the supervisor's goroutine.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// A bluetoothd that starts after the proxy, such as later in a boot, is not refused by the check in open. It gets
+// one error each time it appears, not one a minute.
+func TestBluetoothdStartingLaterIsReported(t *testing.T) {
+	var logs syncBuffer
+	k := newFakeKernel()
+	openTest(t, k, func(o *Options) {
+		o.Log = logx.New(&logs, logx.LevelInfo, nil)
+		o.stackCheck = time.Millisecond
+	})
+	k.running.Store(true)
+	eventually(t, "reported", func() bool { return strings.Contains(logs.String(), "bluetoothd started") })
+	time.Sleep(20 * time.Millisecond)
+	if n := strings.Count(logs.String(), "bluetoothd started"); n != 1 {
+		t.Errorf("reported %d times:\n%s", n, logs.String())
+	}
+	k.running.Store(false)
+	time.Sleep(20 * time.Millisecond)
+	k.running.Store(true)
+	eventually(t, "reported again", func() bool { return strings.Count(logs.String(), "bluetoothd started") == 2 })
 }
