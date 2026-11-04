@@ -292,6 +292,9 @@ func (a *Adapter) event(op uint16, data []byte) {
 		}
 	case evNewSettings:
 		if len(data) >= 4 && data[0]&settingPowered == 0 {
+			a.mu.Lock()
+			a.needSetup = true
+			a.mu.Unlock()
 			a.kickSupervisor()
 		}
 	case evNewLTK:
@@ -486,6 +489,9 @@ func (a *Adapter) reconcile() {
 			a.log.Warn("adapter setup failed", "err", err)
 			a.noteTimeout(err)
 			a.setStatus(ble.ScanFailed)
+			if want {
+				a.checkStall(true)
+			}
 			return
 		}
 		a.mu.Lock()
@@ -498,9 +504,12 @@ func (a *Adapter) reconcile() {
 	case err != nil:
 		a.log.Warn("scan", "err", err)
 		a.setStatus(ble.ScanFailed)
+		if want {
+			a.checkStall(true)
+		}
 	case want:
 		a.setStatus(ble.ScanRunning)
-		a.checkStall()
+		a.checkStall(false)
 	default:
 		a.stallStep = 0
 		a.setStatus(ble.ScanIdle) // nothing is wrong: no client wants scanning, or it is switched off
@@ -582,8 +591,10 @@ func (a *Adapter) monitorMissing() bool {
 
 // checkStall brings scanning back after a silence: first by registering the scan again, then by power-cycling
 // the controller, then by resetting its USB device, waiting longer after each round. An empty neighbourhood
-// looks the same, and so a live connection is not worth risking: with one, only the first step runs.
-func (a *Adapter) checkStall() {
+// looks the same, and so a live connection is not worth risking: with one, only the first step runs. failing says
+// that the commands of this pass failed: the controller is the problem then, so the connection does not hold back
+// recovery, though the steps are still spaced out.
+func (a *Adapter) checkStall(failing bool) {
 	if a.opt.StallTimeout <= 0 {
 		return
 	}
@@ -594,20 +605,20 @@ func (a *Adapter) checkStall() {
 	a.wedged = false
 	connected := len(a.conns) > 0
 	a.mu.Unlock()
-	if !wedged && now.Sub(last) < a.opt.StallTimeout {
+	if !failing && !wedged && now.Sub(last) < a.opt.StallTimeout {
 		a.stallStep, a.stallWait = 0, 0
 		return
 	}
-	if !wedged && now.Before(a.stallNext) {
+	if (failing || !wedged) && now.Before(a.stallNext) {
 		return
 	}
 	if a.stallWait == 0 {
 		a.stallWait = a.opt.StallTimeout
 	}
-	a.log.Warn("no advertisements, trying to bring scanning back", "silent", now.Sub(last).Round(time.Second),
-		"step", a.stallStep)
+	a.log.Warn("no advertisements or failing commands, trying to bring scanning back",
+		"silent", now.Sub(last).Round(time.Second), "step", a.stallStep, "failing", failing)
 	step := a.stallStep
-	if connected {
+	if connected && !failing {
 		step = 0
 	}
 	switch step {
@@ -633,6 +644,15 @@ func (a *Adapter) rebuildScan() {
 		a.monitor = 0
 		if _, err := a.mgmt.Command(opRemoveAdvMonitor, []byte{byte(h), byte(h >> 8)}, mgmtTimeout); err != nil {
 			a.log.Warn("removing the monitor", "err", err)
+		}
+	}
+	a.mu.Lock()
+	discovering := a.discovering
+	a.discovering = false
+	a.mu.Unlock()
+	if discovering {
+		if _, err := a.mgmt.Command(opStopDiscovery, []byte{addrTypeLEAll}, mgmtTimeout); err != nil {
+			a.log.Warn("stopping discovery", "err", err)
 		}
 	}
 	a.kickSupervisor()
@@ -772,15 +792,28 @@ func (a *Adapter) dial(addr uint64, addrType uint32, ev ble.Events) (*conn, erro
 	switch {
 	case errors.As(err, &ae): // the device has no MTU exchange: the link works, at the default MTU
 	case err != nil:
-		c.silence()
-		c.close()
-		return nil, fmt.Errorf("%w: %v", errLinkLost, err)
+		return nil, c.abandon(err)
 	}
+	// The loop removes a link that ended, so one that ended before this point must not be added after it.
 	a.mu.Lock()
+	select {
+	case <-c.done:
+		a.mu.Unlock()
+		return nil, c.abandon(c.linkErr())
+	default:
+	}
 	a.conns[addr] = c
 	a.mu.Unlock()
 	close(c.up)
 	return c, nil
+}
+
+// abandon ends a link Connect will not hand over, and releases its loop without reporting anything.
+func (c *conn) abandon(err error) error {
+	c.silence()
+	c.close()
+	close(c.up)
+	return fmt.Errorf("%w: %v", errLinkLost, err)
 }
 
 // conn implements ble.Conn: ATT and GATT come from attClient.

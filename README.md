@@ -384,8 +384,9 @@ extension on some Intel and Realtek). Kernel 5.15 turns the duplicate filter off
 
 The kernel backend restarts discovery after `-stall-timeout` without an advertisement, then power-cycles the adapter
 and, with `-usb-reset`, resets its USB device, waiting longer between tries up to 30 minutes. It does the same when a
-management command times out, and sets the adapter up again when it comes back. While a device is connected it only
-restarts discovery, which keeps the connection. It checks in passive mode too. The rest of this section is about BlueZ.
+management command times out or scanning cannot be set up, and sets the adapter up again when it comes back or something
+powers it off. While a device is connected it only restarts discovery, which keeps the connection, unless commands are
+failing. It checks in passive mode too. The rest of this section is about BlueZ.
 
 `bluetoothd` can hang while keeping its D-Bus name (BlueZ 5.66 with an RTL8761B: several times a night). The
 proxy detects it by: D-Bus calls timing out after 10 s (disconnects after 30 s; GATT, connect and pair have their

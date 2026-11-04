@@ -88,9 +88,13 @@ func (linuxSystem) openMgmt(index uint16, onEvent func(uint16, []byte)) (mgmtCon
 		}
 		return nil, err
 	}
-	m := &mgmtSocket{f: os.NewFile(uintptr(fd), "mgmt"), index: index, onEvent: onEvent, waiters: map[uint16][]chan mgmtReply{}}
+	m := newMgmtSocket(os.NewFile(uintptr(fd), "mgmt"), index, onEvent)
 	go m.read()
 	return m, nil
+}
+
+func newMgmtSocket(f *os.File, index uint16, onEvent func(uint16, []byte)) *mgmtSocket {
+	return &mgmtSocket{f: f, index: index, onEvent: onEvent, waiters: map[uint16][]mgmtWaiter{}}
 }
 
 func explainNoBluetooth(err error) error {
@@ -105,18 +109,50 @@ type mgmtReply struct {
 	err  error
 }
 
+// mgmtWaiter is a command waiting for its reply. addr is its device, for commands about one.
+type mgmtWaiter struct {
+	ch   chan mgmtReply
+	addr []byte
+}
+
 // mgmtSocket is the management socket, used for one controller. Commands may be in progress together, as a
-// pairing takes many seconds, so replies are matched to commands by opcode, first come first served.
+// pairing takes many seconds. Replies have no tag, so they are matched by opcode, and by device for commands that
+// name one, whose replies start with the same address. Otherwise the oldest command takes the reply, so a late
+// reply to a command without a device, which has given up, can still answer the next one with that opcode.
 type mgmtSocket struct {
 	f       *os.File
 	index   uint16
 	onEvent func(uint16, []byte)
 
 	mu      sync.Mutex
-	waiters map[uint16][]chan mgmtReply
+	waiters map[uint16][]mgmtWaiter
 }
 
 func (m *mgmtSocket) Close() error { return m.f.Close() }
+
+// deviceOf returns the struct mgmt_addr_info of a command about one device, or nil.
+func deviceOf(op uint16, param []byte) []byte {
+	switch op {
+	case opPairDevice, opDisconnect, opUnpairDevice, opUserConfirm:
+		if len(param) >= addrInfoSize {
+			return param[:addrInfoSize]
+		}
+	}
+	return nil
+}
+
+// takeWaiter removes and returns the waiter a reply belongs to, if any. reply is what follows the status. A reply too
+// short to name a device, such as Command Status, goes to the oldest.
+func (m *mgmtSocket) takeWaiter(cmd uint16, reply []byte) (mgmtWaiter, bool) {
+	q := m.waiters[cmd]
+	for i, w := range q {
+		if w.addr == nil || len(reply) < addrInfoSize || bytes.Equal(w.addr, reply[:addrInfoSize]) {
+			m.waiters[cmd] = append(q[:i:i], q[i+1:]...)
+			return w, true
+		}
+	}
+	return mgmtWaiter{}, false
+}
 
 func (m *mgmtSocket) Command(op uint16, param []byte, timeout time.Duration) ([]byte, error) {
 	b := binary.LittleEndian.AppendUint16(nil, op)
@@ -125,7 +161,7 @@ func (m *mgmtSocket) Command(op uint16, param []byte, timeout time.Duration) ([]
 	b = append(b, param...)
 	ch := make(chan mgmtReply, 1)
 	m.mu.Lock()
-	m.waiters[op] = append(m.waiters[op], ch)
+	m.waiters[op] = append(m.waiters[op], mgmtWaiter{ch: ch, addr: deviceOf(op, param)})
 	_, err := m.f.Write(b)
 	if err != nil {
 		q := m.waiters[op]
@@ -144,7 +180,7 @@ func (m *mgmtSocket) Command(op uint16, param []byte, timeout time.Duration) ([]
 		m.mu.Lock()
 		q := m.waiters[op]
 		for i, w := range q {
-			if w == ch {
+			if w.ch == ch {
 				m.waiters[op] = append(q[:i:i], q[i+1:]...)
 				break
 			}
@@ -182,9 +218,8 @@ func (m *mgmtSocket) read() {
 				r = mgmtReply{err: &MgmtError{Op: cmd, Status: st}}
 			}
 			m.mu.Lock()
-			if q := m.waiters[cmd]; len(q) > 0 {
-				q[0] <- r
-				m.waiters[cmd] = q[1:]
+			if w, ok := m.takeWaiter(cmd, data[3:]); ok {
+				w.ch <- r
 			}
 			m.mu.Unlock()
 		default:
@@ -209,6 +244,10 @@ func (s *attSocket) Secure() error {
 	}
 	var opErr error
 	cerr := raw.Control(func(fd uintptr) {
+		// The kernel refuses a request for security the link already has, with EINVAL.
+		if securityLevel(int(fd)) >= btSecurityMed {
+			return
+		}
 		if opErr = setSecurity(int(fd)); opErr != nil {
 			return
 		}
@@ -236,6 +275,15 @@ func (s *attSocket) Secure() error {
 		return cerr
 	}
 	return opErr
+}
+
+// securityLevel is the level of the socket's link, or 0 if the kernel does not say.
+func securityLevel(fd int) int {
+	sec, err := unix.GetsockoptString(fd, solBluetooth, btSecurity)
+	if err != nil || sec == "" {
+		return 0
+	}
+	return int(sec[0]) // struct bt_security starts with the level
 }
 
 func setSecurity(fd int) error {

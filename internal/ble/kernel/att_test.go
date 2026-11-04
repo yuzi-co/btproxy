@@ -36,6 +36,11 @@ type peripheral struct {
 	confirms  int
 	silent    bool // never answer: for the request timeout
 
+	noSecondary    bool // refuses secondary service discovery with Unsupported Group Type
+	prepareFailAt  int  // the nth Prepare Write, from 1, fails with Prepare Queue Full
+	prepareCorrupt bool // Prepare Write responses echo a changed value
+	prepares       int
+
 	in     chan []byte // towards the client
 	closed chan struct{}
 	once   sync.Once
@@ -119,6 +124,9 @@ func (p *peripheral) handle(b []byte) []byte {
 		p.mtu = min(int(u16(1)), p.maxMTU)
 		return binary.LittleEndian.AppendUint16([]byte{opMTURsp}, uint16(p.maxMTU))
 	case opReadGroupReq:
+		if p.noSecondary && u16(5) == uuidSecondary {
+			return attErrorPDU(op, u16(1), attErrUnsupportedType)
+		}
 		var rsp []byte
 		var size int
 		for _, a := range p.attrs {
@@ -222,8 +230,16 @@ func (p *peripheral) handle(b []byte) []byte {
 		p.written[u16(1)] = append([]byte(nil), b[3:]...)
 		return nil
 	case opPrepareReq:
+		p.prepares++
+		if p.prepares == p.prepareFailAt {
+			return attErrorPDU(op, u16(1), 0x09)
+		}
 		p.prepared = append(p.prepared, b[5:]...)
-		return append([]byte{opPrepareRsp}, b[1:]...)
+		rsp := append([]byte{opPrepareRsp}, b[1:]...)
+		if p.prepareCorrupt {
+			rsp[len(rsp)-1] ^= 0xff
+		}
+		return rsp
 	case opExecuteReq:
 		if b[1] == 1 {
 			p.written[1000] = p.prepared
@@ -431,6 +447,92 @@ func TestWriteLongUsesPreparedWrites(t *testing.T) {
 	}
 	if !bytes.Equal(p.wrote(1000), data) {
 		t.Errorf("prepared % x", p.wrote(1000))
+	}
+}
+
+// A long write that fails must leave nothing queued on the peripheral, or the next one commits it too.
+func TestWriteLongCancelledOnFailure(t *testing.T) {
+	p := heartRate()
+	p.prepareFailAt = 2
+	c := startClient(t, p, nil)
+	if err := c.Write(3, make([]byte, 50), true); err == nil {
+		t.Fatal("no error")
+	}
+	ops := p.ops()
+	if ops[len(ops)-1] != opExecuteReq {
+		t.Fatalf("requests % x", ops)
+	}
+	if len(p.prepared) != 0 || p.wrote(1000) != nil {
+		t.Errorf("left queued % x, committed % x", p.prepared, p.wrote(1000))
+	}
+}
+
+// The echo of a Prepare Write is there to catch a value that changed on the way.
+func TestWriteLongChecksTheEcho(t *testing.T) {
+	p := heartRate()
+	p.prepareCorrupt = true
+	c := startClient(t, p, nil)
+	if err := c.Write(3, make([]byte, 50), true); err == nil {
+		t.Fatal("no error")
+	}
+	if p.wrote(1000) != nil {
+		t.Errorf("committed % x", p.wrote(1000))
+	}
+	if ops := p.ops(); ops[len(ops)-1] != opExecuteReq {
+		t.Errorf("requests % x", ops)
+	}
+}
+
+func TestSecondaryServicesUnsupported(t *testing.T) {
+	p := heartRate()
+	p.noSecondary = true
+	c := startClient(t, p, nil)
+	svcs, err := c.Services()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(svcs) != 2 {
+		t.Errorf("%d services", len(svcs))
+	}
+}
+
+// indicating sends a Service Changed indication just before the answer to the first Find Information.
+type indicating struct {
+	*peripheral
+	once sync.Once
+}
+
+func (i *indicating) Write(b []byte) (int, error) {
+	if b[0] == opFindInfoReq {
+		i.once.Do(func() { i.push([]byte{opIndicate, 3, 0}) })
+	}
+	return i.peripheral.Write(b)
+}
+
+// The read loop must keep reading while a discovery waits for it, and what that discovery found is out of date.
+func TestServiceChangedDuringDiscovery(t *testing.T) {
+	p := newPeripheral(svc(1, 4, 0x1801), charDecl(2, 0x20, uuidServiceChanged),
+		&attr{handle: 3, uuid: uuidServiceChanged}, &attr{handle: 4, uuid: 0x2902})
+	c := newATTClient(&indicating{peripheral: p}, nil)
+	c.timeout = 300 * time.Millisecond
+	go c.run()
+	t.Cleanup(func() { p.Close() })
+	if _, err := c.Services(); err != nil {
+		t.Fatal(err)
+	}
+	asked := len(p.ops())
+	if _, err := c.Services(); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.ops()) == asked {
+		t.Error("kept the services found before the change")
+	}
+	asked = len(p.ops())
+	if _, err := c.Services(); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.ops()) != asked {
+		t.Error("discovered again with no new change")
 	}
 }
 

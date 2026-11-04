@@ -41,14 +41,15 @@ func isNotFound(err error) bool {
 func (c *attClient) Services() ([]ble.Service, error) {
 	c.gattMu.Lock()
 	defer c.gattMu.Unlock()
-	if c.services != nil {
+	changes := c.changes.Load() // read first: a change during discovery makes the result out of date
+	if c.services != nil && c.servicesGen == changes {
 		return c.services, nil
 	}
 	svcs, err := c.discover()
 	if err != nil {
 		return nil, err
 	}
-	c.services = svcs
+	c.services, c.servicesGen = svcs, changes
 	return svcs, nil
 }
 
@@ -67,6 +68,10 @@ func (c *attClient) discover() ([]ble.Service, error) {
 			rsp, err := c.request(req, opReadGroupRsp)
 			if isNotFound(err) {
 				break
+			}
+			var ae *ATTError
+			if kind == uuidSecondary && errors.As(err, &ae) && ae.Code == attErrUnsupportedType {
+				break // a device without secondary services may say so this way
 			}
 			if err != nil {
 				return nil, err

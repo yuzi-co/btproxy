@@ -61,6 +61,8 @@ const (
 
 	settingPowered = 1 << 0
 
+	addrInfoSize = 7 // struct mgmt_addr_info
+
 	ltkSize = 36 // struct mgmt_ltk_info
 	irkSize = 23 // struct mgmt_irk_info
 
@@ -110,7 +112,7 @@ func getAddr(b []byte) uint64 {
 
 // addrInfo is struct mgmt_addr_info for an LE device.
 func addrInfo(addr uint64, bdType byte) []byte {
-	b := make([]byte, 7)
+	b := make([]byte, addrInfoSize)
 	putAddr(b, addr)
 	b[6] = bdType
 	return b

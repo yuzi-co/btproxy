@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"slices"
 	"strings"
 	"sync"
@@ -761,6 +762,162 @@ func TestStallRecoveryLadder(t *testing.T) {
 	if a.Recoveries() == 0 {
 		t.Error("recoveries not counted")
 	}
+}
+
+func (k *fakeKernel) setHang(hang bool, ops ...uint16) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, op := range ops {
+		k.hang[op] = hang
+	}
+}
+
+func (k *fakeKernel) poweredOff() bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, p := range k.params[opSetPowered] {
+		if p[0] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// A controller that stops answering fails the commands of every pass, and is the case recovery is for.
+func TestRecoveryWhenCommandsKeepFailing(t *testing.T) {
+	k := newFakeKernel()
+	var resets atomic.Int32
+	a := openTest(t, k, func(o *Options) {
+		o.StallTimeout = 20 * time.Millisecond
+		o.resetUSB = func(string) error { resets.Add(1); return nil }
+		o.USBReset = true
+		o.maxStallBackoff = 40 * time.Millisecond
+	})
+	stop, _ := a.Scan(func(ble.Advert) {})
+	defer stop()
+	eventually(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
+	k.setHang(true, opAddAdvMonitor, opSetLE)
+	eventually(t, "power cycle", k.poweredOff)
+	eventually(t, "USB reset", func() bool { return resets.Load() > 0 })
+	k.setHang(false, opAddAdvMonitor, opSetLE)
+	eventually(t, "running", func() bool { return a.ScanStatus().State == ble.ScanRunning })
+}
+
+// Recovery spaces its steps out, so that a slow controller is not power-cycled every pass.
+func TestRecoveryWaitsBetweenSteps(t *testing.T) {
+	k := newFakeKernel()
+	a := openTest(t, k, func(o *Options) { o.StallTimeout = time.Hour })
+	stop, _ := a.Scan(func(ble.Advert) {})
+	defer stop()
+	eventually(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
+	k.setHang(true, opAddAdvMonitor, opRemoveAdvMonitor)
+	a.lastAdvert.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	eventually(t, "first step", func() bool { return k.count(opAddAdvMonitor) >= 3 })
+	if k.poweredOff() {
+		t.Error("power-cycled straight after the first step")
+	}
+}
+
+// With commands failing the connection is probably gone too, so it no longer holds recovery back.
+func TestRecoveryIgnoresConnectionsWhenCommandsFail(t *testing.T) {
+	k := newFakeKernel()
+	a := openTest(t, k, func(o *Options) {
+		o.StallTimeout = 10 * time.Millisecond
+		o.maxStallBackoff = 10 * time.Millisecond
+	})
+	conFor(t, k, a, ble.Events{})
+	stop, _ := a.Scan(func(ble.Advert) {})
+	defer stop()
+	k.setHang(true, opAddAdvMonitor, opSetLE)
+	eventually(t, "power cycle", k.poweredOff)
+}
+
+func TestStallRestartsDiscovery(t *testing.T) {
+	k := newFakeKernel()
+	a := openTest(t, k, func(o *Options) {
+		o.StallTimeout = 10 * time.Millisecond
+		o.maxStallBackoff = 10 * time.Millisecond
+	})
+	conFor(t, k, a, ble.Events{}) // a live connection keeps recovery at its first step
+	a.SetScanMode(ble.ScanActive)
+	stop, _ := a.Scan(func(ble.Advert) {})
+	defer stop()
+	eventually(t, "discovery stopped and started", func() bool {
+		return k.count(opStopDiscovery) >= 1 && k.count(opStartDiscovery) >= 2
+	})
+}
+
+func TestPoweredOffIsSetUpAgain(t *testing.T) {
+	k := newFakeKernel()
+	a := openTest(t, k, nil)
+	stop, _ := a.Scan(func(ble.Advert) {})
+	defer stop()
+	eventually(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
+	before := k.count(opSetPowered)
+	k.event(evNewSettings, []byte{settingPowered, 0, 0, 0})
+	time.Sleep(30 * time.Millisecond)
+	if k.count(opSetPowered) != before {
+		t.Error("set up again while powered")
+	}
+	k.event(evNewSettings, []byte{0, 0, 0, 0})
+	eventually(t, "powered on again", func() bool { return k.count(opSetPowered) > before })
+	eventually(t, "monitor again", func() bool { return k.count(opAddAdvMonitor) >= 2 })
+}
+
+func connLoops() int {
+	var b bytes.Buffer
+	pprof.Lookup("goroutine").WriteTo(&b, 2)
+	return strings.Count(b.String(), "(*conn).loop(")
+}
+
+// A link that drops during the MTU exchange ends with Connect failing, and must leave nothing running.
+func TestFailedConnectLeavesNoLoop(t *testing.T) {
+	k := newFakeKernel()
+	a := openTest(t, k, func(o *Options) { o.ConnectRetries = -1 })
+	before := connLoops()
+	k.dial = func(bool) (socket, error) {
+		bad := &fakeSocket{peripheral: heartRate()}
+		bad.silent = true
+		go func() { // after the request is on its way, so that the read loop and the request see the end together
+			for len(bad.ops()) == 0 {
+				time.Sleep(10 * time.Microsecond)
+			}
+			bad.Close()
+		}()
+		return bad, nil
+	}
+	for range 100 {
+		if _, err := a.Connect(testPeer, ble.AddrPublic, ble.Events{}); err == nil {
+			t.Fatal("no error")
+		}
+	}
+	eventually(t, "loops gone", func() bool { return connLoops() <= before })
+}
+
+// droppingSocket answers once and drops the link straight after.
+type droppingSocket struct{ fakeSocket }
+
+func (s *droppingSocket) Write(b []byte) (int, error) {
+	n, err := s.peripheral.Write(b)
+	s.Close()
+	return n, err
+}
+
+// A link can drop between the MTU answer and being recorded, and must not stay recorded: recovery holds back for it.
+func TestLinkLostAfterMTUIsNotKept(t *testing.T) {
+	k := newFakeKernel()
+	a := openTest(t, k, func(o *Options) { o.ConnectRetries = -1 })
+	k.dial = func(bool) (socket, error) {
+		return &droppingSocket{fakeSocket{peripheral: heartRate()}}, nil
+	}
+	for range 200 {
+		a.Connect(testPeer, ble.AddrPublic, ble.Events{})
+	}
+	eventually(t, "no connection recorded", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return len(a.conns) == 0
+	})
 }
 
 func TestStallDoesNotPowerCycleConnections(t *testing.T) {

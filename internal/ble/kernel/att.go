@@ -4,6 +4,7 @@
 package kernel
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -53,6 +54,7 @@ const (
 	attErrNotFound        = 0x0a
 	attErrNotLong         = 0x0b
 	attErrInsufficientEnc = 0x0f
+	attErrUnsupportedType = 0x10 // the attribute type is not a grouping the server supports
 )
 
 const (
@@ -100,10 +102,14 @@ type attClient struct {
 	done    chan struct{}
 	doneErr error // set before done closes
 
-	gattMu   sync.Mutex
-	services []ble.Service
+	gattMu      sync.Mutex
+	services    []ble.Service
+	servicesGen uint32 // the value of changes that services was discovered at
 	// serviceChanged is the value handle of the Service Changed characteristic once discovery has seen it.
 	serviceChanged atomic.Uint32
+	// changes counts Service Changed indications. run must not take gattMu to note one: discovery holds it while it
+	// waits for run to read its responses.
+	changes atomic.Uint32
 }
 
 func newATTClient(t transport, onNotify func(uint16, []byte)) *attClient {
@@ -140,9 +146,7 @@ func (c *attClient) receive(pdu []byte) {
 			c.t.Write([]byte{opConfirm})
 		}
 		if uint32(h) == c.serviceChanged.Load() && h != 0 {
-			c.gattMu.Lock()
-			c.services = nil
-			c.gattMu.Unlock()
+			c.changes.Add(1)
 		}
 		if c.onNotify != nil {
 			c.onNotify(h, append([]byte(nil), pdu[3:]...))
@@ -314,7 +318,13 @@ func (c *attClient) writeLong(h uint16, data []byte) error {
 		req := binary.LittleEndian.AppendUint16([]byte{opPrepareReq}, h)
 		req = binary.LittleEndian.AppendUint16(req, uint16(off))
 		req = append(req, data[off:end]...)
-		if _, err := c.request(req, opPrepareRsp); err != nil {
+		rsp, err := c.request(req, opPrepareRsp)
+		if err == nil && !bytes.Equal(rsp[1:], req[1:]) {
+			err = errors.New("the device echoed a prepared write with different contents")
+		}
+		if err != nil {
+			// What is already queued would go out with the next long write on this link.
+			c.request([]byte{opExecuteReq, 0}, opExecuteRsp)
 			return err
 		}
 	}
