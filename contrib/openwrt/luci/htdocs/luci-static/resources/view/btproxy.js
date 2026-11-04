@@ -132,12 +132,15 @@ return view.extend({
 				E('td', { 'class': 'td left' }, value)
 			]);
 		};
+		var rows = [
+			row(_('Proxy'), s.running ? _('Running') : _('Stopped')),
+			row(_('Start at boot'), s.enabled ? _('Yes') : _('No'))
+		];
+		// The kernel backend does without it, so a stopped one is only news on the bluez backend.
+		if (s.bluetoothd || uci.get('btproxy', 'main', 'backend') === 'bluez')
+			rows.push(row(_('Bluetooth daemon'), s.bluetoothd ? _('Running') : _('Stopped')));
 		return [
-			E('table', { 'class': 'table' }, [
-				row(_('Proxy'), s.running ? _('Running') : _('Stopped')),
-				row(_('Start at boot'), s.enabled ? _('Yes') : _('No')),
-				row(_('Bluetooth daemon'), s.bluetoothd ? _('Running') : _('Stopped'))
-			]),
+			E('table', { 'class': 'table' }, rows),
 			E('p', {}, buttons)
 		];
 	},
@@ -199,8 +202,15 @@ return view.extend({
 		o = s.option(form.Value, 'area', _('Area'), _('Suggested area in Home Assistant.'));
 		o.rmempty = true;
 
+		o = s.option(form.ListValue, 'backend', _('Backend'),
+			_('Automatic uses the kernel backend, or BlueZ while bluetoothd runs. The kernel backend needs bluetoothd stopped. BlueZ is deprecated.'));
+		o.value('', _('Automatic'));
+		o.value('kernel', _('Kernel'));
+		o.value('bluez', _('BlueZ (deprecated)'));
+		o.rmempty = true;
+
 		o = s.option(form.Value, 'bluetoothd_restart', _('Bluetooth restart command'),
-			_('Runs when bluetoothd hangs, and for the restart button in Home Assistant. Empty turns both off.'));
+			_('BlueZ backend only. Runs when bluetoothd hangs, and for the restart button in Home Assistant. Empty turns both off.'));
 		o.rmempty = true;
 
 		o = s.option(form.Value, 'extra_args', _('More flags'), _('For anything without a field here: see btproxy -h.'));

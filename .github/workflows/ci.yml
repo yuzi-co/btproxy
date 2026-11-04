@@ -20,6 +20,7 @@ jobs:
         run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test -race ./...
+      - run: go test -tags nobluez ./cmd/btproxy ./internal/ble/kernel
       - name: Cross-builds
         env:
           CGO_ENABLED: "0"
@@ -29,6 +30,7 @@ jobs:
           GOOS=linux GOARCH=arm GOARM=7 go build -o /dev/null ./cmd/btproxy
           GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -o /dev/null ./cmd/btproxy
           GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -tags nonoise -o /dev/null ./cmd/btproxy
+          GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -tags nobluez -o /dev/null ./cmd/btproxy
           GOOS=windows GOARCH=amd64 go build -ldflags=-H=windowsgui -o /dev/null ./cmd/btproxy
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

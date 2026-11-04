@@ -6,8 +6,9 @@ START=99
 USE_PROCD=1
 
 start_service() {
-	local name friendly_name area ui ui_password_file encryption_key_file config bluetoothd_restart extra_args
+	local backend name friendly_name area ui ui_password_file encryption_key_file config bluetoothd_restart extra_args
 	config_load btproxy
+	config_get backend main backend ''
 	config_get name main name ''
 	config_get friendly_name main friendly_name ''
 	config_get area main area ''
@@ -20,6 +21,7 @@ start_service() {
 
 	procd_open_instance
 	procd_set_param command /usr/bin/btproxy -config "$config"
+	[ -n "$backend" ] && procd_append_param command -backend "$backend"
 	[ -n "$name" ] && procd_append_param command -name "$name"
 	[ -n "$friendly_name" ] && procd_append_param command -friendly-name "$friendly_name"
 	[ -n "$area" ] && procd_append_param command -area "$area"

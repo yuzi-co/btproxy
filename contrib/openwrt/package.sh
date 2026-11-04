@@ -31,6 +31,7 @@ cat > "$root/lib/upgrade/keep.d/btproxy" <<'KEEP'
 /etc/btproxy.json
 /etc/btproxy.key
 /etc/btproxy.uipass
+/etc/btproxy/
 /etc/bluetooth/keys/
 KEEP
 
@@ -54,8 +55,9 @@ if [ "\$PKG_UPGRADE" = 1 ]; then
 	/etc/init.d/btproxy enabled && /etc/init.d/btproxy start
 	exit 0
 fi
-# A dbus that started before BlueZ was installed has not read its policy, so bluetoothd cannot get on the bus.
-if ! pidof bluetoothd >/dev/null; then
+# BlueZ is no longer a dependency, but a router may have it. A dbus that started before BlueZ was installed has not
+# read its policy, so bluetoothd cannot get on the bus, and the proxy would take the controller from an enabled one.
+if /etc/init.d/bluetoothd enabled 2>/dev/null && ! pidof bluetoothd >/dev/null; then
 	/etc/init.d/dbus restart >/dev/null 2>&1
 	sleep 1
 	/etc/init.d/bluetoothd restart >/dev/null 2>&1
@@ -94,7 +96,7 @@ size=$(wc -c < "$ipk/data.tar.gz")
 cat > "$ipk/control/control" <<CONTROL
 Package: btproxy
 Version: $version-1
-Depends: libc, kmod-bluetooth, bluez-daemon
+Depends: libc, kmod-bluetooth
 Section: net
 Architecture: all
 Installed-Size: $size
@@ -121,7 +123,7 @@ apk mkpkg \
 	--info "arch:noarch" \
 	--info "license:MIT" \
 	--info "url:$url" \
-	--info "depends:libc kmod-bluetooth bluez-daemon" \
+	--info "depends:libc kmod-bluetooth" \
 	--script "pre-install:$work/preinst" \
 	--script "pre-upgrade:$work/preinst" \
 	--script "post-install:$work/postinst" \
