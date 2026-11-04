@@ -3,6 +3,7 @@
 package kernel
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -57,11 +58,22 @@ func (linuxSystem) stackRunning() bool {
 func StackRunning() (bool, error) {
 	comms, _ := filepath.Glob("/proc/[0-9]*/comm")
 	for _, p := range comms {
-		if b, err := os.ReadFile(p); err == nil && strings.TrimSpace(string(b)) == "bluetoothd" {
+		comm, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		cmdline, _ := os.ReadFile(filepath.Join(filepath.Dir(p), "cmdline"))
+		if isBluetoothd(comm, cmdline) {
 			return true, nil
 		}
 	}
 	return hci.StackRunning()
+}
+
+// isBluetoothd tells a bluetoothd from its init script, whose process the kernel gives the same name. Package managers
+// run the script to stop the daemon just as they remove it.
+func isBluetoothd(comm, cmdline []byte) bool {
+	return strings.TrimSpace(string(comm)) == "bluetoothd" && !bytes.Contains(cmdline, []byte("/init.d/"))
 }
 
 func (linuxSystem) openMgmt(index uint16, onEvent func(uint16, []byte)) (mgmtConn, error) {

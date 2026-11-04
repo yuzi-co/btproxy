@@ -69,6 +69,15 @@ SCRIPT
 cat > "$work/postupgrade" <<'SCRIPT'
 #!/bin/sh
 [ -n "$IPKG_INSTROOT" ] && exit 0
+# Older packages brought in BlueZ as a dependency, and apk removes it only after this script. The proxy must not see
+# a bluetoothd that is about to go, or it chooses BlueZ and is left without it. BlueZ asked for by name stays.
+if [ -f /etc/apk/world ] && ! grep -q '^bluez-daemon' /etc/apk/world; then
+	/etc/init.d/bluetoothd stop >/dev/null 2>&1
+	for _ in 1 2 3 4 5; do
+		pidof bluetoothd >/dev/null || break
+		sleep 1
+	done
+fi
 /etc/init.d/btproxy enabled && /etc/init.d/btproxy start
 exit 0
 SCRIPT

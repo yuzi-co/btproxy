@@ -331,7 +331,7 @@ func TestStatusCallback(t *testing.T) {
 		return slices.Contains(states, ble.ScanRunning)
 	})
 	stop()
-	eventually(t, "stopped", func() bool { return a.ScanStatus().State == ble.ScanStopped })
+	eventually(t, "idle", func() bool { return a.ScanStatus().State == ble.ScanIdle })
 }
 
 func conFor(t *testing.T, k *fakeKernel, a *Adapter, ev ble.Events) (*fakeSocket, ble.Conn) {

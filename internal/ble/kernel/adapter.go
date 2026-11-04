@@ -16,7 +16,7 @@ import (
 
 const (
 	retryDelay  = 200 * time.Millisecond
-	retryFast   = 3 * time.Second // a radio failure comes within about 0.5 s; slower ones are not retried
+	retryFast   = 3 * time.Second // an error other than a radio failure or a lost link is retried only if this fast
 	retryBudget = 5 * time.Second // leaves most of the time a client gives a connect to the last attempt
 
 	defaultTick     = 5 * time.Second
@@ -503,9 +503,7 @@ func (a *Adapter) reconcile() {
 		a.checkStall()
 	default:
 		a.stallStep = 0
-		if a.ScanStatus().State != ble.ScanIdle {
-			a.setStatus(ble.ScanStopped)
-		}
+		a.setStatus(ble.ScanIdle) // nothing is wrong: no client wants scanning, or it is switched off
 	}
 }
 

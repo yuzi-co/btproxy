@@ -24,6 +24,26 @@ func TestClassifyConnect(t *testing.T) {
 	}
 }
 
+// The kernel names a script's process after the script, so running /etc/init.d/bluetoothd looks like bluetoothd.
+// Package managers do that to stop it just as they remove it, which must not read as BlueZ being in use.
+func TestIsBluetoothd(t *testing.T) {
+	for _, tc := range []struct {
+		name, comm, cmdline string
+		want                bool
+	}{
+		{"daemon", "bluetoothd\n", "/usr/bin/bluetoothd\x00-n\x00", true},
+		{"daemon with options", "bluetoothd\n", "/usr/libexec/bluetooth/bluetoothd\x00-E\x00", true},
+		{"unreadable command line", "bluetoothd\n", "", true},
+		{"OpenWrt init script", "bluetoothd\n", "/bin/sh\x00/etc/rc.common\x00/etc/init.d/bluetoothd\x00stop\x00", false},
+		{"another init script path", "bluetoothd\n", "/bin/sh\x00/etc/rc.d/init.d/bluetoothd\x00stop\x00", false},
+		{"another program", "btproxy\n", "/usr/bin/btproxy\x00", false},
+	} {
+		if got := isBluetoothd([]byte(tc.comm), []byte(tc.cmdline)); got != tc.want {
+			t.Errorf("%s: %v", tc.name, got)
+		}
+	}
+}
+
 func TestBdaddr(t *testing.T) {
 	if got := bdaddr(0xf424a206a947); got != [6]byte{0xf4, 0x24, 0xa2, 0x06, 0xa9, 0x47} {
 		t.Errorf("% x", got)
