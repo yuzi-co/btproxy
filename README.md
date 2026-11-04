@@ -173,8 +173,8 @@ On Linux, the default `-backend auto` picks one at start and logs why:
 container. A `bluetoothd` that starts after the proxy is not stopped: the proxy logs an error within a minute, and
 needs a restart to change backend. The contrib scripts start the proxy after `bluetoothd`.
 
-The kernel backend has run on the router under Status and on a Raspberry Pi 3's built-in adapter, as root. It has not
-been tried in Docker, without root, or pairing a new device. It does not reduce the radio failures described under
+The kernel backend has run on the router under Status and on a Raspberry Pi 3's built-in adapter, as root, including
+pairing a device from the Pi. It has not been tried in Docker or without root. It does not reduce the radio failures described under
 [Scan pause and connect retries](#scan-pause-and-connect-retries): on the router they came at about the same rate as
 on BlueZ.
 
@@ -620,7 +620,8 @@ stick in another machine). A device can be bonded to several adapters, each pair
 
 A bonded device may ignore every other adapter, which then sees HCI reason 0x3e on every connect, whatever the signal.
 A Tion Breezer 4S did: 52 of 52 links failed from a Raspberry Pi at -39 to -52 dBm, and all 9 worked once the Pi's
-adapter had the bonded adapter's address and key.
+adapter had the bonded adapter's address and key. It only accepted a new adapter in pairing mode, which showed in its
+advertisements as flags `0x06` instead of `0x04`, and it kept its existing bond.
 
 ## Test
 
