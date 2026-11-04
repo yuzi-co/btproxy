@@ -33,14 +33,15 @@ const esphomeVersion = "2026.10.0"
 // defaultBackend is the -backend default; the winrt backend makes itself the default on Windows.
 var defaultBackend = "bluez"
 
-// backends maps -backend names to constructors; bluez registers itself on Linux, winrt on Windows.
+// backends maps -backend names to constructors; bluez and kernel register themselves on Linux, winrt on Windows.
 var backends = map[string]func(adapter string, log *logx.Logger) (ble.Adapter, error){
 	"fake": func(name string, _ *logx.Logger) (ble.Adapter, error) {
 		return &fake.Adapter{Addr: fakeAddr(name)}, nil
 	},
 }
 
-// Flags read by the bluez backend; scan-pause-on-connect and connect-retries also by winrt.
+// Flags read by the bluez backend; scan-pause-on-connect and connect-retries also by winrt; stall-timeout, usb-reset,
+// scan-pause-on-connect and connect-retries also by kernel.
 var (
 	useAgent          bool
 	stallTimeout      time.Duration
@@ -57,8 +58,8 @@ func main() {
 	friendly := flag.String("friendly-name", "", "friendly name (default: the node name)")
 	area := flag.String("area", "", "suggested area")
 	listen := flag.String("listen", ":6053", "API listen address; with several adapters, the first of consecutive ports, or a comma-separated list")
-	backend := flag.String("backend", defaultBackend, "Bluetooth backend: bluez, winrt (Windows) or fake")
-	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter, or a comma-separated list served as one device each (bluez backend)")
+	backend := flag.String("backend", defaultBackend, "Bluetooth backend: bluez or kernel (Linux), winrt (Windows) or fake")
+	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter, or a comma-separated list served as one device each (bluez and kernel backends)")
 	maxConns := flag.Int("connections", 3, "maximum simultaneous peripheral connections")
 	scanMode := flag.String("scan-mode", "active", "scanner mode: active or passive (bluez: needs bluetoothd --experimental, else active)")
 	mac := flag.String("mac", "", "MAC reported as the device's unique id (default: first network interface; further adapters: their own address)")
@@ -80,17 +81,17 @@ func main() {
 	uiPassFile := flag.String("ui-password-file", "", "file holding the settings page password")
 	flag.BoolVar(&useAgent, "agent", true, "register a BlueZ pairing agent (bluez backend)")
 	flag.DurationVar(&stallTimeout, "stall-timeout", 3*time.Minute,
-		"restart active scanning after this long without advertisements, 0 to disable (bluez backend)")
+		"restart active scanning after this long without advertisements, 0 to disable (bluez and kernel backends)")
 	flag.StringVar(&bluetoothdRestart, "bluetoothd-restart", "",
 		"shell command that restarts bluetoothd when scanning keeps stalling or it stops answering (bluez backend)")
 	flag.BoolVar(&usbReset, "usb-reset", false,
-		"reset the adapter's USB device when nothing else brings scanning back (bluez backend)")
+		"reset the adapter's USB device when nothing else brings scanning back (bluez and kernel backends)")
 	flag.StringVar(&rawAdverts, "raw-adverts", "auto",
 		"read advertisements from the HCI monitor: auto, on or off (bluez backend; needs CAP_NET_RAW)")
 	flag.BoolVar(&scanPause, "scan-pause-on-connect", true,
-		"stop scanning while a connection is being made, like ESPHome (bluez and winrt backends)")
+		"stop scanning while a connection is being made, like ESPHome (bluez, kernel and winrt backends)")
 	flag.IntVar(&connectRetries, "connect-retries", 4,
-		"retry a connect that fails at once on the radio (HCI 0x3e), or on bluez loses the link before services resolve, this many times, 0 to disable (bluez and winrt backends)")
+		"retry a connect that fails at once on the radio (HCI 0x3e), or on bluez loses the link before services resolve, this many times, 0 to disable (bluez, kernel and winrt backends)")
 	flag.Parse()
 	settingsErr := loadSettings(*configFile)
 

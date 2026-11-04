@@ -1,4 +1,5 @@
-// Package ble defines what the proxy needs from a Bluetooth stack. Backends: bluez (Linux, D-Bus) and fake (tests).
+// Package ble defines what the proxy needs from a Bluetooth stack. Backends: bluez (Linux, D-Bus), kernel (Linux,
+// without bluetoothd), winrt (Windows) and fake (tests).
 package ble
 
 import (
