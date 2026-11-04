@@ -1,4 +1,8 @@
-"""Connects through btproxy and enables notifications on one handle: python test/notify.py host MAC handle"""
+"""Connects through btproxy and enables notifications on one handle: python test/notify.py host MAC handle [random]
+
+A device with a random address, as many have, needs "random": without it the connect waits for a device that does
+not exist until it times out.
+"""
 
 import asyncio
 import sys
@@ -6,8 +10,10 @@ import time
 
 from aioesphomeapi import APIClient
 
+ADDRESS_TYPES = {"public": 0, "random": 1}
 
-async def main(host: str, mac: str, handle: int) -> None:
+
+async def main(host: str, mac: str, handle: int, address_type: str = "public") -> None:
     addr = int(mac.replace(":", ""), 16)
     cli = APIClient(host, 6053, None)
     await cli.connect(login=True)
@@ -15,7 +21,7 @@ async def main(host: str, mac: str, handle: int) -> None:
     done = asyncio.get_running_loop().create_future()
     cb = lambda c, m, e: done.done() or done.set_result(c)
     await cli.bluetooth_device_connect(addr, cb, feature_flags=info.bluetooth_proxy_feature_flags,
-                                       address_type=0, timeout=30)
+                                       address_type=ADDRESS_TYPES[address_type], timeout=30)
     print("connected:", await asyncio.wait_for(done, 35))
     t = time.monotonic()
     try:
@@ -28,4 +34,4 @@ async def main(host: str, mac: str, handle: int) -> None:
     await cli.disconnect()
 
 
-asyncio.run(main(sys.argv[1], sys.argv[2], int(sys.argv[3], 0)))
+asyncio.run(main(sys.argv[1], sys.argv[2], int(sys.argv[3], 0), *sys.argv[4:5]))

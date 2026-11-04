@@ -262,17 +262,19 @@ func TestProblemWatch(t *testing.T) {
 	}
 }
 
-// The warning about an unencrypted API is a choice made at install time, and logged at every start: as the
-// latest problem it would hide that nothing has gone wrong.
-func TestProblemWatchIgnoresTheEncryptionWarning(t *testing.T) {
-	var out bytes.Buffer
-	p := problemWatch{w: &out}
-	line := "time=x level=WARN msg=\"" + notEncryptedWarning + "\" listen=[::]:6053\n"
-	p.Write([]byte(line))
-	if l, _ := p.lastProblem(); l != "" {
-		t.Errorf("counted as a problem: %q", l)
-	}
-	if out.String() != line {
-		t.Errorf("not logged: %q", out.String())
+// The warnings about an unencrypted API and a deprecated backend report a choice, and are logged at every start: as
+// the latest problem they would hide that nothing has gone wrong.
+func TestProblemWatchIgnoresTheStartWarnings(t *testing.T) {
+	for _, msg := range []string{notEncryptedWarning, bluezDeprecatedWarning} {
+		var out bytes.Buffer
+		p := problemWatch{w: &out}
+		line := "time=x level=WARN msg=\"" + msg + "\" listen=[::]:6053\n"
+		p.Write([]byte(line))
+		if l, _ := p.lastProblem(); l != "" {
+			t.Errorf("counted as a problem: %q", l)
+		}
+		if out.String() != line {
+			t.Errorf("not logged: %q", out.String())
+		}
 	}
 }

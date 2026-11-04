@@ -30,18 +30,24 @@ var version = "dev"
 // esphomeVersion is the ESPHome release btproxy reports itself as (DeviceInfo and mDNS).
 const esphomeVersion = "2026.10.0"
 
-// defaultBackend is the -backend default; the winrt backend makes itself the default on Windows.
-var defaultBackend = "bluez"
+// defaultBackend is the -backend default; winrt makes itself the default on Windows, and a build without BlueZ
+// makes kernel the default.
+var defaultBackend = "auto"
 
-// backends maps -backend names to constructors; bluez registers itself on Linux, winrt on Windows.
+// backends maps -backend names to constructors; bluez and kernel register themselves on Linux, winrt on Windows.
 var backends = map[string]func(adapter string, log *logx.Logger) (ble.Adapter, error){
 	"fake": func(name string, _ *logx.Logger) (ble.Adapter, error) {
 		return &fake.Adapter{Addr: fakeAddr(name)}, nil
 	},
 }
 
-// Flags read by the bluez backend; scan-pause-on-connect and connect-retries also by winrt.
+// autoBackend picks the backend for -backend auto; set on Linux, the only place with a choice.
+var autoBackend func(log *logx.Logger) string
+
+// Flags read by the bluez backend; scan-pause-on-connect and connect-retries also by winrt; stall-timeout, usb-reset,
+// scan-pause-on-connect and connect-retries also by kernel. bond-dir only by kernel.
 var (
+	bondDir           string
 	useAgent          bool
 	stallTimeout      time.Duration
 	usbReset          bool
@@ -57,13 +63,14 @@ func main() {
 	friendly := flag.String("friendly-name", "", "friendly name (default: the node name)")
 	area := flag.String("area", "", "suggested area")
 	listen := flag.String("listen", ":6053", "API listen address; with several adapters, the first of consecutive ports, or a comma-separated list")
-	backend := flag.String("backend", defaultBackend, "Bluetooth backend: bluez, winrt (Windows) or fake")
-	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter, or a comma-separated list served as one device each (bluez backend)")
+	backend := flag.String("backend", defaultBackend,
+		"Bluetooth backend: auto (kernel, or bluez while bluetoothd runs), kernel or bluez (deprecated) on Linux, winrt on Windows, or fake")
+	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter, or a comma-separated list served as one device each (bluez and kernel backends)")
 	maxConns := flag.Int("connections", 3, "maximum simultaneous peripheral connections")
-	scanMode := flag.String("scan-mode", "active", "scanner mode: active or passive (bluez: needs bluetoothd --experimental, else active)")
+	scanMode := flag.String("scan-mode", "active", "scanner mode: active or passive (Linux: needs kernel 5.10+, on bluez also bluetoothd --experimental, else active)")
 	mac := flag.String("mac", "", "MAC reported as the device's unique id (default: first network interface; further adapters: their own address)")
 	mdnsOn := flag.Bool("mdns", true, "advertise the API over mDNS so Home Assistant discovers it")
-	mdnsIface := flag.String("mdns-iface", "", "comma-separated interfaces to advertise on (default: all with IPv4)")
+	mdnsIface := flag.String("mdns-iface", "", "comma-separated interfaces to advertise on (default: all with IPv4, except container, VM and VPN ones)")
 	keyB64 := flag.String("encryption-key", "",
 		"API encryption key, base64 of 32 bytes as in ESPHome's api: encryption: key: (visible in ps; prefer -encryption-key-file or $BTPROXY_ENCRYPTION_KEY)")
 	keyFile := flag.String("encryption-key-file", "", "file holding the API encryption key")
@@ -78,19 +85,20 @@ func main() {
 	uiAddr := flag.String("ui", defaultUI, "serve the settings page on this address, such as :8080 (needs -ui-password, except on loopback on Windows)")
 	uiPass := flag.String("ui-password", "", "settings page password, any user name (prefer -ui-password-file or $BTPROXY_UI_PASSWORD)")
 	uiPassFile := flag.String("ui-password-file", "", "file holding the settings page password")
+	flag.StringVar(&bondDir, "bond-dir", "/etc/btproxy", "directory for the keys of bonded devices (kernel backend)")
 	flag.BoolVar(&useAgent, "agent", true, "register a BlueZ pairing agent (bluez backend)")
 	flag.DurationVar(&stallTimeout, "stall-timeout", 3*time.Minute,
-		"restart active scanning after this long without advertisements, 0 to disable (bluez backend)")
+		"restart scanning after this long without advertisements, 0 to disable (kernel backend; bluez backend in active mode)")
 	flag.StringVar(&bluetoothdRestart, "bluetoothd-restart", "",
 		"shell command that restarts bluetoothd when scanning keeps stalling or it stops answering (bluez backend)")
 	flag.BoolVar(&usbReset, "usb-reset", false,
-		"reset the adapter's USB device when nothing else brings scanning back (bluez backend)")
+		"reset the adapter's USB device when nothing else brings scanning back (bluez and kernel backends)")
 	flag.StringVar(&rawAdverts, "raw-adverts", "auto",
 		"read advertisements from the HCI monitor: auto, on or off (bluez backend; needs CAP_NET_RAW)")
 	flag.BoolVar(&scanPause, "scan-pause-on-connect", true,
-		"stop scanning while a connection is being made, like ESPHome (bluez and winrt backends)")
+		"stop scanning while a connection is being made, like ESPHome (bluez, kernel and winrt backends)")
 	flag.IntVar(&connectRetries, "connect-retries", 4,
-		"retry a connect that fails at once on the radio (HCI 0x3e), or on bluez loses the link before services resolve, this many times, 0 to disable (bluez and winrt backends)")
+		"retry a connect that fails at once on the radio (HCI 0x3e) or loses the link right after, this many times, 0 to disable (bluez, kernel and winrt backends)")
 	flag.Parse()
 	settingsErr := loadSettings(*configFile)
 
@@ -131,9 +139,15 @@ func main() {
 	if err != nil {
 		fatal(log, "advertisement filter", "err", err)
 	}
+	if *backend == "auto" && autoBackend != nil {
+		*backend = autoBackend(log) // the settings page and the sensors go by the flag's value
+	}
 	newAdapter, ok := backends[*backend]
 	if !ok {
 		fatal(log, "unknown backend", "backend", *backend)
+	}
+	if *backend == "bluez" {
+		log.Warn(bluezDeprecatedWarning)
 	}
 	if advFilter != nil {
 		log.Info("advertisement filter", "filter", advFilter.String())

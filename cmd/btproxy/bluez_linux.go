@@ -1,3 +1,5 @@
+//go:build !nobluez
+
 package main
 
 import (

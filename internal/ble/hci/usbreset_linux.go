@@ -1,6 +1,6 @@
 //go:build linux
 
-package bluez
+package hci
 
 import (
 	"fmt"
@@ -12,12 +12,9 @@ import (
 	"syscall"
 )
 
-// resetUSBDevice is a variable so the tests can watch the step without a USB device.
-var resetUSBDevice = usbReset
-
-// usbReset resets the USB device of an adapter. The kernel unbinds the driver and binds it again, which is like
+// ResetUSB resets the USB device of an adapter. The kernel unbinds the driver and binds it again, which is like
 // pulling the stick out and back in, for that device alone.
-func usbReset(adapter string) error {
+func ResetUSB(adapter string) error {
 	path, err := usbDevicePath("/sys", adapter)
 	if err != nil {
 		return err

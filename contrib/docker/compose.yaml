@@ -1,4 +1,5 @@
-# Needs BlueZ running on the host. See "Docker" in the README for what this setup cannot do.
+# Uses the kernel backend, or BlueZ on the host while bluetoothd runs there. See "Docker" in the README for what this
+# setup cannot do.
 services:
   btproxy:
     image: ghcr.io/yuzi-co/btproxy:latest
@@ -7,15 +8,21 @@ services:
     # Bluetooth sockets only work in the initial network namespace, and mDNS needs the LAN.
     network_mode: host
     volumes:
-      # The directory rather than the socket, so the mount survives a restart of the host's D-Bus.
+      # The keys of bonded devices, on the kernel backend.
+      - btproxy-bonds:/etc/btproxy
+      # BlueZ on the host. The directory rather than the socket, so the mount survives a restart of the host's D-Bus.
       - /run/dbus:/run/dbus:ro
       # API encryption: put the key in ./btproxy.key, then uncomment this line and the argument below.
       # - ./btproxy.key:/btproxy.key:ro
     read_only: true
     cap_drop: [ALL]
-    # Raw advertisements and connection parameters. Without it the proxy rebuilds advertisements from BlueZ.
-    cap_add: [NET_RAW]
+    # NET_RAW: the HCI monitor and connection parameters; on BlueZ, the proxy rebuilds advertisements without it.
+    # NET_ADMIN: the management socket, on the kernel backend.
+    cap_add: [NET_RAW, NET_ADMIN]
     security_opt: ["no-new-privileges:true"]
     command:
       - -name=btproxy-docker
       # - -encryption-key-file=/btproxy.key
+
+volumes:
+  btproxy-bonds:

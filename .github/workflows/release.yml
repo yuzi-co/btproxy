@@ -26,13 +26,17 @@ jobs:
           flags="-s -w -X main.version=${GITHUB_REF_NAME#v}"
           build() {
             mkdir -p "pkg/$1"
-            go build -trimpath -ldflags="$flags $3" -o "pkg/$1/$2" ./cmd/btproxy
+            go build -trimpath -tags "$4" -ldflags="$flags $3" -o "pkg/$1/$2" ./cmd/btproxy
             cp LICENSE README.md "pkg/$1/"
           }
           GOOS=linux GOARCH=amd64 build linux-amd64 btproxy
           GOOS=linux GOARCH=arm64 build linux-arm64 btproxy
           GOOS=linux GOARCH=arm GOARM=7 build linux-armv7 btproxy
           GOOS=linux GOARCH=mipsle GOMIPS=softfloat build linux-mipsle btproxy
+          GOOS=linux GOARCH=amd64 build linux-amd64-nobluez btproxy "" nobluez
+          GOOS=linux GOARCH=arm64 build linux-arm64-nobluez btproxy "" nobluez
+          GOOS=linux GOARCH=arm GOARM=7 build linux-armv7-nobluez btproxy "" nobluez
+          GOOS=linux GOARCH=mipsle GOMIPS=softfloat build linux-mipsle-nobluez btproxy "" nobluez
           GOOS=windows GOARCH=amd64 build windows-amd64 btproxy.exe "-H windowsgui"
           mkdir -p dist
           for d in pkg/linux-*; do
