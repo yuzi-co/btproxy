@@ -67,10 +67,10 @@ func main() {
 		"Bluetooth backend: auto (kernel, or bluez while bluetoothd runs), kernel or bluez (deprecated) on Linux, winrt on Windows, or fake")
 	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter, or a comma-separated list served as one device each (bluez and kernel backends)")
 	maxConns := flag.Int("connections", 3, "maximum simultaneous peripheral connections")
-	scanMode := flag.String("scan-mode", "active", "scanner mode: active or passive (bluez: needs bluetoothd --experimental, else active)")
+	scanMode := flag.String("scan-mode", "active", "scanner mode: active or passive (Linux: needs kernel 5.10+, on bluez also bluetoothd --experimental, else active)")
 	mac := flag.String("mac", "", "MAC reported as the device's unique id (default: first network interface; further adapters: their own address)")
 	mdnsOn := flag.Bool("mdns", true, "advertise the API over mDNS so Home Assistant discovers it")
-	mdnsIface := flag.String("mdns-iface", "", "comma-separated interfaces to advertise on (default: all with IPv4)")
+	mdnsIface := flag.String("mdns-iface", "", "comma-separated interfaces to advertise on (default: all with IPv4, except container, VM and VPN ones)")
 	keyB64 := flag.String("encryption-key", "",
 		"API encryption key, base64 of 32 bytes as in ESPHome's api: encryption: key: (visible in ps; prefer -encryption-key-file or $BTPROXY_ENCRYPTION_KEY)")
 	keyFile := flag.String("encryption-key-file", "", "file holding the API encryption key")
@@ -88,7 +88,7 @@ func main() {
 	flag.StringVar(&bondDir, "bond-dir", "/etc/btproxy", "directory for the keys of bonded devices (kernel backend)")
 	flag.BoolVar(&useAgent, "agent", true, "register a BlueZ pairing agent (bluez backend)")
 	flag.DurationVar(&stallTimeout, "stall-timeout", 3*time.Minute,
-		"restart active scanning after this long without advertisements, 0 to disable (bluez and kernel backends)")
+		"restart scanning after this long without advertisements, 0 to disable (kernel backend; bluez backend in active mode)")
 	flag.StringVar(&bluetoothdRestart, "bluetoothd-restart", "",
 		"shell command that restarts bluetoothd when scanning keeps stalling or it stops answering (bluez backend)")
 	flag.BoolVar(&usbReset, "usb-reset", false,
@@ -98,7 +98,7 @@ func main() {
 	flag.BoolVar(&scanPause, "scan-pause-on-connect", true,
 		"stop scanning while a connection is being made, like ESPHome (bluez, kernel and winrt backends)")
 	flag.IntVar(&connectRetries, "connect-retries", 4,
-		"retry a connect that fails at once on the radio (HCI 0x3e), or on bluez loses the link before services resolve, this many times, 0 to disable (bluez, kernel and winrt backends)")
+		"retry a connect that fails at once on the radio (HCI 0x3e) or loses the link right after, this many times, 0 to disable (bluez, kernel and winrt backends)")
 	flag.Parse()
 	settingsErr := loadSettings(*configFile)
 

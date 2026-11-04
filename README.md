@@ -8,8 +8,8 @@ WinRT on Windows. BlueZ over D-Bus still works on Linux but is [deprecated](#bac
 
 Not related to [conorpp/btproxy](https://github.com/conorpp/btproxy), a Bluetooth man-in-the-middle tool.
 
-Status: new. In use on an OpenWrt 23.05 router (MT7620A, mipsle, 128 MB RAM, RTL8761B USB stick) and on
-Windows 11 (Intel adapter), with Home Assistant 2026.11. The fake backend passes an end-to-end test with
+Status: new. In use on an OpenWrt 23.05 router (MT7620A, mipsle, 128 MB RAM, RTL8761B USB stick), a Raspberry Pi 3
+(built-in adapter, arm64) and Windows 11 (Intel adapter), with Home Assistant 2026.11. The fake backend passes an end-to-end test with
 `aioesphomeapi`.
 
 ## Features
@@ -79,8 +79,9 @@ Yes, with no drivers or runtime to install beyond an LE adapter. Windows 11 is t
 
 ### Does it run on a Raspberry Pi?
 
-The releases include Linux arm64 and armv7 builds, and [Deploy](#deploy) has a systemd unit for Raspberry Pi OS. A
-Raspberry Pi is not among the tested setups above yet.
+Yes. The releases include Linux arm64 and armv7 builds, and [Deploy](#deploy) has a systemd unit. It has run on a
+Raspberry Pi 3 with its built-in adapter, using the arm64 build and the kernel backend; [Backends](#backends) lists
+what that covers.
 
 ## Install
 
@@ -118,7 +119,8 @@ Generated code: `go generate ./internal/ble/winrt/gen` (WinRT bindings), `go gen
 
 ## Run
 
-Linux needs permission to use the adapter: root, or `CAP_NET_ADMIN` and `CAP_NET_RAW`. In a container it needs the
+Linux needs permission to use the adapter: root, or `CAP_NET_ADMIN` and `CAP_NET_RAW`, and without root a `-bond-dir`
+it can write to. In a container it needs the
 host network, since Bluetooth sockets only work in the initial network namespace. [Backends](#backends) has what
 changes while `bluetoothd` runs. Windows needs only the binary and an LE adapter.
 
@@ -143,10 +145,10 @@ Home Assistant discovers it over mDNS. Otherwise add it by hand: Add integration
 | `-mdns-iface` | all up IPv4 interfaces except container, VM, VPN | comma-separated, see [mDNS](#mdns) |
 | `-scan-mode` | `active` | `active` or `passive` |
 | `-raw-adverts` | `auto` | `auto`, `on`, `off`: use the HCI monitor (bluez), see [Advertisements](#advertisements) |
-| `-scan-pause-on-connect` | `true` | stop scanning while connecting |
-| `-connect-retries` | 4 | retries of a connect that fails at once on the radio or, on BlueZ, loses the link before services resolve; `0` disables |
-| `-stall-timeout` | `3m` | restart active scanning after this long without advertisements; `0` disables (Linux) |
-| `-bluetoothd-restart` | | command run when `bluetoothd` hangs, such as `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"` |
+| `-scan-pause-on-connect` | `true` | stop scanning while connecting; see [Scan pause and connect retries](#scan-pause-and-connect-retries) |
+| `-connect-retries` | 4 | retries of a connect that fails at once on the radio or loses the link right after; `0` disables |
+| `-stall-timeout` | `3m` | restart scanning after this long without advertisements; `0` disables (kernel; bluez in active mode) |
+| `-bluetoothd-restart` | | (bluez) command run when `bluetoothd` hangs, such as `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"` |
 | `-usb-reset` | `false` | reset the adapter's USB device when nothing else brings scanning back (Linux); see [Hangs and recovery](#hangs-and-recovery) |
 | `-agent` | `true` | register a BlueZ pairing agent |
 | `-adv-allow`, `-adv-deny`, `-adv-deny-random` | | see [Advertisement filter](#advertisement-filter) |
@@ -173,8 +175,15 @@ On Linux, the default `-backend auto` picks one at start and logs why:
 container. A `bluetoothd` that starts after the proxy is not stopped: the proxy logs an error within a minute, and
 needs a restart to change backend. The contrib scripts start the proxy after `bluetoothd`.
 
-The kernel backend has run on the router under Status and on a Raspberry Pi 3's built-in adapter, as root, including
-pairing a device from the Pi. It has not been tried in Docker or without root. It does not reduce the radio failures described under
+The kernel backend has run as root on the router under Status and on a Raspberry Pi 3's built-in adapter, with the
+shipped systemd unit on the Pi.
+
+- Tried with Home Assistant and two devices (a Tion Breezer 4S and a PAX Calima): scanning, connecting, GATT reads,
+  writes and notifications, bonds copied from BlueZ, and pairing, once, with the Breezer.
+- Not tried: Docker, running without root, unpairing, connection parameter changes, several adapters, losing and
+  regaining the adapter, and the recovery steps.
+
+It does not reduce the radio failures described under
 [Scan pause and connect retries](#scan-pause-and-connect-retries): on the router they came at about the same rate as
 on BlueZ.
 
@@ -183,12 +192,13 @@ To move to it, stop `bluetoothd` and restart the proxy:
 ```sh
 # OpenWrt
 /etc/init.d/bluetoothd stop; /etc/init.d/bluetoothd disable; /etc/init.d/btproxy restart
-# systemd: mask, as a unit that wants bluetooth.service starts it again if it is only disabled
+# systemd: mask, as another unit or a D-Bus request can start it again if it is only disabled
 systemctl mask --now bluetooth; systemctl restart btproxy
 ```
 
-Then check the log for `backend chosen`. The first start with an adapter copies its bonds from `/var/lib/bluetooth`,
-so bonded devices do not need pairing again; later BlueZ bonds are not copied. To go back, enable and start
+Then check the log for `backend chosen`. The first start that finds BlueZ bonds for an adapter copies them from
+`/var/lib/bluetooth`, so bonded devices do not need pairing again. Once this backend has a bond file for the adapter,
+later BlueZ bonds are not copied. To go back, enable and start
 `bluetoothd` (on systemd, `systemctl unmask bluetooth` first) and restart the proxy. Devices paired since then need pairing again, as BlueZ does not have their keys.
 
 ### Several adapters
@@ -199,7 +209,7 @@ with its own slots). The first is served as if alone. Each further one gets `-<a
 the first one's Home Assistant entry is unaffected. `-listen :6053,:7053` sets each address. `-connections`,
 `-scan-mode`, `-area` and the key apply to all.
 
-One pairing agent serves all adapters; `-bluetoothd-restart` runs at most once per 10 minutes for all. A
+On BlueZ, one pairing agent serves all adapters and `-bluetoothd-restart` runs at most once per 10 minutes for all. A
 further adapter that cannot be opened at start is logged and skipped (restart the proxy once it is back); the
 first one failing stops the proxy. Log lines are tagged with `node` and `adapter`.
 
@@ -251,10 +261,10 @@ Tested on Windows 11 (Intel): scanning, mode changes, the scanning switch, conne
 247, cache clearing, disconnect. Not yet tried against a device: writes, notification delivery, pairing,
 unpairing a bonded device, link loss, radio off and on.
 
-Differences from BlueZ:
+Differences from the Linux backends:
 
 - Advertisements are rebuilt from WinRT's parsed sections in original order, so bytes match the air. Scan
-  responses arrive as separate entries, as from an ESP32, except empty ones, which are dropped. Extended
+  responses arrive as separate entries, except empty ones, which are dropped. Extended
   advertisements are included; PHYs are not reported.
 - Windows owns connections: the link drops a few seconds after the proxy lets go, and stays up while another
   program or Windows uses the device. Services Windows keeps (such as HID) have no characteristics.
@@ -292,6 +302,9 @@ only one socket. Keep `-name` different from the host name, which `umdns` alread
 
 ## Advertisements
 
+The kernel backend always reads advertising reports from the kernel's HCI monitor, ignores `-raw-adverts`, and does
+not start without the monitor. The next two paragraphs are about BlueZ.
+
 With `-raw-adverts auto` (default) or `on`, advertising reports come from the kernel's HCI monitor (read-only,
 like `btmon`, filtered to the `-adapter` controller), so Home Assistant gets the bytes from the air, including
 AD types BlueZ does not parse and repeats it would drop. `auto` falls back to rebuilding from BlueZ's properties
@@ -309,8 +322,8 @@ structures; first fragment of extended advertisements). Anonymous advertisements
 skipped.
 
 With active discovery the controller's duplicate filter may report a device about once per scan. With the HCI
-monitor the proxy also registers advertisement monitors during active scanning (needs `--experimental`), which
-turns the filter off. The monitor does not resolve private addresses: a bonded device using them shows under its
+monitor the proxy also registers advertisement monitors during active scanning (on BlueZ this needs
+`--experimental`), which turns the filter off. The monitor does not resolve private addresses: a bonded device using them shows under its
 current random address unless the controller resolves it.
 
 ### Advertisement filter
@@ -345,7 +358,8 @@ one.
 
 Home Assistant can switch `-scan-mode` at run time. Reported states carry the mode in use (active when passive
 is unavailable): running, idle (no subscriber or paused for a connect), failed (retried every 10 s), stopped
-(adapter off and cannot be powered on).
+(adapter off and cannot be powered on). The kernel backend differs: it stays running during a connect's pause, retries
+every 5 s, and reports failed rather than stopped when the adapter is lost.
 
 Passive scanning uses advertisement monitors, which need kernel 5.10+; without them the kernel backend scans actively.
 On BlueZ they also need BlueZ 5.56+ and `bluetoothd --experimental` (`-E`); otherwise the proxy scans actively and retries passive after a `bluetoothd` restart. If BlueZ drops monitors
@@ -370,8 +384,8 @@ extension on some Intel and Realtek). Kernel 5.15 turns the duplicate filter off
 
 The kernel backend restarts discovery after `-stall-timeout` without an advertisement, then power-cycles the adapter
 and, with `-usb-reset`, resets its USB device, waiting longer between tries up to 30 minutes. It does the same when a
-management command times out, and sets the adapter up again when it comes back. The rest of this section is about
-BlueZ.
+management command times out, and sets the adapter up again when it comes back. While a device is connected it only
+restarts discovery, which keeps the connection. It checks in passive mode too. The rest of this section is about BlueZ.
 
 `bluetoothd` can hang while keeping its D-Bus name (BlueZ 5.66 with an RTL8761B: several times a night). The
 proxy detects it by: D-Bus calls timing out after 10 s (disconnects after 30 s; GATT, connect and pair have their
@@ -401,6 +415,11 @@ half the connects then failed with HCI reason 0x3e. Overlapping connects share o
 cannot stop scanning the kernel does for another pending connect or a `bluetoothd` auto-reconnect. Pairing does
 not pause scanning. Windows pauses the same way.
 
+The kernel backend pauses differently. From the connect call until the link's first exchange (MTU) or failure, it
+removes its advertisement monitor as well as stopping discovery, and waits up to 2 s for that before connecting
+anyway. There is no 60 s cap, as connects take at most 30 s. Without `-scan-pause-on-connect` it still stops discovery
+during a connect, and keeps only the monitor.
+
 On a router the stick also shares the air with the router's own 2.4 GHz Wi-Fi. On a test router with an RTL8761B a
 single attempt succeeded about 30% of the time, 45% with the Bluetooth channels under the router's Wi-Fi left out
 by hand. With retries a connect succeeded 45% of the time at two retries and 56% at four. Retrying a link that
@@ -413,6 +432,13 @@ message) are retried after 200 ms, still paused, up to `-connect-retries` times.
 drops before its services are resolved, usually a few seconds later. Not retried: those radio errors after 3 s,
 other errors, withdrawn connects, and retries more than 5 s after the first attempt. A retried connect logs
 `connected after retries`.
+
+On the kernel backend, HCI reason 0x3e and a link lost before that first exchange are retried if the attempt took up
+to 5 s, and any other error if it came within 3 s. Errors another attempt cannot change, such as no permission or no
+adapter, are not retried.
+
+A bonded device can also cause 0x3e on every attempt by ignoring other adapters: see
+[Bonded devices](#bonded-devices).
 
 ## Connection parameters
 
@@ -431,7 +457,8 @@ Integrations can request other parameters on a live connection (aioesphomeapi
 
 - Characteristic handles are reported as value handles, as on an ESP32, so Home Assistant's GATT cache works
   across proxies.
-- CCCD writes turn notifications on and off through BlueZ or Windows; cache clearing keeps bonds.
+- CCCD writes turn notifications on and off through BlueZ or Windows, and the kernel backend writes the CCCD itself;
+  cache clearing keeps bonds.
 - Connecting does not depend on the proxy's scan, so it works in passive mode and during the pause.
 - At most 16 API clients; further connections are closed. A client has 30 s to finish the handshake and send
   Hello. After that, dead clients are found with TCP keepalive (30 s idle, 3 probes 10 s apart); there is no idle
@@ -485,7 +512,7 @@ These apply to one adapter, except that a restart restarts the whole proxy.
   through a proxy that heard the device recently, so with scanning off it stops choosing this one once the device's
   advertisements age. Existing connections stay up.
 - **Restart proxy** (button): drops the connections, waiting at most 5 s, and restarts as the settings page does.
-- **Restart Bluetooth stack** (button): runs `-bluetoothd-restart`, and is only offered when that is set. It is
+- **Restart Bluetooth stack** (button): BlueZ only. Runs `-bluetoothd-restart`, and is only offered when that is set. It is
   refused within a minute of the last restart, and holds off the watchdog's next restart for 10 minutes.
 
 The buttons are disabled by default in Home Assistant. Without an [encryption](#encryption) key any host that can
@@ -498,8 +525,14 @@ triggers on the proxy's own problems: that can restart it in a loop.
 
 Install the package for your router's instruction set: `mipsle` (such as MT7620 and MT7621), `armv7`, `arm64` or
 `amd64`. There is no build for big-endian MIPS, which includes ath79. The dependency, the kernel's Bluetooth support,
-comes from OpenWrt's feeds, and the service starts straight away. BlueZ is no longer installed with it. A router that
-already has `bluetoothd` running stays on BlueZ after an upgrade until you [move it](#backends).
+comes from OpenWrt's feeds, and the service starts straight away. BlueZ is no longer installed with it.
+
+**Upgrading from 0.4 removes BlueZ and moves the router to the kernel backend**, if BlueZ came in as this package's
+dependency: both package managers remove `bluez-daemon` as no longer needed. Bonds stay and are copied on the first
+start, though `/var/lib/bluetooth` must be on flash for that, as described below. A `bluez-daemon` you installed by
+name stays, and so does the use of BlueZ. To keep BlueZ, on apk run `apk add bluez-daemon` before the upgrade; on opkg
+run `opkg install bluez-daemon` after it, then `/etc/init.d/bluetoothd enable`, `/etc/init.d/bluetoothd start` and
+`/etc/init.d/btproxy restart`. opkg leaves `dbus` and some libraries behind, which `opkg remove` can clear.
 
 OpenWrt 25.12 and newer:
 
@@ -519,8 +552,9 @@ opkg install /tmp/btproxy.ipk
 
 `--allow-untrusted` is there because the packages are not signed. Run the same commands to upgrade: settings stay. Neither package manager fetches from an `https://` URL itself, hence `wget`.
 
-- Flash: the package takes about 1.9 MB, on top of the stick's firmware. After moving to the kernel backend,
-  `opkg remove bluez-daemon` frees roughly 3 to 5 MB with its dependencies, unless something else needs them. The
+- Flash: the package takes about 1.9 MB, on top of the stick's firmware. Removing BlueZ with its dependencies frees roughly 3 MB (3.3 MB
+  on the test router), unless something else needs them: `opkg remove bluez-daemon` and so on, or `apk del bluez-daemon`.
+  The
   package manager refuses when that does not fit. opkg asks for the whole package to be free even
   for an upgrade, which replaces the old copy: if `df /overlay` shows that it does fit, add `--force-space`.
 - The stick's firmware is yours to pick: install it too, such as `rtl8761bu-firmware`.
@@ -561,8 +595,8 @@ To install by hand, copy the binary to `/usr/bin/btproxy`,
 
 systemd (Raspberry Pi OS, Debian): copy the binary to `/usr/local/bin/btproxy` and
 [contrib/systemd/btproxy.service](contrib/systemd/btproxy.service) to `/etc/systemd/system/`, then
-`systemctl enable --now btproxy`. The unit wants `bluetooth.service` without requiring it, so the proxy survives
-a `bluetoothd` restart, and bonds on the kernel backend go in `/var/lib/btproxy`. For encryption, put the key in `/etc/btproxy.key` (`chmod 600`) and use the two
+`systemctl enable --now btproxy`. The unit starts after `bluetooth.service` if that is enabled, without starting it or
+depending on it, so the proxy survives a `bluetoothd` restart. Bonds on the kernel backend go in `/var/lib/btproxy`. For encryption, put the key in `/etc/btproxy.key` (`chmod 600`) and use the two
 commented `ExecStart` lines, which pass it as a systemd credential. The unit runs as root with a read-only file
 system and other sandboxing; a settings file the page should save needs its directory in `ReadWritePaths=`.
 
@@ -601,10 +635,20 @@ Or use [contrib/docker/compose.yaml](contrib/docker/compose.yaml). Flags go afte
 
 Devices that need an encrypted link must be bonded with the proxy's adapter. Home
 Assistant can pair a connected device through the proxy (`bluetooth_device_pair`); an already paired device is
-reported paired. The proxy never pairs on its own.
+reported paired.
 
-The kernel backend pairs as NoInputNoOutput, confirms Just Works pairing itself, and keeps keys readable by root only
-in `-bond-dir`, in `bonds-<adapter address>.json`. It keeps them per adapter address, as BlueZ does.
+Pairing can also happen without that request. When a device refuses a read or write for lack of encryption, the kernel
+backend encrypts the link, and the kernel pairs if there is no key yet. BlueZ's own ATT code raises security the same
+way, though that has not been tested here. All of this is Just Works pairing:
+
+- Nothing is compared or typed, so it does not protect against someone who is in radio range during pairing and
+  intercepts it. Once bonded, the link is encrypted with that key.
+- Any client that can reach the API can trigger it, by connecting and reading such a characteristic. A device that
+  accepts pairing only in pairing mode limits that to when you put it there. See [Encryption](#encryption) for the API.
+- A device that insists on a passkey or numeric comparison does not pair.
+
+The kernel backend pairs as NoInputNoOutput, confirms Just Works pairing itself, and keeps keys readable by its user
+only, in `-bond-dir`, in `bonds-<adapter address>.json`. It keeps them per adapter address, as BlueZ does.
 
 On BlueZ the proxy registers a NoInputNoOutput agent and asks to be the default. It confirms Just Works pairing
 and service authorization only for devices connected through it and refuses PIN and passkey entry. If another
@@ -619,14 +663,14 @@ start `bluetoothd`. Bonds belong to an adapter address, so this only works for t
 stick in another machine). A device can be bonded to several adapters, each paired while it is in pairing mode.
 
 A bonded device may ignore every other adapter, which then sees HCI reason 0x3e on every connect, whatever the signal.
-A Tion Breezer 4S did: 52 of 52 links failed from a Raspberry Pi at -39 to -52 dBm, and all 9 worked once the Pi's
-adapter had the bonded adapter's address and key. It only accepted a new adapter in pairing mode, which showed in its
-advertisements as flags `0x06` instead of `0x04`, and it kept its existing bond.
+A Tion Breezer 4S did, on one test: 52 of 52 links failed from a Raspberry Pi at -39 to -52 dBm, and all 9 worked once
+the Pi's adapter had the bonded adapter's address and key. It only accepted a new adapter in pairing mode, which
+showed in its advertisements as flags `0x06` instead of `0x04`, and it kept its existing bond.
 
 ## Test
 
 ```sh
-go test ./...                       # the bluez and mDNS socket tests need GOOS=linux (or a Linux container)
+go test ./...                       # the Linux backends and mDNS socket tests need GOOS=linux (or a Linux container)
 go run ./cmd/btproxy -backend fake -listen 127.0.0.1:16053 &
 python -m venv .venv && .venv/bin/pip install aioesphomeapi
 .venv/bin/python test/e2e.py 127.0.0.1 16053
