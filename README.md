@@ -38,7 +38,7 @@ GATT connections and discover over mDNS. "?" means not checked.
 
 | Feature | btproxy | ESPHome ESP32 | denvera/bt-proxy |
 |---|---|---|---|
-| Runs on | Linux (no BlueZ needed), Windows 10 2004+ and 11; static binary, 4 to 5 MB | ESP32 | Linux (BlueZ), Python |
+| Runs on | Linux (no BlueZ needed), Windows 10 2004+ and 11; static binary, 3.7 to 5.2 MiB | ESP32 | Linux (BlueZ), Python |
 | Advertisements | Linux: raw from HCI monitor, else rebuilt; Windows: rebuilt | raw | rebuilt by bleak |
 | Passive scanning | Linux: kernel 5.10+; on BlueZ also `bluetoothd --experimental` | yes | yes |
 | Retry of radio connect failures | yes | ? | yes |
@@ -51,7 +51,7 @@ GATT connections and discover over mDNS. "?" means not checked.
 | Advertisement filter | allow/deny lists | ? | no |
 | Several adapters | Linux: one device each | n/a | one per process |
 | Settings | flags, file, web page; Windows tray | YAML, compiled in | flags |
-| Recovers from `bluetoothd` restarts, hangs | yes | n/a | restarts ?; on a hang it backs off and logs a hint |
+| Recovers from hangs | adapter hangs and loss; on BlueZ also `bluetoothd` restarts | n/a | restarts ?; on a hang it backs off and logs a hint |
 
 Shelly Gen2+, the Ruuvi Gateway and Theengs / OpenMQTTGateway relay advertisements but cannot connect.
 
@@ -85,17 +85,154 @@ what that covers.
 
 ## Install
 
-OpenWrt has packages: see [Deploy](#deploy). Otherwise, download the archive for your platform from the
-[releases](https://github.com/yuzi-co/btproxy/releases) and unpack it (`tar xzf` on Linux, a `.zip` on Windows),
-then see [Deploy](#deploy).
-With Go 1.27.3 or newer: `go install github.com/yuzi-co/btproxy/cmd/btproxy@latest`. There is also a
+OpenWrt has packages and a signed feed: see [OpenWrt](#openwrt). Otherwise, download the archive for your platform
+from the [releases](https://github.com/yuzi-co/btproxy/releases) and unpack it (`tar xzf` on Linux, a `.zip` on
+Windows), then see [Deploy](#deploy) below. With Go 1.27.3 or newer: `go install github.com/yuzi-co/btproxy/cmd/btproxy@latest`. There is also a
 [Docker image](#docker) for Linux hosts.
+
+## Deploy
+
+### OpenWrt
+
+Install the package for your router's instruction set: `mipsle` (such as MT7620 and MT7621), `armv7`, `arm64` or
+`amd64`. There is no build for big-endian MIPS, which includes ath79. The dependency, the kernel's Bluetooth support,
+comes from OpenWrt's feeds, and the service starts straight away. BlueZ is no longer installed with it.
+
+**Upgrading from 0.4 removes BlueZ and moves the router to the kernel backend**, if BlueZ came in as this package's
+dependency: both package managers remove `bluez-daemon` as no longer needed. Bonds stay and are copied on the first
+start, though `/var/lib/bluetooth` must be on flash for that, as described below. A `bluez-daemon` you installed by
+name stays, and so does the use of BlueZ. To keep BlueZ, on apk run `apk add bluez-daemon` before the upgrade; on opkg
+run `opkg install bluez-daemon` after it, then `/etc/init.d/bluetoothd enable`, `/etc/init.d/bluetoothd start` and
+`/etc/init.d/btproxy restart`. opkg leaves `dbus` and some libraries behind, which `opkg remove` can clear. See
+[Moving from BlueZ](docs/migrating-from-bluez.md).
+
+OpenWrt 25.12 and newer, from the signed feed (replace `mipsle` with your instruction set):
+
+```sh
+wget -O /etc/apk/keys/btproxy.pem https://yuzi-co.github.io/btproxy/keys/btproxy.pem
+echo https://yuzi-co.github.io/btproxy/apk/mipsle/packages.adb >> /etc/apk/repositories.d/customfeeds.list
+apk update
+apk add btproxy
+```
+
+OpenWrt 24.10 and older:
+
+```sh
+wget -O /tmp/btproxy.pub https://yuzi-co.github.io/btproxy/keys/usign.pub
+cp /tmp/btproxy.pub /etc/opkg/keys/$(usign -F -p /tmp/btproxy.pub)
+echo "src/gz btproxy https://yuzi-co.github.io/btproxy/opkg/mipsle" >> /etc/opkg/customfeeds.conf
+opkg update
+opkg install btproxy
+```
+
+- Upgrade with `apk update && apk upgrade btproxy` or `opkg update && opkg upgrade btproxy`. The feed holds only
+  the latest release, and also has `luci-app-btproxy`.
+- Tested on a 23.05 router, and in OpenWrt 23.05, 24.10 and 25.12 containers.
+- Adding the key trusts it for every package on the router, not only for btproxy, and OpenWrt has no way to revoke
+  it. If you would rather not, install from a package file instead.
+
+Without the feed, download the package file and install it, then run the same commands to upgrade; settings stay.
+`--allow-untrusted` is there because the files are not signed. opkg on 23.05 and apk do not install a package file
+from an `https://` URL themselves, hence `wget`.
+
+```sh
+# 25.12 and newer
+apk update
+wget -O /tmp/btproxy.apk https://github.com/yuzi-co/btproxy/releases/latest/download/btproxy-linux-mipsle.apk
+apk add --allow-untrusted /tmp/btproxy.apk
+# 24.10 and older
+opkg update
+wget -O /tmp/btproxy.ipk https://github.com/yuzi-co/btproxy/releases/latest/download/btproxy-linux-mipsle.ipk
+opkg install /tmp/btproxy.ipk
+```
+
+A router that installed from a package file moves onto the feed with `apk add btproxy && apk upgrade btproxy`, as apk
+pins a file install to that file, or with `opkg upgrade btproxy`.
+
+- Flash: the package takes about 1.9 MB, on top of the stick's firmware. Removing BlueZ with its dependencies frees
+  roughly 3 MB (3.3 MB on the test router), unless something else needs them: `opkg remove bluez-daemon` and so on,
+  or `apk del bluez-daemon`. The package manager refuses when that does not fit. opkg asks for the whole package to
+  be free even for an upgrade, which replaces the old copy: if `df /overlay` shows that it does fit, add
+  `--force-space`.
+- The stick's firmware is yours to pick: install it too, such as `rtl8761bu-firmware`.
+- Settings: the LuCI page below, or `/etc/config/btproxy`, then `uci commit btproxy && /etc/init.d/btproxy reload`.
+  An option set there locks that field on the settings page, and an empty one leaves the field to the page.
+  `extra_args` takes any other flag.
+- An upgrade may print `resolve_conffiles: Existing conffile /etc/config/btproxy is different` under "Collected
+  errors", and leave the package's default as `/etc/config/btproxy-opkg`. That only means your settings were kept,
+  and the copy can go.
+- Encryption: the LuCI page generates a key. Or put the key in `/etc/btproxy.key` (`chmod 600`), and the service
+  passes it when the file exists. OpenWrt's busybox has no `base64`, so generate that one elsewhere.
+- Settings page: set `ui` (such as `:8080`) and put a password in `/etc/btproxy.uipass` (`chmod 600`). With LuCI
+  there is no need for it.
+- The kernel backend keeps bonds in `/etc/btproxy`, on flash. On BlueZ, `/var/lib/bluetooth` is on tmpfs: link it to
+  flash, to `/etc/bluetooth/keys`, so bonds survive a reboot.
+- `sysupgrade` keeps the settings, the key, the page password, `/etc/btproxy` and `/etc/bluetooth/keys`. It does not
+  keep packages, so install this one again afterwards.
+
+For a page in LuCI, under Services, Bluetooth proxy, add `luci-app-btproxy`: `apk add luci-app-btproxy` or
+`opkg install luci-app-btproxy` from the feed, or `luci-app-btproxy.apk` or `.ipk` from the release, installed like
+the main package. It is the same package for every instruction set, and took 24 KB of flash on the test router, plus
+`luci-base` if the router has no LuCI.
+
+The page has the settings above, starts and stops the service, shows its recent log, and generates, replaces or
+removes the key in `/etc/btproxy.key`. It shows a new key once, in the browser that generated it, and its access
+rules do not let it read the key file. The key travels the way LuCI's own traffic does, so over plain HTTP unless
+LuCI uses HTTPS. Live figures such as clients and advertisement rate are in Home Assistant's diagnostic sensors, not
+on this page.
+
+To install by hand, copy the binary to `/usr/bin/btproxy`,
+[btproxy.init](contrib/openwrt/btproxy.init) to `/etc/init.d/btproxy` and
+[btproxy.config](contrib/openwrt/btproxy.config) to `/etc/config/btproxy`.
+
+### systemd and Windows
+
+systemd (Raspberry Pi OS, Debian): copy the binary to `/usr/local/bin/btproxy` and
+[contrib/systemd/btproxy.service](contrib/systemd/btproxy.service) to `/etc/systemd/system/`, then
+`systemctl enable --now btproxy`. The unit starts after `bluetooth.service` if that is enabled, without starting it or
+depending on it, so the proxy survives a `bluetoothd` restart. Bonds on the kernel backend go in `/var/lib/btproxy`. For encryption, put the key in `/etc/btproxy.key` (`chmod 600`) and use the two
+commented `ExecStart` lines, which pass it as a systemd credential. The unit runs as root with a read-only file
+system and other sandboxing; a settings file the page should save needs its directory in `ReadWritePaths=`.
+
+Windows: put the `-H windowsgui` build somewhere permanent, start it, allow it through the firewall (program
+rule, or TCP 6053 and UDP 5353), tick Start with Windows in the tray, and configure on the settings page.
+
+### Docker
+
+The image is for Linux hosts on amd64, arm64 and armv7. It has been tried on a Raspberry Pi 3's built-in adapter,
+with the command below and the kernel backend, the host's bond folder mounted in place of the volume. It connected to
+two devices, one of them bonded. Not tried yet: BlueZ from a container, pairing a new device, and adapter recovery.
+
+```sh
+docker run -d --name btproxy --restart unless-stopped --network host \
+  -v btproxy-bonds:/etc/btproxy -v /run/dbus:/run/dbus:ro \
+  --read-only --cap-drop ALL --cap-add NET_RAW --cap-add NET_ADMIN --security-opt no-new-privileges \
+  ghcr.io/yuzi-co/btproxy -name btproxy-docker
+```
+
+Or use [contrib/docker/compose.yaml](contrib/docker/compose.yaml). Flags go after the image name.
+
+- Docker Desktop on Windows or macOS cannot reach the host's adapter, because containers run in a VM. Use the
+  Windows binary instead.
+- With `bluetoothd` running on the host it uses BlueZ, through the `/run/dbus` mount. Otherwise it uses the kernel
+  backend, which keeps bonds in the `btproxy-bonds` volume. To copy BlueZ bonds on the first start, also mount
+  `/var/lib/bluetooth:/var/lib/bluetooth:ro`.
+- A container that starts before the host's `bluetoothd` picks the kernel backend, and logs an error once `bluetoothd`
+  is up. Restart the container, or stop `bluetoothd`.
+- On BlueZ, the proxy cannot restart a hung `bluetoothd` on the host: the image has no shell for `-bluetoothd-restart`, so
+  there is no Restart Bluetooth stack button either. It power-cycles the adapter, then keeps retrying and reports
+  failed until the host's `bluetoothd` is restarted.
+- On BlueZ, passive scanning and `ConnectDevice` depend on the host's `bluetoothd --experimental`, as in
+  [Scanning](#scanning).
+- For encryption, mount the key file read-only and pass `-encryption-key-file`. For the settings page, pass
+  `-ui`, `-ui-password-file` and a `-config` file in a mounted directory.
 
 ## Build
 
 Needs Go 1.27.3 or newer.
 
 ```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64  go build -trimpath -ldflags="-s -w" -o dist/btproxy-amd64  ./cmd/btproxy
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64  go build -trimpath -ldflags="-s -w" -o dist/btproxy-arm64  ./cmd/btproxy
 CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" -o dist/btproxy-armv7 ./cmd/btproxy
 CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldflags="-s -w" -o dist/btproxy-mipsle ./cmd/btproxy
@@ -117,7 +254,7 @@ given a key:
 CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -tags nonoise -trimpath -ldflags="-s -w" -o dist/btproxy-mipsle ./cmd/btproxy
 ```
 
-Generated code: `go generate ./internal/ble/winrt/gen` (WinRT bindings), `go generate ./cmd/btproxy` (icon).
+Generated code: `go generate ./internal/ble/winrt/gen` (WinRT bindings), `GOOS=windows go generate ./cmd/btproxy` (tray icon; the directive is in a Windows-only file).
 
 ## Run
 
@@ -175,14 +312,14 @@ On Linux, the default `-backend auto` picks one at start and logs why:
 
 `auto` asks the kernel which programs hold a Bluetooth control socket, so it also sees a `bluetoothd` on the host of a
 container. A `bluetoothd` that starts after the proxy is not stopped: the proxy logs an error within a minute, and
-needs a restart to change backend. The contrib scripts start the proxy after `bluetoothd`.
+needs a restart to change backend. The OpenWrt init script and the systemd unit start the proxy after `bluetoothd`.
 
 The kernel backend has run as root on the router under Status and on a Raspberry Pi 3's built-in adapter, with the
 shipped systemd unit on the Pi.
 
 - Tried with Home Assistant and two devices (a Tion Breezer 4S and a PAX Calima): scanning, connecting, GATT reads,
   writes and notifications, bonds copied from BlueZ, and pairing, once, with the Breezer.
-- Docker: tried on a Raspberry Pi 3, connecting to both devices with bonds already in place.
+- Docker: see [Docker](#docker).
 - Not tried: running without root, unpairing, connection parameter changes, several adapters, losing and
   regaining the adapter, and the recovery steps.
 
@@ -190,20 +327,8 @@ It does not reduce the radio failures described under
 [Scan pause and connect retries](#scan-pause-and-connect-retries): on the router they came at about the same rate as
 on BlueZ.
 
-To move to it, stop `bluetoothd` and restart the proxy:
-
-```sh
-# OpenWrt
-/etc/init.d/bluetoothd stop; /etc/init.d/bluetoothd disable; /etc/init.d/btproxy restart
-# systemd: mask, as another unit or a D-Bus request can start it again if it is only disabled
-systemctl mask --now bluetooth; systemctl restart btproxy
-```
-
-Then check the log for `backend chosen`. The first start that finds BlueZ bonds for an adapter copies them from
-`/var/lib/bluetooth`, so bonded devices do not need pairing again. Once this backend has a bond file for the adapter,
-later BlueZ bonds are not copied. To go back, enable and start
-`bluetoothd` (on systemd, `systemctl unmask bluetooth` first) and restart the proxy. Devices paired since then need pairing again, as BlueZ does not have their keys.
-[Moving from BlueZ](docs/migrating-from-bluez.md) has the full steps.
+To move a host from BlueZ, stop `bluetoothd` and restart the proxy. Its first start copies the bonds from
+`/var/lib/bluetooth`. [Moving from BlueZ](docs/migrating-from-bluez.md) has the steps, checks and how to go back.
 
 ### Several adapters
 
@@ -361,9 +486,9 @@ one.
 ## Scanning
 
 Home Assistant can switch `-scan-mode` at run time. Reported states carry the mode in use (active when passive
-is unavailable): running, idle (no subscriber or paused for a connect), failed (retried every 10 s), stopped
-(adapter off and cannot be powered on). The kernel backend differs: it stays running during a connect's pause, retries
-every 5 s, and reports failed rather than stopped when the adapter is lost.
+is unavailable): running (also during a connect's pause), idle (no subscriber) or failed (retried every 5 s, also
+when the adapter is lost). On BlueZ the pause reports idle, failed is retried every 10 s, and an adapter that is off
+and cannot be powered on reports stopped.
 
 Passive scanning uses advertisement monitors, which need kernel 5.10+; without them the kernel backend scans actively.
 On BlueZ they also need BlueZ 5.56+ and `bluetoothd --experimental` (`-E`); otherwise the proxy scans actively and retries passive after a `bluetoothd` restart. If BlueZ drops monitors
@@ -414,16 +539,15 @@ write access to `/dev/bus/usb`, which the Docker example does not give.
 
 ### Scan pause and connect retries
 
-With `-scan-pause-on-connect`, from the connect call until services are resolved or it fails, the proxy stops
-scanning and reports idle. Otherwise the kernel resumes scanning once the link is up; with an RTL8761B about
-half the connects then failed with HCI reason 0x3e. Overlapping connects share one pause, capped at 60 s. It
-cannot stop scanning the kernel does for another pending connect or a `bluetoothd` auto-reconnect. Pairing does
-not pause scanning. Windows pauses the same way.
+With `-scan-pause-on-connect`, from the connect call until the link's first exchange (MTU) or failure, the kernel
+backend stops discovery and removes its advertisement monitor, and waits up to 2 s for that before connecting anyway.
+Connects take at most 30 s, so the pause does too. Without `-scan-pause-on-connect` it still stops discovery during a
+connect, and keeps only the monitor. Pairing does not pause scanning.
 
-The kernel backend pauses differently. From the connect call until the link's first exchange (MTU) or failure, it
-removes its advertisement monitor as well as stopping discovery, and waits up to 2 s for that before connecting
-anyway. There is no 60 s cap, as connects take at most 30 s. Without `-scan-pause-on-connect` it still stops discovery
-during a connect, and keeps only the monitor.
+On BlueZ and Windows the pause lasts from the connect call until services are resolved or it fails, and the proxy
+reports idle meanwhile. Overlapping connects share one pause, capped at 60 s. On BlueZ it cannot stop scanning the
+kernel does for another pending connect or a `bluetoothd` auto-reconnect. Without the pause the kernel resumes
+scanning once the link is up; with an RTL8761B about half the connects then failed with HCI reason 0x3e.
 
 On a router the stick also shares the air with the router's own 2.4 GHz Wi-Fi. On a test router with an RTL8761B a
 single attempt succeeded about 30% of the time, 45% with the Bluetooth channels under the router's Wi-Fi left out
@@ -432,15 +556,15 @@ dropped before its services resolved as well took it from 39 of 60 connects to 5
 the same evening. Moving the stick away from the antennas with a USB extension cable is worth trying, though that
 has not been measured.
 
-Connects that still fail within about half a second (`le-connection-abort-by-local`, or an error without
-message) are retried after 200 ms, still paused, up to `-connect-retries` times. So is a link that comes up and
-drops before its services are resolved, usually a few seconds later. Not retried: those radio errors after 3 s,
-other errors, withdrawn connects, and retries more than 5 s after the first attempt. A retried connect logs
-`connected after retries`.
+Failed connects are retried, still paused, up to `-connect-retries` times, and a retried connect logs
+`connected after retries`. The kernel backend retries HCI reason 0x3e and a link lost before that first exchange if
+the attempt took up to 5 s, and any other error if it came within 3 s. Errors another attempt cannot change, such as
+no permission or no adapter, are not retried.
 
-On the kernel backend, HCI reason 0x3e and a link lost before that first exchange are retried if the attempt took up
-to 5 s, and any other error if it came within 3 s. Errors another attempt cannot change, such as no permission or no
-adapter, are not retried.
+On BlueZ, connects that fail within about half a second (`le-connection-abort-by-local`, or an error without
+message) are retried after 200 ms, and so is a link that comes up and drops before its services are resolved,
+usually a few seconds later. Not retried: those radio errors after 3 s, other errors, withdrawn connects, and retries
+more than 5 s after the first attempt.
 
 A bonded device can also cause 0x3e on every attempt by ignoring other adapters: see
 [Bonded devices](#bonded-devices).
@@ -524,150 +648,7 @@ The buttons are disabled by default in Home Assistant. Without an [encryption](#
 reach the API can use them, as it can the rest of the API. Do not press Restart proxy from an automation that
 triggers on the proxy's own problems: that can restart it in a loop.
 
-## Deploy
-
-### OpenWrt
-
-Install the package for your router's instruction set: `mipsle` (such as MT7620 and MT7621), `armv7`, `arm64` or
-`amd64`. There is no build for big-endian MIPS, which includes ath79. The dependency, the kernel's Bluetooth support,
-comes from OpenWrt's feeds, and the service starts straight away. BlueZ is no longer installed with it.
-
-**Upgrading from 0.4 removes BlueZ and moves the router to the kernel backend**, if BlueZ came in as this package's
-dependency: both package managers remove `bluez-daemon` as no longer needed. Bonds stay and are copied on the first
-start, though `/var/lib/bluetooth` must be on flash for that, as described below. A `bluez-daemon` you installed by
-name stays, and so does the use of BlueZ. To keep BlueZ, on apk run `apk add bluez-daemon` before the upgrade; on opkg
-run `opkg install bluez-daemon` after it, then `/etc/init.d/bluetoothd enable`, `/etc/init.d/bluetoothd start` and
-`/etc/init.d/btproxy restart`. opkg leaves `dbus` and some libraries behind, which `opkg remove` can clear. See
-[Moving from BlueZ](docs/migrating-from-bluez.md).
-
-The signed feed upgrades like any other package. Replace `mipsle` with your instruction set.
-
-OpenWrt 25.12 and newer:
-
-```sh
-wget -O /etc/apk/keys/btproxy.pem https://yuzi-co.github.io/btproxy/keys/btproxy.pem
-echo https://yuzi-co.github.io/btproxy/apk/mipsle/packages.adb >> /etc/apk/repositories.d/customfeeds.list
-apk update
-apk add btproxy
-```
-
-OpenWrt 24.10 and older, tested on 23.05 and 24.10:
-
-```sh
-wget -O /tmp/btproxy.pub https://yuzi-co.github.io/btproxy/keys/usign.pub
-cp /tmp/btproxy.pub /etc/opkg/keys/$(usign -F -p /tmp/btproxy.pub)
-echo "src/gz btproxy https://yuzi-co.github.io/btproxy/opkg/mipsle" >> /etc/opkg/customfeeds.conf
-opkg update
-opkg install btproxy
-```
-
-- Upgrade with `apk update && apk upgrade btproxy` or `opkg update && opkg upgrade btproxy`. The feed also has
-  `luci-app-btproxy`, and holds only the latest release.
-- A router that installed from a package file moves onto the feed with `apk add btproxy && apk upgrade btproxy`, as
-  apk pins a file install to that file, or with `opkg upgrade btproxy`.
-- Adding the key trusts it for every package on the router, not only for btproxy, and OpenWrt has no way to revoke
-  it. If you would rather not, install from a package file.
-
-Or install from a package file. OpenWrt 25.12 and newer:
-
-```sh
-apk update
-wget -O /tmp/btproxy.apk https://github.com/yuzi-co/btproxy/releases/latest/download/btproxy-linux-mipsle.apk
-apk add --allow-untrusted /tmp/btproxy.apk
-```
-
-OpenWrt 24.10 and older, tested on 23.05 and 24.10:
-
-```sh
-opkg update
-wget -O /tmp/btproxy.ipk https://github.com/yuzi-co/btproxy/releases/latest/download/btproxy-linux-mipsle.ipk
-opkg install /tmp/btproxy.ipk
-```
-
-`--allow-untrusted` is there because the packages are not signed. Run the same commands to upgrade: settings stay. opkg on 23.05 and apk do not install a package file from an `https://` URL themselves, hence `wget`.
-
-- Flash: the package takes about 1.9 MB, on top of the stick's firmware. Removing BlueZ with its dependencies frees roughly 3 MB (3.3 MB
-  on the test router), unless something else needs them: `opkg remove bluez-daemon` and so on, or `apk del bluez-daemon`.
-  The
-  package manager refuses when that does not fit. opkg asks for the whole package to be free even
-  for an upgrade, which replaces the old copy: if `df /overlay` shows that it does fit, add `--force-space`.
-- The stick's firmware is yours to pick: install it too, such as `rtl8761bu-firmware`.
-- Settings: the LuCI page below, or `/etc/config/btproxy`, then `uci commit btproxy && /etc/init.d/btproxy reload`.
-  An option set there locks that field on the settings page, and an empty one leaves the field to the page.
-  `extra_args` takes any other flag.
-- An upgrade may print `resolve_conffiles: Existing conffile /etc/config/btproxy is different` under "Collected
-  errors", and leave the package's default as `/etc/config/btproxy-opkg`. That only means your settings were kept,
-  and the copy can go.
-- Encryption: the LuCI page generates a key. Or put the key in `/etc/btproxy.key` (`chmod 600`), and the service
-  passes it when the file exists. OpenWrt's busybox has no `base64`, so generate that one elsewhere.
-- Settings page: set `ui` (such as `:8080`) and put a password in `/etc/btproxy.uipass` (`chmod 600`). With LuCI
-  there is no need for it.
-- The kernel backend keeps bonds in `/etc/btproxy`, on flash. On BlueZ, `/var/lib/bluetooth` is on tmpfs: link it to
-  flash, to `/etc/bluetooth/keys`, so bonds survive a reboot.
-- `sysupgrade` keeps the settings, the key, the page password, `/etc/btproxy` and `/etc/bluetooth/keys`. It does not
-  keep packages, so install this one again afterwards.
-
-For a page in LuCI, under Services, Bluetooth proxy, add `luci-app-btproxy`, the same package for every instruction
-set. It took 24 KB of flash on the test router, plus `luci-base` if the router has no LuCI.
-
-```sh
-wget -O /tmp/luci-app-btproxy.ipk https://github.com/yuzi-co/btproxy/releases/latest/download/luci-app-btproxy.ipk
-opkg install /tmp/luci-app-btproxy.ipk
-```
-
-On 25.12 and newer, download `luci-app-btproxy.apk` the same way and use `apk add --allow-untrusted`.
-
-The page has the settings above, starts and stops the service, shows its recent log, and generates, replaces or
-removes the key in `/etc/btproxy.key`. It shows a new key once, in the browser that generated it, and its access
-rules do not let it read the key file. The key travels the way LuCI's own traffic does, so over plain HTTP unless
-LuCI uses HTTPS. Live figures such as clients and advertisement rate are in Home Assistant's diagnostic sensors, not
-on this page.
-
-To install by hand, copy the binary to `/usr/bin/btproxy`,
-[btproxy.init](contrib/openwrt/btproxy.init) to `/etc/init.d/btproxy` and
-[btproxy.config](contrib/openwrt/btproxy.config) to `/etc/config/btproxy`.
-
-systemd (Raspberry Pi OS, Debian): copy the binary to `/usr/local/bin/btproxy` and
-[contrib/systemd/btproxy.service](contrib/systemd/btproxy.service) to `/etc/systemd/system/`, then
-`systemctl enable --now btproxy`. The unit starts after `bluetooth.service` if that is enabled, without starting it or
-depending on it, so the proxy survives a `bluetoothd` restart. Bonds on the kernel backend go in `/var/lib/btproxy`. For encryption, put the key in `/etc/btproxy.key` (`chmod 600`) and use the two
-commented `ExecStart` lines, which pass it as a systemd credential. The unit runs as root with a read-only file
-system and other sandboxing; a settings file the page should save needs its directory in `ReadWritePaths=`.
-
-Windows: put the `-H windowsgui` build somewhere permanent, start it, allow it through the firewall (program
-rule, or TCP 6053 and UDP 5353), tick Start with Windows in the tray, and configure on the settings page.
-
-### Docker
-
-The image is for Linux hosts on amd64, arm64 and armv7. It has been tried on a Raspberry Pi 3's built-in adapter,
-with the command below and the kernel backend, the host's bond folder mounted in place of the volume. It connected to
-two devices, one of them bonded. Not tried yet: BlueZ from a container, pairing a new device, and adapter recovery.
-
-```sh
-docker run -d --name btproxy --restart unless-stopped --network host \
-  -v btproxy-bonds:/etc/btproxy -v /run/dbus:/run/dbus:ro \
-  --read-only --cap-drop ALL --cap-add NET_RAW --cap-add NET_ADMIN --security-opt no-new-privileges \
-  ghcr.io/yuzi-co/btproxy -name btproxy-docker
-```
-
-Or use [contrib/docker/compose.yaml](contrib/docker/compose.yaml). Flags go after the image name.
-
-- Docker Desktop on Windows or macOS cannot reach the host's adapter, because containers run in a VM. Use the
-  Windows binary instead.
-- With `bluetoothd` running on the host it uses BlueZ, through the `/run/dbus` mount. Otherwise it uses the kernel
-  backend, which keeps bonds in the `btproxy-bonds` volume. To copy BlueZ bonds on the first start, also mount
-  `/var/lib/bluetooth:/var/lib/bluetooth:ro`.
-- A container that starts before the host's `bluetoothd` picks the kernel backend, and logs an error once `bluetoothd`
-  is up. Restart the container, or stop `bluetoothd`.
-- On BlueZ, the proxy cannot restart a hung `bluetoothd` on the host: the image has no shell for `-bluetoothd-restart`, so
-  there is no Restart Bluetooth stack button either. It power-cycles the adapter, then keeps retrying and reports
-  failed until the host's `bluetoothd` is restarted.
-- On BlueZ, passive scanning and `ConnectDevice` depend on the host's `bluetoothd --experimental`, as in
-  [Scanning](#scanning).
-- For encryption, mount the key file read-only and pass `-encryption-key-file`. For the settings page, pass
-  `-ui`, `-ui-password-file` and a `-config` file in a mounted directory.
-
-### Bonded devices
+## Bonded devices
 
 Devices that need an encrypted link must be bonded with the proxy's adapter. Home
 Assistant can pair a connected device through the proxy (`bluetooth_device_pair`); an already paired device is
