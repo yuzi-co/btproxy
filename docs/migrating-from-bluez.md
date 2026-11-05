@@ -63,7 +63,7 @@ systemctl restart btproxy
 
 Mask rather than disable: another unit or a D-Bus request can start a service that is only disabled.
 
-Docker: stop `bluetoothd` on the host, mount `/var/lib/bluetooth:/var/lib/bluetooth:ro` for the first start, and restart the container. The Docker image has not been tried against a real adapter yet.
+Docker: stop `bluetoothd` on the host, mount `/var/lib/bluetooth:/var/lib/bluetooth:ro` for the first start, and restart the container. The Docker image has been tried against a real adapter, but not copying bonds from `/var/lib/bluetooth`.
 
 ## Check it worked
 
@@ -96,7 +96,7 @@ opkg remove bluez-daemon  # 24.10 and older, followed by dbus and the libraries 
 
 On other distributions, remove the `bluez` package if nothing else needs it.
 
-The `-nobluez` archives leave BlueZ and D-Bus out of the binary as well, which saves about 0.6 to 0.7 MiB. On an OpenWrt router that is only about 0.2 MB of flash, because the overlay compresses the binary. A `nobluez` build always uses the kernel backend.
+A build with `-tags nobluez` leaves BlueZ and D-Bus out of the binary as well, which saves about 0.6 to 0.7 MiB. Releases up to 0.6.0 include it as `-nobluez` archives, and the [README](../README.md#build) shows how to build it. On an OpenWrt router that is only about 0.2 MB of flash, because the overlay compresses the binary. A `nobluez` build always uses the kernel backend.
 
 ## Go back
 

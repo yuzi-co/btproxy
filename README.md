@@ -106,7 +106,9 @@ Sizes: arm64 4.4 MiB, armv7 4.6 MiB, amd64 4.7 MiB, mipsle 5.2 MiB, Windows 3.7 
 `-H windowsgui` the Windows binary is a console program that logs like on Linux, with no tray.
 
 `-tags nobluez` leaves out BlueZ and D-Bus and makes `kernel` the default backend: arm64 3.8 MiB, armv7 3.9 MiB,
-amd64 4.1 MiB, mipsle 4.5 MiB. The releases have these as `btproxy-linux-<arch>-nobluez.tar.gz`.
+amd64 4.1 MiB, mipsle 4.5 MiB. Releases up to 0.6.0 had these as `btproxy-linux-<arch>-nobluez.tar.gz`. Later
+releases leave them out: on an OpenWrt router the saving is only about 0.2 MB of flash, and the regular build will
+lose BlueZ too once its support goes.
 
 `-tags nonoise` leaves out API encryption (about 0.3 MiB less on mipsle, 4.9 MiB); such a build refuses to start when
 given a key:
@@ -180,7 +182,8 @@ shipped systemd unit on the Pi.
 
 - Tried with Home Assistant and two devices (a Tion Breezer 4S and a PAX Calima): scanning, connecting, GATT reads,
   writes and notifications, bonds copied from BlueZ, and pairing, once, with the Breezer.
-- Not tried: Docker, running without root, unpairing, connection parameter changes, several adapters, losing and
+- Docker: tried on a Raspberry Pi 3, connecting to both devices with bonds already in place.
+- Not tried: running without root, unpairing, connection parameter changes, several adapters, losing and
   regaining the adapter, and the recovery steps.
 
 It does not reduce the radio failures described under
@@ -636,7 +639,9 @@ rule, or TCP 6053 and UDP 5353), tick Start with Windows in the tray, and config
 
 ### Docker
 
-The image is for Linux hosts on amd64, arm64 and armv7. It has not been tried against a real adapter yet.
+The image is for Linux hosts on amd64, arm64 and armv7. It has been tried on a Raspberry Pi 3's built-in adapter,
+with the command below and the kernel backend, the host's bond folder mounted in place of the volume. It connected to
+two devices, one of them bonded. Not tried yet: BlueZ from a container, pairing a new device, and adapter recovery.
 
 ```sh
 docker run -d --name btproxy --restart unless-stopped --network host \
