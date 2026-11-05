@@ -1,7 +1,7 @@
 name: Release
 
 # Pushing a tag such as v0.1.0 publishes a GitHub release with an archive for each platform and their checksums,
-# then a container image on GitHub's registry.
+# then a container image on GitHub's registry and the signed OpenWrt feed on GitHub Pages.
 
 on:
   push:
@@ -55,6 +55,50 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+
+  feed:
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }} # not for pre-releases such as v1.0.0-rc1
+    runs-on: ubuntu-latest
+    environment: openwrt-feed
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          USIGN_KEY: ${{ secrets.OPENWRT_USIGN_KEY }}
+          APK_KEY: ${{ secrets.OPENWRT_APK_KEY }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          mkdir -p packages site/keys
+          gh release download "$GITHUB_REF_NAME" --dir packages --pattern '*.ipk' --pattern '*.apk'
+          key=$(mktemp -d)
+          (umask 077; printf '%s\n' "$USIGN_KEY" > "$key/usign"; printf '%s\n' "$APK_KEY" > "$key/apk")
+          docker run --rm --entrypoint /bin/sh -v "$PWD:/src" -v "$key:/key:ro" -w /src openwrt/rootfs:x86_64-24.10.8 \
+            contrib/openwrt/feed.sh opkg "$version" packages site /key/usign
+          docker run --rm -v "$PWD:/src" -v "$key:/key:ro" -w /src alpine:3.23 \
+            sh contrib/openwrt/feed.sh apk "$version" packages site /key/apk
+          sudo chown -R "$(id -u):$(id -g)" site
+          cp contrib/openwrt/keys/usign.pub contrib/openwrt/keys/btproxy.pem site/keys/
+          rm -rf "$key"
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  pages:
+    needs: feed
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5
 
   image:
     needs: release

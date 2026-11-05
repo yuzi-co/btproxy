@@ -107,6 +107,7 @@ jobs:
       - name: Check the LuCI view's syntax
         run: node -e "new Function(require('fs').readFileSync('contrib/openwrt/luci/htdocs/luci-static/resources/view/btproxy.js', 'utf8'))"
       - run: test/openwrt_package.sh "${{ matrix.version }}" work/new work/old
+      - run: test/openwrt_feed.sh "${{ matrix.version }}" work/old work/new 0.0.2
       - name: Upgrade from a release that depends on BlueZ
         env:
           GH_TOKEN: ${{ github.token }}

@@ -537,7 +537,35 @@ run `opkg install bluez-daemon` after it, then `/etc/init.d/bluetoothd enable`, 
 `/etc/init.d/btproxy restart`. opkg leaves `dbus` and some libraries behind, which `opkg remove` can clear. See
 [Moving from BlueZ](docs/migrating-from-bluez.md).
 
+The signed feed upgrades like any other package. Replace `mipsle` with your instruction set.
+
 OpenWrt 25.12 and newer:
+
+```sh
+wget -O /etc/apk/keys/btproxy.pem https://yuzi-co.github.io/btproxy/keys/btproxy.pem
+echo https://yuzi-co.github.io/btproxy/apk/mipsle/packages.adb >> /etc/apk/repositories.d/customfeeds.list
+apk update
+apk add btproxy
+```
+
+OpenWrt 24.10 and older, tested on 23.05 and 24.10:
+
+```sh
+wget -O /tmp/btproxy.pub https://yuzi-co.github.io/btproxy/keys/usign.pub
+cp /tmp/btproxy.pub /etc/opkg/keys/$(usign -F -p /tmp/btproxy.pub)
+echo "src/gz btproxy https://yuzi-co.github.io/btproxy/opkg/mipsle" >> /etc/opkg/customfeeds.conf
+opkg update
+opkg install btproxy
+```
+
+- Upgrade with `apk update && apk upgrade btproxy` or `opkg update && opkg upgrade btproxy`. The feed also has
+  `luci-app-btproxy`, and holds only the latest release.
+- A router that installed from a package file moves onto the feed with `apk add btproxy && apk upgrade btproxy`, as
+  apk pins a file install to that file, or with `opkg upgrade btproxy`.
+- Adding the key trusts it for every package on the router, not only for btproxy, and OpenWrt has no way to revoke
+  it. If you would rather not, install from a package file.
+
+Or install from a package file. OpenWrt 25.12 and newer:
 
 ```sh
 apk update
@@ -553,7 +581,7 @@ wget -O /tmp/btproxy.ipk https://github.com/yuzi-co/btproxy/releases/latest/down
 opkg install /tmp/btproxy.ipk
 ```
 
-`--allow-untrusted` is there because the packages are not signed. Run the same commands to upgrade: settings stay. Neither package manager fetches from an `https://` URL itself, hence `wget`.
+`--allow-untrusted` is there because the packages are not signed. Run the same commands to upgrade: settings stay. opkg on 23.05 and apk do not install a package file from an `https://` URL themselves, hence `wget`.
 
 - Flash: the package takes about 1.9 MB, on top of the stick's firmware. Removing BlueZ with its dependencies frees roughly 3 MB (3.3 MB
   on the test router), unless something else needs them: `opkg remove bluez-daemon` and so on, or `apk del bluez-daemon`.

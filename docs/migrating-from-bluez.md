@@ -96,7 +96,7 @@ opkg remove bluez-daemon  # 24.10 and older, followed by dbus and the libraries 
 
 On other distributions, remove the `bluez` package if nothing else needs it.
 
-The `-nobluez` archives leave BlueZ and D-Bus out of the binary as well, which saves about 0.6 to 0.7 MiB. A `nobluez` build always uses the kernel backend.
+The `-nobluez` archives leave BlueZ and D-Bus out of the binary as well, which saves about 0.6 to 0.7 MiB. On an OpenWrt router that is only about 0.2 MB of flash, because the overlay compresses the binary. A `nobluez` build always uses the kernel backend.
 
 ## Go back
 
