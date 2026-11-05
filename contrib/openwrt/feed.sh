@@ -47,11 +47,17 @@ opkg)
 		dir=$out/opkg/$arch
 		mkdir -p "$dir"
 		cp "$package" "$dir/btproxy.ipk"
+		if [ -e "$packages/btproxy-nobluez-linux-$arch.ipk" ]; then
+			cp "$packages/btproxy-nobluez-linux-$arch.ipk" "$dir/btproxy-nobluez.ipk"
+		fi
 		cp "$packages/luci-app-btproxy.ipk" "$dir/"
 		(
 			cd "$dir"
 			: > Packages
 			ipk_entry btproxy.ipk
+			if [ -e btproxy-nobluez.ipk ]; then
+				ipk_entry btproxy-nobluez.ipk
+			fi
 			ipk_entry luci-app-btproxy.ipk
 			gzip -9nc Packages > Packages.gz
 		)
@@ -69,6 +75,9 @@ apk)
 		mkdir -p "$dir"
 		# The index holds no file names: apk asks for <name>-<version>.apk.
 		cp "$package" "$dir/btproxy-$apkversion-r1.apk"
+		if [ -e "$packages/btproxy-nobluez-linux-$arch.apk" ]; then
+			cp "$packages/btproxy-nobluez-linux-$arch.apk" "$dir/btproxy-nobluez-$apkversion-r1.apk"
+		fi
 		cp "$packages/luci-app-btproxy.apk" "$dir/luci-app-btproxy-$apkversion-r1.apk"
 		# The packages themselves are unsigned. The signed index holds their hashes, and that is what the router checks.
 		(cd "$dir" && apk mkndx --allow-untrusted --sign-key "$key" -o packages.adb ./*.apk)

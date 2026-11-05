@@ -2,10 +2,11 @@
 # Builds the signed feed with throwaway keys and uses it from a real OpenWrt root file system: a key it does not trust
 # and tampered files must be refused, and a router that installed from a file must be able to move onto the feed.
 #
-#   test/openwrt_feed.sh <openwrt version> <dir with an older btproxy-linux-amd64 package> <dir with the new packages> <new version>
+#   test/openwrt_feed.sh <openwrt version> <dir with the older packages> <dir with the new packages> <new version>
 #
-# The feed is served over HTTP from inside the container, as there is no certificate to serve HTTPS with. The new
-# directory needs btproxy-linux-amd64 and luci-app-btproxy. Needs Docker and an x86_64 host.
+# The feed is served over HTTP from inside the container, as there is no certificate to serve HTTPS with. The older
+# directory needs btproxy-linux-amd64 and btproxy-nobluez-linux-amd64, and the new one those and luci-app-btproxy.
+# Needs Docker and an x86_64 host.
 set -eu
 
 version=$1
@@ -98,6 +99,23 @@ if [ "$kind" = opkg ]; then
 	if run 'opkg list-installed | grep -q "^btproxy "'; then fail "a tampered package ended up installed"; fi
 	restore "$feed/btproxy.ipk"
 
+	# btproxy-nobluez takes the place of btproxy. opkg needs the old one removed first, and the LuCI page depends on it.
+	run "opkg list | grep -q '^btproxy-nobluez - $newversion-1'" || fail "the feed does not offer btproxy-nobluez"
+	run 'opkg install btproxy luci-app-btproxy' >/dev/null 2>&1 || fail "installing btproxy and the LuCI page from the feed"
+	run '/etc/init.d/btproxy stop; uci set btproxy.@btproxy[0].area=Marker || uci set btproxy.main.area=Marker; uci commit btproxy'
+	if run 'opkg install btproxy-nobluez' >/dev/null 2>&1; then fail "installed btproxy-nobluez alongside btproxy"; fi
+	run 'opkg remove luci-app-btproxy && opkg remove btproxy && opkg install btproxy-nobluez luci-app-btproxy' >/dev/null 2>&1 || true
+	run "opkg list-installed | grep -q '^btproxy-nobluez - $newversion-1'" || fail "swapping to btproxy-nobluez"
+	if run 'opkg list-installed | grep -q "^btproxy "'; then fail "btproxy stayed after the swap"; fi
+	run 'opkg list-installed | grep -q "^luci-app-btproxy "' || fail "the LuCI page did not come back with btproxy-nobluez"
+	run 'grep -q Marker /etc/config/btproxy' || fail "the swap lost the settings"
+	run '/etc/init.d/btproxy enabled' || fail "the swap left the service disabled"
+	run '/etc/init.d/btproxy stop; opkg remove luci-app-btproxy; opkg remove btproxy-nobluez' >/dev/null 2>&1
+	run 'opkg install /pkg/old/btproxy-nobluez-linux-amd64.ipk' >/dev/null 2>&1 || fail "installing the older btproxy-nobluez from a file"
+	run 'opkg upgrade btproxy-nobluez' >/dev/null 2>&1 || fail "upgrading btproxy-nobluez from the feed"
+	run "opkg list-installed | grep -q '^btproxy-nobluez - $newversion-1'" || fail "btproxy-nobluez did not reach the new version"
+	if run 'opkg list-installed | grep -q "^btproxy "'; then fail "upgrading btproxy-nobluez brought back btproxy"; fi
+
 	run "sed -i 's/^Description: .*/Description: tampered/' $feed/Packages; gzip -9nc $feed/Packages > $feed/Packages.gz"
 	run 'opkg update >/dev/null 2>&1' || true
 	if run 'opkg list | grep -q tampered'; then fail "believed a tampered index"; fi
@@ -131,6 +149,22 @@ else
 	run "cp $package /tmp/original; cp /pkg/old/btproxy-linux-amd64.apk $package"
 	if run 'apk add btproxy' >/dev/null 2>&1; then fail "installed a package the index does not list"; fi
 	restore "$package"
+
+	# btproxy-nobluez takes the place of btproxy in one command, and the LuCI page must stay.
+	run "apk search -e btproxy-nobluez | grep -q '^btproxy-nobluez-$apkversion-r1'" || fail "the feed does not offer btproxy-nobluez"
+	run 'apk add btproxy luci-app-btproxy' >/dev/null 2>&1 || fail "installing btproxy and the LuCI page from the feed"
+	run '/etc/init.d/btproxy stop; uci set btproxy.@btproxy[0].area=Marker || uci set btproxy.main.area=Marker; uci commit btproxy'
+	run 'apk add btproxy-nobluez' >/dev/null 2>&1 || fail "swapping to btproxy-nobluez"
+	run "apk list -I | grep -q '^btproxy-nobluez-$apkversion-r1'" || fail "btproxy-nobluez is not installed after the swap"
+	if run 'apk list -I | grep -q "^btproxy-[0-9]"'; then fail "btproxy stayed after the swap"; fi
+	run 'apk list -I | grep -q "^luci-app-btproxy-"' || fail "the swap removed the LuCI page"
+	run 'grep -q Marker /etc/config/btproxy' || fail "the swap lost the settings"
+	run '/etc/init.d/btproxy enabled' || fail "the swap left the service disabled"
+	run '/etc/init.d/btproxy stop; apk del luci-app-btproxy btproxy-nobluez btproxy' >/dev/null 2>&1 || true
+	run 'apk add --allow-untrusted /pkg/old/btproxy-nobluez-linux-amd64.apk' >/dev/null 2>&1 || fail "installing the older btproxy-nobluez from a file"
+	run 'apk add btproxy-nobluez && apk upgrade btproxy-nobluez' >/dev/null 2>&1 || fail "moving btproxy-nobluez onto the feed"
+	run "apk list -I | grep -q '^btproxy-nobluez-$apkversion-r1'" || fail "btproxy-nobluez did not reach the new version"
+	if run 'apk list -I | grep -q "^btproxy-[0-9]"'; then fail "upgrading btproxy-nobluez brought back btproxy"; fi
 
 	flip "$feed/packages.adb"
 	# The message depends on what the changed byte hit, such as "UNTRUSTED signature" or "ADB block error".

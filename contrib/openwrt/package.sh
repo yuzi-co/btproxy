@@ -1,7 +1,10 @@
 #!/bin/sh
 # Builds the OpenWrt packages for one architecture: an .ipk for opkg (up to 24.10) and an .apk for apk (25.12 on).
 #
-#   contrib/openwrt/package.sh <version> <amd64|arm64|armv7|mipsle> <binary> <output dir>
+#   contrib/openwrt/package.sh <version> <amd64|arm64|armv7|mipsle> <binary> <output dir> [nobluez]
+#
+# With nobluez, the binary must be a -tags nobluez build, and the package is btproxy-nobluez. It takes the place of
+# btproxy: the two have the same files, and the LuCI page depends on either.
 #
 # The binary is static, so one package covers every OpenWrt target of an instruction set. Packages are therefore
 # marked as architecture independent, and the post-install script checks that the binary runs on this router.
@@ -13,7 +16,15 @@ version=$1
 arch=$2
 binary=$3
 out=$4
+variant=${5:-}
 here=$(cd "$(dirname "$0")" && pwd)
+
+name=btproxy
+other=btproxy-nobluez
+if [ "$variant" = nobluez ]; then
+	name=btproxy-nobluez
+	other=btproxy
+fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -55,6 +66,13 @@ if [ "\$PKG_UPGRADE" = 1 ]; then
 	/etc/init.d/btproxy enabled && /etc/init.d/btproxy start
 	exit 0
 fi
+$(if [ "$variant" = nobluez ]; then cat <<'NOBLUEZ'
+# This build only has the kernel backend, which refuses to start while bluetoothd runs.
+if /etc/init.d/bluetoothd enabled 2>/dev/null || pidof bluetoothd >/dev/null; then
+	echo "btproxy-nobluez cannot run alongside bluetoothd: stop and disable it, then restart btproxy." >&2
+fi
+NOBLUEZ
+else cat <<'BLUEZ'
 # BlueZ is no longer a dependency, but a router may have it. A dbus that started before BlueZ was installed has not
 # read its policy, so bluetoothd cannot get on the bus, and the proxy would take the controller from an enabled one.
 if /etc/init.d/bluetoothd enabled 2>/dev/null && ! pidof bluetoothd >/dev/null; then
@@ -62,6 +80,8 @@ if /etc/init.d/bluetoothd enabled 2>/dev/null && ! pidof bluetoothd >/dev/null; 
 	sleep 1
 	/etc/init.d/bluetoothd restart >/dev/null 2>&1
 fi
+BLUEZ
+fi)
 /etc/init.d/btproxy enable
 /etc/init.d/btproxy start
 exit 0
@@ -102,10 +122,15 @@ tar $tarflags -C "$root" -czf "$ipk/data.tar.gz" .
 # The compressed size, as OpenWrt's own packages give it: the overlay compresses too, and opkg refuses a package
 # that does not fit by this number.
 size=$(wc -c < "$ipk/data.tar.gz")
+{
+	[ "$variant" = nobluez ] && printf 'Provides: btproxy\n'
+	printf 'Conflicts: %s\n' "$other"
+} > "$work/relations"
 cat > "$ipk/control/control" <<CONTROL
-Package: btproxy
+Package: $name
 Version: $version-1
 Depends: libc, kmod-bluetooth
+$(cat "$work/relations")
 Section: net
 Architecture: all
 Installed-Size: $size
@@ -117,7 +142,7 @@ printf '%s\n' "$conffiles" > "$ipk/control/conffiles"
 cp "$work/preinst" "$work/postinst" "$work/prerm" "$ipk/control/"
 tar $tarflags -C "$ipk/control" -czf "$ipk/control.tar.gz" .
 echo 2.0 > "$ipk/debian-binary"
-tar $tarflags -C "$ipk" -czf "$out/btproxy-linux-$arch.ipk" ./debian-binary ./data.tar.gz ./control.tar.gz
+tar $tarflags -C "$ipk" -czf "$out/$name-linux-$arch.ipk" ./debian-binary ./data.tar.gz ./control.tar.gz
 
 # .apk: OpenWrt reads the list of settings files from /lib/apk/packages.
 apkroot=$work/apkroot
@@ -125,8 +150,12 @@ cp -a "$root" "$apkroot"
 install -d "$apkroot/lib/apk/packages"
 printf '%s\n' "$conffiles" > "$apkroot/lib/apk/packages/btproxy.conffiles"
 apkversion=$(echo "$version" | tr - _) # apk's form of a pre-release: 1.0.0_rc1
+# Two packages that provide the same name at a version cannot be installed together, which is the conflict opkg states.
+provides=
+[ "$variant" = nobluez ] && provides="btproxy=$apkversion-r1"
 apk mkpkg \
-	--info "name:btproxy" \
+	--info "name:$name" \
+	${provides:+--info "provides:$provides"} \
 	--info "version:$apkversion-r1" \
 	--info "description:$desc" \
 	--info "arch:noarch" \
@@ -139,4 +168,4 @@ apk mkpkg \
 	--script "post-upgrade:$work/postupgrade" \
 	--script "pre-deinstall:$work/prerm" \
 	--files "$apkroot" \
-	--output "$out/btproxy-linux-$arch.apk"
+	--output "$out/$name-linux-$arch.apk"

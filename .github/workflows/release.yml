@@ -47,6 +47,7 @@ jobs:
             apk add -q tar
             for a in amd64 arm64 armv7 mipsle; do
               contrib/openwrt/package.sh "$VERSION" "$a" "pkg/linux-$a/btproxy" dist
+              contrib/openwrt/package.sh "$VERSION" "$a" "pkg/linux-$a-nobluez/btproxy" dist nobluez
             done
             contrib/openwrt/package-luci.sh "$VERSION" dist'
           sudo chown -R "$(id -u):$(id -g)" dist

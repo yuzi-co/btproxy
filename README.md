@@ -106,7 +106,8 @@ Sizes: arm64 4.4 MiB, armv7 4.6 MiB, amd64 4.7 MiB, mipsle 5.2 MiB, Windows 3.7 
 `-H windowsgui` the Windows binary is a console program that logs like on Linux, with no tray.
 
 `-tags nobluez` leaves out BlueZ and D-Bus and makes `kernel` the default backend: arm64 3.8 MiB, armv7 3.9 MiB,
-amd64 4.1 MiB, mipsle 4.5 MiB. The releases have these as `btproxy-linux-<arch>-nobluez.tar.gz`.
+amd64 4.1 MiB, mipsle 4.5 MiB. The releases have these as `btproxy-linux-<arch>-nobluez.tar.gz`, and for OpenWrt as
+the `btproxy-nobluez` package.
 
 `-tags nonoise` leaves out API encryption (about 0.3 MiB less on mipsle, 4.9 MiB); such a build refuses to start when
 given a key:
@@ -564,6 +565,10 @@ opkg install btproxy
   apk pins a file install to that file, or with `opkg upgrade btproxy`.
 - Adding the key trusts it for every package on the router, not only for btproxy, and OpenWrt has no way to revoke
   it. If you would rather not, install from a package file.
+- `btproxy-nobluez` is the same package without BlueZ support in the binary, and the feed has it too. It takes about
+  0.2 MB less flash, as the overlay compresses the binary, and cannot go back to BlueZ without changing package. To
+  swap, settings stay: `apk add btproxy-nobluez`, or on opkg `opkg remove btproxy && opkg install btproxy-nobluez`.
+  With the LuCI page on opkg, remove `luci-app-btproxy` first and install it again afterwards. Swap back the same way.
 
 Or install from a package file. OpenWrt 25.12 and newer:
 

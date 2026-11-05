@@ -96,11 +96,11 @@ opkg remove bluez-daemon  # 24.10 and older, followed by dbus and the libraries 
 
 On other distributions, remove the `bluez` package if nothing else needs it.
 
-The `-nobluez` archives leave BlueZ and D-Bus out of the binary as well, which saves about 0.6 to 0.7 MiB. A `nobluez` build always uses the kernel backend.
+The `-nobluez` archives and the `btproxy-nobluez` OpenWrt package leave BlueZ and D-Bus out of the binary as well. The binary is about 0.6 to 0.7 MiB smaller, or about 0.2 MB of flash on OpenWrt, where the overlay compresses it. A `nobluez` build always uses the kernel backend.
 
 ## Go back
 
-1. If BlueZ is gone, install it: `apk add bluez-daemon` or `opkg install bluez-daemon`. A `nobluez` build also has to be replaced with a regular one.
+1. If BlueZ is gone, install it: `apk add bluez-daemon` or `opkg install bluez-daemon`. A `nobluez` build also has to be replaced with a regular one, which the [README](../README.md#openwrt) shows for the package.
 2. OpenWrt: `/etc/init.d/bluetoothd enable; /etc/init.d/bluetoothd start`. systemd: `systemctl unmask bluetooth; systemctl enable --now bluetooth`.
 3. Restart the proxy. `auto` picks BlueZ while `bluetoothd` runs. If you set `-backend kernel`, change it to `auto` or `bluez` first.
 
