@@ -24,7 +24,13 @@ fail() {
 	docker exec "$name" sh -c 'logread | grep -a btproxy | tail -8' >&2 || true
 	exit 1
 }
-run() { MSYS_NO_PATHCONV=1 docker exec "$name" sh -c "$1"; }
+# Each command gets 3 minutes, so a hang fails with the command that hung instead of blocking the job.
+run() {
+	run_rc=0
+	MSYS_NO_PATHCONV=1 timeout -k 10 180 docker exec "$name" sh -c "$1" || run_rc=$?
+	[ $run_rc -ne 124 ] || echo "FAIL ($version): timed out after 180 s: $1" >&2
+	return $run_rc
+}
 stop_container() { [ -z "$name" ] || docker stop -t 1 "$name" >/dev/null 2>&1 || true; }
 trap stop_container EXIT
 

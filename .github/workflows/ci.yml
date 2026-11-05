@@ -15,6 +15,7 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -41,6 +42,7 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    timeout-minutes: 20
     env:
       CGO_ENABLED: "0"
     steps:
@@ -55,6 +57,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -86,6 +89,7 @@ jobs:
 
   openwrt:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
