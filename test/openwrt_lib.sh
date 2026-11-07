@@ -41,6 +41,23 @@ fail() {
 run() {
 	run_rc=0
 	timed "$limit" docker exec "$name" sh -c "$1" || run_rc=$?
-	[ $run_rc -ne 124 ] || fail "timed out after $limit s: $1"
+	if [ $run_rc -eq 124 ]; then
+		diagnose
+		fail "timed out after $limit s: $1"
+	fi
 	return $run_rc
+}
+
+# Says, after a timeout, whether the container still answers at all and what runs in it: the upgrade test has hung
+# in logread after the package upgrade on CI, with nothing to tell a stuck docker exec from a stuck logd.
+diagnose() {
+	timed 15 docker inspect -f 'diag: container {{.State.Status}}, pid {{.State.Pid}}' "$name" >&3 2>&3 || true
+	if timed 15 docker exec "$name" true >/dev/null 2>&1; then
+		echo "diag: docker exec answers; processes:" >&3
+		timed 15 docker exec "$name" ps w >&3 2>&3 || true
+		echo "diag: ubus log object:" >&3
+		timed 15 docker exec "$name" ubus call log read '{"lines":3}' >&3 2>&3 || echo "diag: ubus log read failed or hung" >&3
+	else
+		echo "diag: docker exec itself does not answer" >&3
+	fi
 }
