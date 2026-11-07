@@ -3,10 +3,12 @@
 package ble
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Address types as ESPHome reports them.
@@ -16,8 +18,8 @@ const (
 )
 
 // Advert is one received advertisement. Data holds the raw AD structures (advertisement plus scan response),
-// at most 62 bytes. Data is only valid during the call to the scan callback that receives it: backends may
-// reuse the buffer for the next advertisement, so a callback that keeps the data copies it.
+// at most MaxAdvert bytes. Data is only valid during the call to the scan callback that receives it: backends
+// may reuse the buffer for the next advertisement, so a callback that keeps the data copies it.
 type Advert struct {
 	Addr     uint64
 	AddrType uint32
@@ -48,6 +50,11 @@ func ParseUUID(s string) (UUID, error) {
 	return UUID{hi, lo}, nil
 }
 
+// ShortUUID is the inverse of Short: the 128-bit form of a 16- or 32-bit UUID on the Bluetooth base UUID.
+func ShortUUID(v uint32) UUID {
+	return UUID{Hi: uint64(v)<<32 | baseHi, Lo: baseLo}
+}
+
 // Short returns the 16- or 32-bit form if the UUID is based on the Bluetooth base UUID.
 func (u UUID) Short() (uint32, bool) {
 	if u.Lo != baseLo || u.Hi&0xffffffff != baseHi {
@@ -59,6 +66,38 @@ func (u UUID) Short() (uint32, bool) {
 func (u UUID) String() string {
 	h := fmt.Sprintf("%016x%016x", u.Hi, u.Lo)
 	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
+}
+
+// UUIDFromLE reads a UUID in the order ATT and AD structures carry it, least significant byte first: 2 bytes
+// for a 16-bit UUID, 4 for a 32-bit one, 16 otherwise.
+func UUIDFromLE(b []byte) UUID {
+	switch len(b) {
+	case 2:
+		return ShortUUID(uint32(binary.LittleEndian.Uint16(b)))
+	case 4:
+		return ShortUUID(binary.LittleEndian.Uint32(b))
+	}
+	return UUID{Hi: binary.LittleEndian.Uint64(b[8:16]), Lo: binary.LittleEndian.Uint64(b[:8])}
+}
+
+// AppendLE appends the 16 bytes of the UUID in the order UUIDFromLE reads them.
+func (u UUID) AppendLE(dst []byte) []byte {
+	dst = binary.LittleEndian.AppendUint64(dst, u.Lo)
+	return binary.LittleEndian.AppendUint64(dst, u.Hi)
+}
+
+// AddrFromLE reads a device address as HCI and the kernel carry it (bdaddr_t), least significant byte first,
+// into the form ble uses: 0xAABBCCDDEEFF for AA:BB:CC:DD:EE:FF.
+func AddrFromLE(b []byte) uint64 {
+	return uint64(b[5])<<40 | uint64(b[4])<<32 | uint64(b[3])<<24 | uint64(b[2])<<16 | uint64(b[1])<<8 | uint64(b[0])
+}
+
+// PutAddrLE writes a device address into b[:6] in the order AddrFromLE reads it.
+func PutAddrLE(b []byte, a uint64) {
+	_ = b[5]
+	for i := range 6 {
+		b[i] = byte(a >> (8 * i))
+	}
 }
 
 // Descriptor, Characteristic and Service describe a remote GATT database. Handles are the attribute handles
@@ -118,6 +157,25 @@ type Adapter interface {
 	// Unpair removes the bond with a device, connected or not, and drops any connection to it without
 	// calling Events.Disconnected.
 	Unpair(addr uint64) error
+}
+
+// ConnectOptions configures Adapter.Connect the same way on every backend.
+type ConnectOptions struct {
+	// ConnectRetries is how often a connect that failed on the radio or lost the link early is retried.
+	ConnectRetries int
+	// ConnectRetryDelay is the wait before the first retry; each later one waits twice the previous (see
+	// ConnectRetry). 0 retries at once.
+	ConnectRetryDelay time.Duration
+	// PauseOnConnect stops scanning while a connect is in progress.
+	PauseOnConnect bool
+}
+
+// WatchdogOptions configures the scan watchdog of the backends that have one.
+type WatchdogOptions struct {
+	// StallTimeout is how long scanning may deliver nothing before the watchdog tries to bring it back; 0 never.
+	StallTimeout time.Duration
+	// USBReset lets the watchdog reset the adapter's USB device when nothing else brought scanning back.
+	USBReset bool
 }
 
 // ConnParams are LE connection parameters in the units of the HCI LE Connection Update command: intervals in
@@ -182,8 +240,13 @@ type ScanSettinger interface {
 	ScanSetting() string
 }
 
-// ErrNotConnected is returned for requests on a closed connection.
-var ErrNotConnected = errors.New("not connected")
+var (
+	// ErrNotConnected is returned for requests on a closed connection.
+	ErrNotConnected = errors.New("not connected")
+	// ErrLinkLost is a link that went down on its own: Events.Disconnected reports it, and Connect fails with
+	// it (wrapped with where it happened) when the link drops before the connection is handed over.
+	ErrLinkLost = errors.New("link lost")
+)
 
 // FormatMAC renders 0xAABBCCDDEEFF as AA:BB:CC:DD:EE:FF.
 func FormatMAC(a uint64) string {

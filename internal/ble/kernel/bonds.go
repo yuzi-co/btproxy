@@ -115,7 +115,7 @@ func (s *bondStore) has(addr uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, k := range decode(s.data.LTKs, ltkSize) {
-		if getAddr(k) == addr {
+		if ble.AddrFromLE(k) == addr {
 			return true
 		}
 	}
@@ -129,7 +129,7 @@ func (s *bondStore) forget(addr uint64) ([]byte, error) {
 	var types []byte
 	drop := func(e string) bool {
 		b, err := hex.DecodeString(e)
-		if err != nil || len(b) < 7 || getAddr(b) != addr {
+		if err != nil || len(b) < 7 || ble.AddrFromLE(b) != addr {
 			return false
 		}
 		if !slices.Contains(types, b[6]) {
@@ -168,4 +168,4 @@ func (s *bondStore) irkParam() []byte {
 }
 
 // describe names a bond in a log line without showing its key.
-func describe(b []byte) string { return ble.FormatMAC(getAddr(b)) }
+func describe(b []byte) string { return ble.FormatMAC(ble.AddrFromLE(b)) }

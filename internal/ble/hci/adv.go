@@ -14,7 +14,6 @@ const (
 	subLEAdvReport    = 0x02
 	subLEExtAdvReport = 0x0d
 
-	maxData   = 62                     // an ESP32 proxy's limit: advertisement plus scan response
 	holdFor   = 200 * time.Millisecond // how long a scannable advertisement waits for its scan response
 	holdSlots = 8
 	// fragSlots is how many devices can be sending fragmented extended advertisements at once. Beyond that the
@@ -68,7 +67,7 @@ func parseEvent(ev []byte, fn func(report)) {
 			dl := int(p[8])
 			typ := p[0]
 			at, r.data, r.rssi = p[1], p[9:9+dl], int8(p[9+dl])
-			r.addr = addrOf(p[2:8])
+			r.addr = ble.AddrFromLE(p[2:8])
 			r.scannable = typ == 0x00 || typ == 0x02 // ADV_IND, ADV_SCAN_IND
 			r.scanRsp = typ == 0x04
 			p = p[10+dl:]
@@ -81,7 +80,7 @@ func parseEvent(ev []byte, fn func(report)) {
 			dl := int(p[23])
 			typ := int(p[0]) | int(p[1])<<8
 			at, r.data, r.rssi = p[2], p[24:24+dl], int8(p[13])
-			r.addr = addrOf(p[3:9])
+			r.addr = ble.AddrFromLE(p[3:9])
 			r.scannable = typ&extScannable != 0
 			r.scanRsp = typ&extScanRsp != 0
 			r.status = typ & extStatus >> 5
@@ -101,11 +100,6 @@ func parseEvent(ev []byte, fn func(report)) {
 	}
 }
 
-// addrOf turns a little-endian device address into the form ble uses (0xAABBCCDDEEFF for AA:BB:...:FF).
-func addrOf(b []byte) uint64 {
-	return uint64(b[5])<<40 | uint64(b[4])<<32 | uint64(b[3])<<24 | uint64(b[2])<<16 | uint64(b[1])<<8 | uint64(b[0])
-}
-
 // key identifies an advertiser: address and address type, never 0.
 func (r *report) key() uint64 { return r.addr | uint64(r.addrType+1)<<48 }
 
@@ -114,7 +108,7 @@ type held struct {
 	key  uint64 // 0: free
 	at   time.Time
 	ad   ble.Advert
-	data [maxData]byte
+	data [ble.MaxAdvert]byte
 }
 
 // decoder turns advertising reports into advertisements the way an ESP32 proxy reports them. With active
@@ -132,7 +126,7 @@ type decoder struct {
 	held  [holdSlots]held
 	frags [fragSlots]uint64 // keys of devices whose extended advertisement continues in the next report
 	fragN int
-	buf   [maxData]byte // data of the advertisement being emitted
+	buf   [ble.MaxAdvert]byte // data of the advertisement being emitted
 }
 
 // event handles one HCI event received at now.
@@ -144,12 +138,12 @@ func (d *decoder) event(ev []byte, now time.Time) {
 func (d *decoder) report(r report, now time.Time) {
 	k := r.key()
 	// An extended advertisement longer than one event arrives in fragments. Only the first is used: the
-	// result is capped at maxData anyway, and AD structures cut at the fragment's end are dropped.
+	// result is capped at ble.MaxAdvert anyway, and AD structures cut at the fragment's end are dropped.
 	if r.status == statusMore {
 		if d.inFragment(k, false) {
 			return
 		}
-		r.data = wholeAD(r.data)
+		r.data = ble.WholeAD(r.data)
 		d.frags[d.fragN] = k
 		d.fragN = (d.fragN + 1) % fragSlots
 	} else if d.inFragment(k, true) {
@@ -164,17 +158,17 @@ func (d *decoder) report(r report, now time.Time) {
 			prev = h.ad.Data
 			h.key = 0
 		}
-		ad.Data = appendAD(appendAD(d.buf[:0], prev), r.data)
+		ad.Data = ble.AppendADs(ble.AppendADs(d.buf[:0], prev), r.data)
 	case d.active && r.scannable:
 		if h := d.find(k); h != nil {
 			d.release(h)
 		}
 		h := d.slot()
 		h.key, h.at, h.ad = k, now, ad
-		h.ad.Data = appendAD(h.data[:0], r.data)
+		h.ad.Data = ble.AppendADs(h.data[:0], r.data)
 		return
 	default:
-		ad.Data = appendAD(d.buf[:0], r.data)
+		ad.Data = ble.AppendADs(d.buf[:0], r.data)
 	}
 	d.emit(ad)
 }
@@ -232,37 +226,4 @@ func (d *decoder) expire(now time.Time) {
 			d.release(h)
 		}
 	}
-}
-
-// wholeAD is the part of src made of complete AD structures: a fragment can end inside one.
-func wholeAD(src []byte) []byte {
-	n := 0
-	for n < len(src) {
-		l := 1 + int(src[n])
-		if l == 1 || n+l > len(src) {
-			break
-		}
-		n += l
-	}
-	return src[:n]
-}
-
-// appendAD appends src to dst within maxData bytes. If it does not fit whole (only possible for extended
-// advertisements), the AD structures that fit are kept and the others dropped; a zero length or a structure
-// running past the end stops the parsing there.
-func appendAD(dst, src []byte) []byte {
-	if len(dst)+len(src) <= maxData {
-		return append(dst, src...)
-	}
-	for len(src) > 0 {
-		n := 1 + int(src[0])
-		if n == 1 || n > len(src) {
-			break
-		}
-		if len(dst)+n <= maxData {
-			dst = append(dst, src[:n]...)
-		}
-		src = src[n:]
-	}
-	return dst
 }

@@ -549,7 +549,7 @@ func TestUnanswered(t *testing.T) {
 func TestStall(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, false)
-	a, err := Open("hci0", Options{StallTimeout: 400 * time.Millisecond})
+	a, err := Open("hci0", Options{WatchdogOptions: ble.WatchdogOptions{StallTimeout: 400 * time.Millisecond}})
 	if err != nil {
 		t.Fatal(err)
 	}

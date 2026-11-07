@@ -54,7 +54,7 @@ func TestADData(t *testing.T) {
 		t.Errorf("adData\n got %x\nwant %x", got, want)
 	}
 	d.name = string(make([]byte, 40)) // too long to fit: dropped, the rest stays
-	if got := d.adData(); len(got) > 62 || bytes.Contains(got, []byte{41, 0x09}) {
+	if got := d.adData(); len(got) > ble.MaxAdvert || bytes.Contains(got, []byte{41, 0x09}) {
 		t.Errorf("oversized name not dropped: %x", got)
 	}
 }

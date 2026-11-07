@@ -117,7 +117,7 @@ func connHandle(fd int, addr uint64) (uint16, error) {
 	// struct hci_conn_info_req (bdaddr, type, padded to 8) followed by struct hci_conn_info, which starts
 	// with the handle.
 	var req [8 + 16]byte
-	binary.LittleEndian.PutUint64(req[:], addr) // bdaddr_t is little endian; byte 6 is the type
+	ble.PutAddrLE(req[:], addr) // bdaddr_t is little endian; byte 6 is the type
 	req[6], req[7] = leLink, 0
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), hciGetConnInfo(), uintptr(unsafe.Pointer(&req[0])))
 	if errno == unix.ENOENT {

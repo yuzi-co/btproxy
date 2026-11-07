@@ -2,6 +2,7 @@ package winrt
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
@@ -30,7 +31,7 @@ func connectRetry(retries int, delay time.Duration) ble.ConnectRetry {
 }
 
 // errLinkLost is a link that went down between coming up and the end of service discovery.
-var errLinkLost = errors.New("link lost while connecting")
+var errLinkLost = fmt.Errorf("%w while connecting", ble.ErrLinkLost)
 
 // HRESULTs of a GATT call that failed on the radio rather than for good.
 const (
@@ -40,7 +41,7 @@ const (
 
 // radioFailure tells whether a failed connect attempt is one the radio may not repeat.
 func radioFailure(err error) bool {
-	if errors.Is(err, errUnreachable) || errors.Is(err, errLinkLost) {
+	if errors.Is(err, errUnreachable) || errors.Is(err, ble.ErrLinkLost) {
 		return true
 	}
 	var h hresult

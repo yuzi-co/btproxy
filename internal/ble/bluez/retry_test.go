@@ -48,7 +48,7 @@ func openForRetries(t *testing.T, retries, drops int) (*Adapter, *fakeBlueZ) {
 	t.Helper()
 	bz := startFakeBlueZ(t, startBus(t), false)
 	t.Cleanup(func() { bz.bus.Close() })
-	a, err := Open("hci0", Options{RawAdverts: RawOff, ConnectRetries: retries})
+	a, err := Open("hci0", Options{RawAdverts: RawOff, ConnectOptions: ble.ConnectOptions{ConnectRetries: retries}})
 	if err != nil {
 		t.Fatal(err)
 	}

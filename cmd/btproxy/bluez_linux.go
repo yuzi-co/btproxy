@@ -17,9 +17,11 @@ func init() {
 		if err != nil {
 			return nil, err
 		}
-		a, err := bluez.Open(name, bluez.Options{StallTimeout: stallTimeout, RestartCmd: bluetoothdRestart,
-			USBReset: usbReset, RawAdverts: raw, PauseOnConnect: scanPause, ConnectRetries: connectRetries,
-			ConnectRetryDelay: connectRetryDelay, Log: log})
+		a, err := bluez.Open(name, bluez.Options{
+			WatchdogOptions: ble.WatchdogOptions{StallTimeout: stallTimeout, USBReset: usbReset},
+			ConnectOptions: ble.ConnectOptions{PauseOnConnect: scanPause, ConnectRetries: connectRetries,
+				ConnectRetryDelay: connectRetryDelay},
+			RestartCmd: bluetoothdRestart, RawAdverts: raw, Log: log})
 		if err != nil {
 			return nil, err
 		}

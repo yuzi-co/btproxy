@@ -9,7 +9,7 @@ import (
 func init() {
 	defaultBackend = "winrt"
 	backends["winrt"] = func(_ string, log *logx.Logger) (ble.Adapter, error) {
-		return winrt.Open(winrt.Options{ConnectRetries: connectRetries, ConnectRetryDelay: connectRetryDelay,
-			PauseOnConnect: scanPause, Log: log})
+		return winrt.Open(winrt.Options{ConnectOptions: ble.ConnectOptions{PauseOnConnect: scanPause,
+			ConnectRetries: connectRetries, ConnectRetryDelay: connectRetryDelay}, Log: log})
 	}
 }

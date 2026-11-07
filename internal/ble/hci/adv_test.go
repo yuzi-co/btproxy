@@ -252,23 +252,6 @@ func TestDecoderShortFragment(t *testing.T) {
 	}
 }
 
-func TestAppendAD(t *testing.T) {
-	big := append([]byte{57, 0xff}, make([]byte, 56)...)
-	for _, c := range []struct {
-		dst, src, want []byte
-	}{
-		{nil, []byte{2, 1, 6, 0, 0}, []byte{2, 1, 6, 0, 0}}, // fits: copied as is, padding included
-		{big, big, big}, // does not fit: dropped
-		{big, append([]byte{2, 1, 6, 0}, big...), append(append([]byte(nil), big...), 2, 1, 6)}, // zero length stops
-		{big, append([]byte{2, 1, 6}, 30, 0xff), append(append([]byte(nil), big...), 2, 1, 6)},  // cut off: stops
-	} {
-		got := appendAD(append([]byte(nil), c.dst...), c.src)
-		if !bytes.Equal(got, c.want) {
-			t.Errorf("appendAD(%x, %x)\n got %x\nwant %x", c.dst, c.src, got, c.want)
-		}
-	}
-}
-
 // runFilter interprets the instructions filterProg uses.
 func runFilter(prog []insn, pkt []byte) uint32 {
 	var acc uint32

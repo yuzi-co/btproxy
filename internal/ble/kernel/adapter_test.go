@@ -72,7 +72,7 @@ func (k *fakeKernel) Command(op uint16, param []byte, _ time.Duration) ([]byte, 
 	switch op {
 	case opReadInfo:
 		rsp := make([]byte, 280)
-		putAddr(rsp, testMAC)
+		ble.PutAddrLE(rsp, testMAC)
 		return rsp, nil
 	case opAddAdvMonitor:
 		k.nextMon++
@@ -169,7 +169,7 @@ func (s *fakeSocket) Secure() error {
 
 func openTest(t *testing.T, k *fakeKernel, tweak func(*Options)) *Adapter {
 	t.Helper()
-	opt := Options{BondDir: t.TempDir(), StallTimeout: 0, ConnectRetries: 4, Log: logx.Discard(),
+	opt := Options{BondDir: t.TempDir(), ConnectOptions: ble.ConnectOptions{ConnectRetries: 4}, Log: logx.Discard(),
 		tick: 5 * time.Millisecond}
 	if tweak != nil {
 		tweak(&opt)
@@ -372,7 +372,7 @@ func TestDisconnectRequestedIsSilent(t *testing.T) {
 		t.Fatal("socket left open")
 	}
 	want := append(make([]byte, 6), bdAddrLEPublic)
-	putAddr(want, testPeer)
+	ble.PutAddrLE(want, testPeer)
 	if got := k.lastParam(opDisconnect); !bytes.Equal(got, want) {
 		t.Errorf("disconnect % x, want % x", got, want)
 	}
@@ -557,7 +557,7 @@ func TestPair(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := append(make([]byte, 6), bdAddrLEPublic, ioCapNoInputNoOutput)
-	putAddr(want, testPeer)
+	ble.PutAddrLE(want, testPeer)
 	if got := k.lastParam(opPairDevice); !bytes.Equal(got, want) {
 		t.Errorf("pair % x, want % x", got, want)
 	}
@@ -590,7 +590,7 @@ func TestPairFailure(t *testing.T) {
 func ltkEvent(addr uint64, hint byte) []byte {
 	b := make([]byte, 1+ltkSize)
 	b[0] = hint
-	putAddr(b[1:], addr)
+	ble.PutAddrLE(b[1:], addr)
 	b[7] = bdAddrLEPublic
 	b[8] = 0x02 // key type
 	b[9] = 1    // central
@@ -608,7 +608,7 @@ func TestBondsStoredAndLoaded(t *testing.T) {
 	k.event(evNewLTK, ltkEvent(testPeer, 1))
 	irk := make([]byte, 7+irkSize)
 	irk[0] = 1
-	putAddr(irk[7:], testPeer)
+	ble.PutAddrLE(irk[7:], testPeer)
 	irk[13] = bdAddrLEPublic
 	k.event(evNewIRK, irk)
 	k.event(evNewLTK, ltkEvent(0x010203040506, 0)) // the kernel says not to keep it
@@ -696,7 +696,7 @@ func TestConfirmRequestAccepted(t *testing.T) {
 	k := newFakeKernel()
 	openTest(t, k, nil)
 	ev := make([]byte, 12)
-	putAddr(ev, testPeer)
+	ble.PutAddrLE(ev, testPeer)
 	ev[6] = bdAddrLERandom
 	k.event(evUserConfirm, ev)
 	bletest.WaitFor(t, "confirmed", func() bool { return k.count(opUserConfirm) == 1 })

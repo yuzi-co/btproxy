@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 // Commands of the Bluetooth management interface (doc/mgmt-api.txt in BlueZ).
@@ -95,25 +97,10 @@ type mgmtConn interface {
 	Close() error
 }
 
-// putAddr writes an address the way the kernel keeps bdaddr_t: least significant byte first.
-func putAddr(b []byte, addr uint64) {
-	for i := range 6 {
-		b[i] = byte(addr >> (8 * i))
-	}
-}
-
-func getAddr(b []byte) uint64 {
-	var a uint64
-	for i := range 6 {
-		a |= uint64(b[i]) << (8 * i)
-	}
-	return a
-}
-
-// addrInfo is struct mgmt_addr_info for an LE device.
+// addrInfo is struct mgmt_addr_info for an LE device: the address as the kernel keeps bdaddr_t, then its type.
 func addrInfo(addr uint64, bdType byte) []byte {
 	b := make([]byte, addrInfoSize)
-	putAddr(b, addr)
+	ble.PutAddrLE(b, addr)
 	b[6] = bdType
 	return b
 }

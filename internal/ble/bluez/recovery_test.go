@@ -46,7 +46,7 @@ func TestRecoverySteps(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { resetUSBDevice = hci.ResetUSB })
-	a, err := Open("hci0", Options{RestartCmd: "touch '" + marker + "'", USBReset: true})
+	a, err := Open("hci0", Options{RestartCmd: "touch '" + marker + "'", WatchdogOptions: ble.WatchdogOptions{USBReset: true}})
 	if err != nil {
 		t.Fatal(err)
 	}

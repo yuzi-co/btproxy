@@ -22,14 +22,6 @@ const (
 	propIndicate = 0x20
 )
 
-// uuidFromLE reads a 16-bit or 128-bit UUID in ATT's little-endian order.
-func uuidFromLE(b []byte) ble.UUID {
-	if len(b) == 2 {
-		return ble.UUID{Hi: uint64(binary.LittleEndian.Uint16(b))<<32 | 0x1000, Lo: 0x800000805f9b34fb}
-	}
-	return ble.UUID{Hi: binary.LittleEndian.Uint64(b[8:]), Lo: binary.LittleEndian.Uint64(b)}
-}
-
 func isNotFound(err error) bool {
 	var ae *ATTError
 	return errors.As(err, &ae) && ae.Code == attErrNotFound
@@ -87,7 +79,7 @@ func (c *attClient) discover() ([]ble.Service, error) {
 				if h < start || end < h {
 					return nil, fmt.Errorf("service discovery: bad handles %#x to %#x", h, end)
 				}
-				groups = append(groups, group{ble.Service{UUID: uuidFromLE(e[4:]), Handle: h}, end})
+				groups = append(groups, group{ble.Service{UUID: ble.UUIDFromLE(e[4:]), Handle: h}, end})
 				last = end
 			}
 			if last == 0xffff {
@@ -135,7 +127,7 @@ func (c *attClient) discoverChars(first, end uint16) ([]ble.Characteristic, erro
 			if decl < start || decl > end {
 				return nil, fmt.Errorf("characteristic discovery: bad handle %#x", decl)
 			}
-			u := uuidFromLE(e[5:])
+			u := ble.UUIDFromLE(e[5:])
 			value := binary.LittleEndian.Uint16(e[3:])
 			chars = append(chars, ble.Characteristic{UUID: u, Handle: value, Properties: uint32(e[2])})
 			decls = append(decls, decl)
@@ -214,7 +206,7 @@ func (c *attClient) findInfo(start, end uint16) ([]ble.Descriptor, error) {
 			return nil, fmt.Errorf("descriptor discovery: bad handle %#x", h)
 		}
 		next = int(h) + 1
-		found = append(found, ble.Descriptor{UUID: uuidFromLE(entries[off+2 : off+size]), Handle: h})
+		found = append(found, ble.Descriptor{UUID: ble.UUIDFromLE(entries[off+2 : off+size]), Handle: h})
 	}
 	return found, nil
 }

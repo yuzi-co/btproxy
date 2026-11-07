@@ -4,6 +4,7 @@ package bluez
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -27,7 +28,8 @@ const (
 	retryBudget = 10 * time.Second
 )
 
-var errLinkLost = errors.New("link lost while resolving services")
+// errLinkLost is ble.ErrLinkLost for a link that dropped before its services were resolved.
+var errLinkLost = fmt.Errorf("%w while resolving services", ble.ErrLinkLost)
 
 func connectRetry(retries int, delay time.Duration) ble.ConnectRetry {
 	// Fast only keeps out what the budget would anyway: Connect applies retryFast to radio failures alone, as a

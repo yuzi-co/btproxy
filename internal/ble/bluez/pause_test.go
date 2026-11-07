@@ -115,7 +115,7 @@ func TestPausePassive(t *testing.T) {
 // TestPauseActive: discovery stops for the connect and starts again after it, and the stall watchdog does
 // not count the pause as a stall.
 func TestPauseActive(t *testing.T) {
-	a, bz, _ := openPauseTest(t, ble.ScanActive, Options{StallTimeout: 400 * time.Millisecond})
+	a, bz, _ := openPauseTest(t, ble.ScanActive, Options{WatchdogOptions: ble.WatchdogOptions{StallTimeout: 400 * time.Millisecond}})
 	bz.advertise() // the watchdog's clock starts from here
 	var failures atomic.Int32
 	a.OnScanStatus(func(st ble.ScanStatus) {
@@ -242,7 +242,7 @@ func TestPauseQuiet(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, true)
 	t.Cleanup(func() { bz.bus.Close() })
-	a, err := Open("hci0", Options{RawAdverts: RawOn, PauseOnConnect: true})
+	a, err := Open("hci0", Options{RawAdverts: RawOn, ConnectOptions: ble.ConnectOptions{PauseOnConnect: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
