@@ -4,7 +4,8 @@ A Bluetooth proxy for Home Assistant that runs without an ESP32. It turns a Linu
 Windows PC with a built-in adapter or USB Bluetooth dongle into an ESPHome-compatible BLE proxy, written in Go.
 Home Assistant adds it through the ESPHome integration (port 6053) like an ESP32 proxy, then scans and connects to
 BLE devices through the host's adapter: the kernel's Bluetooth stack on Linux, with no `bluetoothd` or D-Bus, and
-WinRT on Windows. BlueZ over D-Bus still works on Linux but is [deprecated](#backends).
+WinRT on Windows. On a Linux host that keeps `bluetoothd` for other devices, it uses BlueZ over D-Bus
+instead; see [Backends](#backends).
 
 Not related to [conorpp/btproxy](https://github.com/conorpp/btproxy), a Bluetooth man-in-the-middle tool.
 
@@ -275,7 +276,7 @@ Home Assistant discovers it over mDNS. Otherwise add it by hand: Add integration
 | `-friendly-name` | the name | |
 | `-area` | | suggested area |
 | `-listen` | `:6053` | API address; see [several adapters](#several-adapters) |
-| `-backend` | `auto`, `winrt` on Windows | `auto`, `kernel`, `bluez` (deprecated), `winrt` or `fake`; see [Backends](#backends) |
+| `-backend` | `auto`, `winrt` on Windows | `auto`, `kernel`, `bluez`, `winrt` or `fake`; see [Backends](#backends) |
 | `-adapter` | `hci0` | adapter, or comma-separated list (Linux) |
 | `-bond-dir` | `/etc/btproxy` | keys of bonded devices (kernel) |
 | `-connections` | 3 | connection slots per adapter |
@@ -306,9 +307,9 @@ On Linux, the default `-backend auto` picks one at start and logs why:
 - `kernel` uses the kernel's Bluetooth stack directly: the management socket, the HCI monitor and L2CAP sockets. It
   needs neither `bluetoothd` nor D-Bus, and has the adapter to itself: it refuses to start while `bluetoothd` runs,
   since two stacks driving one controller undo each other's work.
-- `bluez` (deprecated) is picked while `bluetoothd` runs, or when the HCI monitor cannot be read. It logs a warning
-  at every start and will go in a later release. If `bluetoothd` has to stay on a host for something else, such as
-  headphones, that host stays on the last release with BlueZ, or uses an ESP32 or another machine.
+- `bluez` is picked while `bluetoothd` runs, or when the HCI monitor cannot be read. It is the backend for a host
+  that needs `bluetoothd` for something else, such as headphones or a mouse, since the kernel backend cannot share
+  the adapter with it. It stays supported; the kernel backend is the default and the one new work goes to first.
 
 `auto` asks the kernel which programs hold a Bluetooth control socket, so it also sees a `bluetoothd` on the host of a
 container. A `bluetoothd` that starts after the proxy is not stopped: the proxy logs an error within a minute, and

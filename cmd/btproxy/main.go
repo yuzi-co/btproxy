@@ -64,7 +64,7 @@ func main() {
 	area := flag.String("area", "", "suggested area")
 	listen := flag.String("listen", ":6053", "API listen address; with several adapters, the first of consecutive ports, or a comma-separated list")
 	backend := flag.String("backend", defaultBackend,
-		"Bluetooth backend: auto (kernel, or bluez while bluetoothd runs), kernel or bluez (deprecated) on Linux, winrt on Windows, or fake")
+		"Bluetooth backend: auto (kernel, or bluez while bluetoothd runs), kernel or bluez on Linux, winrt on Windows, or fake")
 	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter, or a comma-separated list served as one device each (bluez and kernel backends)")
 	maxConns := flag.Int("connections", 3, "maximum simultaneous peripheral connections")
 	scanMode := flag.String("scan-mode", "active", "scanner mode: active or passive (Linux: needs kernel 5.10+, on bluez also bluetoothd --experimental, else active)")
@@ -145,9 +145,6 @@ func main() {
 	newAdapter, ok := backends[*backend]
 	if !ok {
 		fatal(log, "unknown backend", "backend", *backend)
-	}
-	if *backend == "bluez" {
-		log.Warn(bluezDeprecatedWarning)
 	}
 	if advFilter != nil {
 		log.Info("advertisement filter", "filter", advFilter.String())

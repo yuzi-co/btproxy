@@ -262,10 +262,10 @@ func TestProblemWatch(t *testing.T) {
 	}
 }
 
-// The warnings about an unencrypted API and a deprecated backend report a choice, and are logged at every start: as
-// the latest problem they would hide that nothing has gone wrong.
+// The warning about an unencrypted API reports a choice, and is logged at every start: as the latest problem it
+// would hide that nothing has gone wrong.
 func TestProblemWatchIgnoresTheStartWarnings(t *testing.T) {
-	for _, msg := range []string{notEncryptedWarning, bluezDeprecatedWarning} {
+	for _, msg := range []string{notEncryptedWarning} {
 		var out bytes.Buffer
 		p := problemWatch{w: &out}
 		line := "time=x level=WARN msg=\"" + msg + "\" listen=[::]:6053\n"
