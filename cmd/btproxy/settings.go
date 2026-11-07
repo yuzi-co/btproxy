@@ -431,7 +431,7 @@ func loadConfig(path string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	m, err := ui.DecodeFlat(b)
+	m, err := parseConfig(b)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -452,7 +452,7 @@ func saveConfig(path string, m map[string]string) error {
 	}
 	err = protectFile(tmp)
 	if err == nil {
-		_, err = f.Write(ui.EncodeFlat(m))
+		_, err = f.Write(formatConfig(m))
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr

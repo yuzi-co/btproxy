@@ -300,7 +300,7 @@ func TestSettingsPage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := ui.DecodeFlat(saved)
+	m, err := parseConfig(saved)
 	if err != nil || m["friendly-name"] != "After" || m["connections"] != "" || len(m) != 1 {
 		t.Fatalf("settings file %s: %v", saved, err)
 	}
@@ -354,7 +354,7 @@ func TestSettingsPageRestart(t *testing.T) {
 		return code == 200 && strings.Contains(body, `value="After"`)
 	})
 	_, status := fetch(t, base, "GET", "/status.json", nil)
-	st, _ := ui.DecodeFlat([]byte(status))
+	st, _ := parseConfig([]byte(status))
 	pids[st["Process"]] = true
 }
 

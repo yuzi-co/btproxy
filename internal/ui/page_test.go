@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -257,7 +258,8 @@ func TestSave(t *testing.T) {
 func TestStatusJSON(t *testing.T) {
 	_, _, base := newTestServer(t, Options{})
 	r, body := get(t, base+"/status.json", nil)
-	m, err := DecodeFlat([]byte(body))
+	var m map[string]string
+	err := json.Unmarshal([]byte(body), &m)
 	if r.StatusCode != 200 || err != nil || m["Uptime"] != "1s" {
 		t.Fatalf("%d %q %v", r.StatusCode, body, err)
 	}

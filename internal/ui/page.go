@@ -3,6 +3,7 @@ package ui
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"net"
 	"net/url"
 	"strings"
@@ -147,7 +148,8 @@ func (s *Server) handle(r *Request) *Response {
 		for _, kv := range s.app.Status() {
 			m[kv.Key] = kv.Value
 		}
-		return &Response{Status: 200, Type: "application/json", Body: EncodeFlat(m)}
+		body, _ := json.Marshal(m) // cannot fail for a map of strings
+		return &Response{Status: 200, Type: "application/json", Body: body}
 	case r.Path == "/save" && r.Method == "POST":
 		return s.save(r)
 	case r.Path == "/" || r.Path == "/status.json" || r.Path == "/save":
