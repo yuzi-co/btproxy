@@ -256,6 +256,32 @@ func TestLower(t *testing.T) {
 	}
 }
 
+// TestCanonicalNames checks the invariant record documents: a name typed in any case, in the configuration or
+// on the wire, in a question, a record name or PTR and SRV data, ends up as the same string, so that key and
+// knows match without lower-casing again.
+func TestCanonicalNames(t *testing.T) {
+	if svc := newService("BTProxy-Bedroom", 6053, nil); svc.instance != testSvc.instance || svc.host != testSvc.host {
+		t.Errorf("instance %q host %q", svc.instance, svc.host)
+	}
+	up := strings.ToUpper
+	port := []byte{0, 0, 0, 0, 6053 >> 8, 6053 & 0xff}
+	q, err := parseQuery(withKnown(buildQuery(0, question{name: up(testSvc.host), qtype: typeA, qclass: classIN}),
+		rr{name: up(serviceType), rtype: typePTR, class: classIN, ttl: ttlOther, data: appendName(nil, up(testSvc.instance))},
+		rr{name: up(testSvc.instance), rtype: typeSRV, class: classIN, ttl: ttlHost, data: appendName(port, up(testSvc.host))},
+		rr{name: up(testSvc.host), rtype: typeA, class: classIN, ttl: ttlHost, data: testIPs[0]}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.questions[0].name != testSvc.host {
+		t.Errorf("question name %q", q.questions[0].name)
+	}
+	for i, want := range []record{testSvc.ptr(), testSvc.srv(), testSvc.addrs(testIPs)[0]} {
+		if got := q.known[i]; got.key() != want.key() || !q.knows(want) {
+			t.Errorf("known %d: key %q, want %q, knows %v", i, got.key(), want.key(), q.knows(want))
+		}
+	}
+}
+
 func TestKnownAnswers(t *testing.T) {
 	ptrQ := question{name: serviceType, qtype: typePTR, qclass: classIN}
 	instQ := []question{
