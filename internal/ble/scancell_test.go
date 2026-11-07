@@ -51,19 +51,26 @@ func TestScanCellNotifiesChanges(t *testing.T) {
 	}
 }
 
-// TestScanCellPublish: Store keeps the callback out until Publish, which reports the latest status once.
+// TestScanCellPublish: Store keeps the callback out until Publish, which reports every change stored since,
+// in order and once, a status stored twice in a row included only once.
 func TestScanCellPublish(t *testing.T) {
 	var c ScanCell
 	var got []ScanStatus
 	c.OnStatus(func(st ScanStatus) { got = append(got, st) })
+	c.StoreState(ScanStarting)
 	c.StoreState(ScanStarting)
 	c.Store(ScanStatus{State: ScanRunning, Mode: ScanActive})
 	if len(got) != 0 {
 		t.Fatalf("callback called by Store: %+v", got)
 	}
 	c.Publish()
+	c.StoreState(ScanFailed)
+	c.StoreState(ScanStarting)
+	c.StoreState(ScanFailed) // a retried start fails again: reported again
 	c.Publish()
-	want := []ScanStatus{{ScanRunning, ScanActive}}
+	c.Publish()
+	want := []ScanStatus{{ScanStarting, ScanPassive}, {ScanRunning, ScanActive}, {ScanFailed, ScanPassive},
+		{ScanStarting, ScanPassive}, {ScanFailed, ScanPassive}}
 	if !slices.Equal(got, want) {
 		t.Errorf("callback got %+v, want %+v", got, want)
 	}

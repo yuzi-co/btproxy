@@ -44,9 +44,8 @@ var backends = map[string]func(adapter string, log *logx.Logger) (ble.Adapter, e
 // autoBackend picks the backend for -backend auto; set on Linux, the only place with a choice.
 var autoBackend func(log *logx.Logger) string
 
-// Flags read by the bluez backend; scan-pause-on-connect, connect-retries and connect-retry-delay also by winrt;
-// stall-timeout, usb-reset, scan-pause-on-connect, connect-retries and connect-retry-delay also by kernel. bond-dir
-// only by kernel.
+// Flag values the backend constructors read (bluez_linux.go, kernel_linux.go, winrt_windows.go); the settings
+// table says which backend each is for.
 var (
 	bondDir           string
 	useAgent          bool
@@ -59,101 +58,70 @@ var (
 	connectRetryDelay time.Duration
 )
 
-func main() {
-	host, _ := os.Hostname()
-	name := flag.String("name", "btproxy-"+strings.ToLower(strings.Split(host, ".")[0]), "node name shown in Home Assistant")
-	friendly := flag.String("friendly-name", "", "friendly name (default: the node name)")
-	area := flag.String("area", "", "suggested area")
-	listen := flag.String("listen", ":6053", "API listen address; with several adapters, the first of consecutive ports, or a comma-separated list")
-	backend := flag.String("backend", defaultBackend,
-		"Bluetooth backend: auto (kernel, or bluez while bluetoothd runs), kernel or bluez on Linux, winrt on Windows, or fake")
-	adapterName := flag.String("adapter", "hci0", "Bluetooth adapter, or a comma-separated list served as one device each (bluez and kernel backends)")
-	maxConns := flag.Int("connections", 3, "maximum simultaneous peripheral connections")
-	scanMode := flag.String("scan-mode", "active", "scanner mode: active or passive (Linux: needs kernel 5.10+, on bluez also bluetoothd --experimental, else active)")
-	mac := flag.String("mac", "", "MAC reported as the device's unique id (default: first network interface; further adapters: their own address)")
-	mdnsOn := flag.Bool("mdns", true, "advertise the API over mDNS so Home Assistant discovers it")
-	mdnsIface := flag.String("mdns-iface", "", "comma-separated interfaces to advertise on (default: all with IPv4, except container, VM and VPN ones)")
-	keyB64 := flag.String("encryption-key", "",
-		"API encryption key, base64 of 32 bytes as in ESPHome's api: encryption: key: (visible in ps; prefer -encryption-key-file or $BTPROXY_ENCRYPTION_KEY)")
-	keyFile := flag.String("encryption-key-file", "", "file holding the API encryption key")
-	advAllow := flag.String("adv-allow", "",
-		"forward only advertisements matching one of these comma-separated entries: MAC, OUI or prefix (AA:BB:CC, AA:BB:CC:DD:*), uuid:fe95, mfr:0x004c (default: all)")
-	advDeny := flag.String("adv-deny", "", "drop advertisements matching one of these entries (as -adv-allow; deny wins)")
-	advDenyRandom := flag.Bool("adv-deny-random", false,
-		"drop advertisements from private (resolvable and non-resolvable) random addresses, phones included")
-	debug := flag.Bool("debug", false, "debug logging")
-	configFile := flag.String("config", defaultConfig,
-		"settings file (flat JSON of flag values); flags on the command line override it, the settings page saves it")
-	uiAddr := flag.String("ui", defaultUI, "serve the settings page on this address, such as :8080 (needs -ui-password, except on loopback on Windows)")
-	uiPass := flag.String("ui-password", "", "settings page password, any user name (prefer -ui-password-file or $BTPROXY_UI_PASSWORD)")
-	uiPassFile := flag.String("ui-password-file", "", "file holding the settings page password")
-	flag.StringVar(&bondDir, "bond-dir", "/etc/btproxy", "directory for the keys of bonded devices (kernel backend)")
-	flag.BoolVar(&useAgent, "agent", true, "register a BlueZ pairing agent (bluez backend)")
-	flag.DurationVar(&stallTimeout, "stall-timeout", 3*time.Minute,
-		"restart scanning after this long without advertisements, 0 to disable (kernel backend; bluez backend in active mode)")
-	flag.StringVar(&bluetoothdRestart, "bluetoothd-restart", "",
-		"shell command that restarts bluetoothd when scanning keeps stalling or it stops answering (bluez backend)")
-	flag.BoolVar(&usbReset, "usb-reset", false,
-		"reset the adapter's USB device when nothing else brings scanning back (bluez and kernel backends)")
-	flag.StringVar(&rawAdverts, "raw-adverts", "auto",
-		"read advertisements from the HCI monitor: auto, on or off (bluez backend; needs CAP_NET_RAW)")
-	flag.BoolVar(&scanPause, "scan-pause-on-connect", true,
-		"stop scanning while a connection is being made, like ESPHome (bluez, kernel and winrt backends)")
-	flag.IntVar(&connectRetries, "connect-retries", 2,
-		"retry a connect that fails at once on the radio (HCI 0x3e) or loses the link right after, this many times, 0 to disable (bluez, kernel and winrt backends)")
-	flag.DurationVar(&connectRetryDelay, "connect-retry-delay", time.Second,
-		"wait before the first connect retry, doubling before each further one (bluez, kernel and winrt backends)")
-	flag.Parse()
-	settingsErr := loadSettings(*configFile)
+// setBackendOptions copies the flags the backends read into the variables above, once the settings file is
+// applied.
+func setBackendOptions(a *app) {
+	bondDir = a.str("bond-dir")
+	useAgent = a.boolean("agent")
+	stallTimeout = a.duration("stall-timeout")
+	usbReset = a.boolean("usb-reset")
+	bluetoothdRestart = a.str("bluetoothd-restart")
+	rawAdverts = a.str("raw-adverts")
+	scanPause = a.boolean("scan-pause-on-connect")
+	connectRetries = a.integer("connect-retries")
+	connectRetryDelay = a.duration("connect-retry-delay")
+}
 
-	level := logx.LevelInfo
-	if *debug {
-		level = logx.LevelDebug
+func main() {
+	a, err := newApp(flag.NewFlagSet("btproxy", flag.ExitOnError), os.Args[1:])
+	if err != nil {
+		fatal(a.log, "settings file", "path", a.configPath, "err", err)
 	}
-	// Everything logged also goes to API clients that subscribe to logs, at the level each asks for.
-	logs := &api.Logs{}
-	app.problems.w = logOutput()
-	log := logx.New(&app.problems, level, logs)
-	app.log = log
-	if settingsErr != nil {
-		fatal(log, "settings file", "path", *configFile, "err", settingsErr)
+	a.run()
+}
+
+// run serves the proxy until it stops.
+func (a *app) run() {
+	log := a.log
+	if a.configErr != nil {
+		log.Error("settings file", "path", a.configPath, "err", a.configErr)
 	}
-	if app.configErr != nil {
-		log.Error("settings file", "path", *configFile, "err", app.configErr)
-	}
-	oneInstance(log, *listen)
-	uiPassword, err := uiPassword(*uiPass, *uiPassFile, os.Getenv("BTPROXY_UI_PASSWORD"))
+	listen := a.str("listen")
+	oneInstance(log, listen)
+	uiPassword, err := uiPassword(a.str("ui-password"), a.str("ui-password-file"), os.Getenv("BTPROXY_UI_PASSWORD"))
 	if err != nil {
 		fatal(log, "ui password", "err", err)
 	}
 
 	scan := map[string]ble.ScanMode{"active": ble.ScanActive, "passive": ble.ScanPassive}
-	mode, ok := scan[*scanMode]
+	mode, ok := scan[a.str("scan-mode")]
 	if !ok {
-		fatal(log, "unknown scan mode", "scan-mode", *scanMode)
+		fatal(log, "unknown scan mode", "scan-mode", a.str("scan-mode"))
 	}
-	key, err := encryptionKey(*keyB64, *keyFile, os.Getenv("BTPROXY_ENCRYPTION_KEY"))
+	key, err := encryptionKey(a.str("encryption-key"), a.str("encryption-key-file"), os.Getenv("BTPROXY_ENCRYPTION_KEY"))
 	if err != nil {
 		fatal(log, "encryption key", "err", err)
 	}
 	if key != nil && !api.Encryption {
 		fatal(log, "encryption key set, but this build has no encryption (built with -tags nonoise)")
 	}
-	advFilter, err := ble.ParseAdvFilter(*advAllow, *advDeny, *advDenyRandom)
+	advFilter, err := ble.ParseAdvFilter(a.str("adv-allow"), a.str("adv-deny"), a.boolean("adv-deny-random"))
 	if err != nil {
 		fatal(log, "advertisement filter", "err", err)
 	}
-	if *backend == "auto" && autoBackend != nil {
-		*backend = autoBackend(log) // the settings page and the sensors go by the flag's value
+	backend := a.str("backend")
+	if backend == "auto" && autoBackend != nil {
+		backend = autoBackend(log)
+		a.fs.Set("backend", backend) // the settings page and the sensors go by the flag's value
 	}
-	newAdapter, ok := backends[*backend]
+	newAdapter, ok := backends[backend]
 	if !ok {
-		fatal(log, "unknown backend", "backend", *backend)
+		fatal(log, "unknown backend", "backend", backend)
 	}
 	if advFilter != nil {
 		log.Info("advertisement filter", "filter", advFilter.String())
 	}
-	nodes, err := planNodes(*adapterName, *listen, *name, *friendly)
+	nodes, err := planNodes(a.str("adapter"), listen, a.str("name"), a.str("friendly-name"))
 	if err != nil {
 		fatal(log, "adapters", "err", err)
 	}
@@ -169,7 +137,7 @@ func main() {
 		} else if err != nil {
 			fatal(log, "open adapter", "adapter", n.adapter, "err", err)
 		}
-		m := *mac
+		m := a.str("mac")
 		if i > 0 {
 			m = ble.FormatMAC(adapter.MAC()) // the first keeps the unique id it had with one adapter
 		} else if m == "" {
@@ -189,8 +157,8 @@ func main() {
 		}
 		log.Info("btproxy started", "version", version, "listen", l.Addr().String(), "name", n.name,
 			"adapter", n.adapter, "bt_mac", ble.FormatMAC(adapter.MAC()), "encryption", key != nil)
-		if *mdnsOn {
-			if r := startMDNS(log, n.name, n.friendly, m, l.Addr().(*net.TCPAddr).Port, *mdnsIface, key != nil); r != nil {
+		if a.boolean("mdns") {
+			if r := startMDNS(log, n.name, n.friendly, m, l.Addr().(*net.TCPAddr).Port, a.str("mdns-iface"), key != nil); r != nil {
 				responders = append(responders, r)
 			}
 		}
@@ -199,24 +167,27 @@ func main() {
 			nlog = log.With("node", n.name)
 		}
 		srv := api.NewServer(api.Config{
-			Name: n.name, FriendlyName: n.friendly, MAC: m, SuggestedArea: *area,
-			Version: esphomeVersion, ProjectVersion: version, MaxConnections: *maxConns, ScanMode: mode,
-			Logs: logs, Backend: *backend, Adapter: n.adapter,
+			Name: n.name, FriendlyName: n.friendly, MAC: m, SuggestedArea: a.str("area"),
+			Version: esphomeVersion, ProjectVersion: version, MaxConnections: a.integer("connections"), ScanMode: mode,
+			Logs: a.logs, Backend: backend, Adapter: n.adapter,
 			EncryptionKey: key, AdvFilter: advFilter,
-			Restart: func() { stop("restart requested through the API", true) },
+			Restart: func() { a.stop("restart requested through the API", true) },
 			LastProblem: func() string {
-				line, _ := app.problems.lastProblem()
+				line, _ := a.problems.lastProblem()
 				return line
 			},
 		}, adapter, nlog)
-		addNode(n.name, adapter, l, srv)
+		a.addNode(n.name, adapter, l, srv)
 		go func() { served <- srv.Serve(l) }()
 	}
-	if err := startUI(log, responders, *uiAddr, uiPassword, uiToken); err != nil {
+	a.mu.Lock()
+	a.responders = responders
+	a.mu.Unlock()
+	if err := a.startUI(a.str("ui"), uiPassword, tokenLogin); err != nil {
 		fatal(log, "settings page", "err", err)
 	}
-	go stopOnSignal()
-	startTray(log)
+	go a.stopOnSignal()
+	startTray(a)
 	fatal(log, "serve", "err", <-served)
 }
 
@@ -253,10 +224,10 @@ func startMDNS(log *logx.Logger, name, friendly, mac string, port int, ifaces st
 
 // stopOnSignal stops the proxy on SIGINT or SIGTERM the way the settings page and the tray icon do: the mDNS
 // advertisements are withdrawn and the tray icon removed.
-func stopOnSignal() {
+func (a *app) stopOnSignal() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	stop("signal "+(<-sig).String(), false)
+	a.stop("signal "+(<-sig).String(), false)
 }
 
 // encryptionKey decodes the API key from the flag, the key file or the environment, in that order of

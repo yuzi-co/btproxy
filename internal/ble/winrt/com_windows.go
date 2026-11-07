@@ -97,7 +97,7 @@ func withAsyncInfo(op *foundation.IAsyncOperation, fn func(*foundation.IAsyncInf
 func hresultError(hr uint32) error {
 	facility, code := hr>>16&0x1fff, hr&0xffff
 	if facility == 0x65 {
-		return fmt.Errorf("ATT error 0x%02x", code)
+		return attError(code)
 	}
 	msgID := hr
 	if facility == 7 { // FACILITY_WIN32
@@ -184,17 +184,4 @@ func uuidOf(g syscall.GUID) ble.UUID {
 		lo = lo<<8 | uint64(b)
 	}
 	return ble.UUID{Hi: hi, Lo: lo}
-}
-
-// protocolError reads the ATT error code from a GATT result's ProtocolError reference.
-func protocolError(ref *foundation.IReference, err error) error {
-	if err != nil || ref == nil {
-		return errors.New("GATT protocol error")
-	}
-	defer ref.Release()
-	v, err := ref.GetValue() // IReference<UInt8>: the byte comes back in the pointer-sized out slot
-	if err != nil {
-		return errors.New("GATT protocol error")
-	}
-	return fmt.Errorf("ATT error 0x%02x", byte(uintptr(v)))
 }

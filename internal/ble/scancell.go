@@ -20,7 +20,7 @@ type ScanCell struct {
 	mode       ScanMode
 	activeOnly bool
 	status     ScanStatus
-	published  ScanStatus // what the callback last got
+	pending    []ScanStatus // changes the callback has not got yet
 	fn         func(ScanStatus)
 
 	notify sync.Mutex // serializes the callback, so changes reach it in order
@@ -108,36 +108,43 @@ func (c *ScanCell) SetState(s ScanState) {
 }
 
 // Store records the status without telling the callback, for a backend that sets the status holding a lock
-// the callback must not run under: it stores under the lock and publishes after.
+// the callback must not run under: it stores under the lock and publishes after. A change is kept for
+// Publish even if a later Store changes the status back, as a start that failed and is being retried
+// goes through starting and failed each time.
 func (c *ScanCell) Store(st ScanStatus) {
 	c.mu.Lock()
-	c.status = st
+	c.store(st)
 	c.mu.Unlock()
 }
 
 // StoreState is Store with the state and the effective mode.
 func (c *ScanCell) StoreState(s ScanState) {
 	c.mu.Lock()
-	c.status = ScanStatus{State: s, Mode: c.effective()}
+	c.store(ScanStatus{State: s, Mode: c.effective()})
 	c.mu.Unlock()
 }
 
-// Publish tells the callback the status if it changed since the callback last got it.
+func (c *ScanCell) store(st ScanStatus) {
+	if st != c.status {
+		c.status = st
+		c.pending = append(c.pending, st)
+	}
+}
+
+// Publish tells the callback the changes stored since it was last told, in order.
 func (c *ScanCell) Publish() {
 	c.notify.Lock()
 	defer c.notify.Unlock()
 	c.mu.Lock()
-	st, fn := c.status, c.fn
-	changed := st != c.published
-	c.published = st
+	pending, fn := c.pending, c.fn
+	c.pending = nil
 	c.mu.Unlock()
-	if !changed {
-		return
-	}
-	if c.Log != nil {
-		c.Log.Debug("scanner status", "state", st.State, "mode", st.Mode)
-	}
-	if fn != nil {
-		fn(st)
+	for _, st := range pending {
+		if c.Log != nil {
+			c.Log.Debug("scanner status", "state", st.State, "mode", st.Mode)
+		}
+		if fn != nil {
+			fn(st)
+		}
 	}
 }
