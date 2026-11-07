@@ -61,7 +61,7 @@ diagnose() {
 		# so far, with a btproxy zombie that procd had not reaped.
 		timed 15 docker exec "$name" sh -c 'for p in 1 $(pidof logd) $(pidof ubusd); do
 			echo "diag: pid $p $(cat /proc/$p/comm) wchan $(cat /proc/$p/wchan) stack:"; cat /proc/$p/stack
-			ls -l /proc/$p/fd | sed "s/^.* \([0-9]* ->\)/  /"; done
+			ls -l /proc/$p/fd | sed "s/^.* \([0-9]* ->\)/  \1/"; done
 			echo "diag: unix sockets:"; cat /proc/net/unix' >&3 2>&3 || true
 	else
 		echo "diag: docker exec itself does not answer" >&3
