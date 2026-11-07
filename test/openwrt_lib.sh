@@ -53,10 +53,16 @@ run() {
 diagnose() {
 	timed 15 docker inspect -f 'diag: container {{.State.Status}}, pid {{.State.Pid}}' "$name" >&3 2>&3 || true
 	if timed 15 docker exec "$name" true >/dev/null 2>&1; then
-		echo "diag: docker exec answers; processes:" >&3
-		timed 15 docker exec "$name" ps w >&3 2>&3 || true
+		echo "diag: docker exec answers; processes (pid comm state ppid):" >&3
+		timed 15 docker exec "$name" sh -c 'for s in /proc/[0-9]*/stat; do cut -d" " -f1-4 "$s"; done' >&3 2>&3 || true
 		echo "diag: ubus log object:" >&3
 		timed 15 docker exec "$name" ubus call log read '{"lines":3}' >&3 2>&3 || echo "diag: ubus log read failed or hung" >&3
+		# Where procd and logd are blocked, and what they hold open: logd stopped answering ubus in the hangs seen
+		# so far, with a btproxy zombie that procd had not reaped.
+		timed 15 docker exec "$name" sh -c 'for p in 1 $(pidof logd) $(pidof ubusd); do
+			echo "diag: pid $p $(cat /proc/$p/comm) wchan $(cat /proc/$p/wchan) stack:"; cat /proc/$p/stack
+			ls -l /proc/$p/fd | sed "s/^.* \([0-9]* ->\)/  /"; done
+			echo "diag: unix sockets:"; cat /proc/net/unix' >&3 2>&3 || true
 	else
 		echo "diag: docker exec itself does not answer" >&3
 	fi
