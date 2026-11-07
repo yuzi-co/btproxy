@@ -205,13 +205,15 @@ func (c *attClient) findInfo(start, end uint16) ([]ble.Descriptor, error) {
 		return nil, errors.New("descriptor discovery: bad response length")
 	}
 	var found []ble.Descriptor
-	prev := start
+	// The handles must go up, and the next one after 0xffff is out of range rather than 0: an int keeps the
+	// bound from wrapping, which would otherwise let the callers start over from handle 1 forever.
+	next := int(start)
 	for off := 0; off < len(entries); off += size {
 		h := binary.LittleEndian.Uint16(entries[off:])
-		if h < prev || h > end {
+		if int(h) < next || h > end {
 			return nil, fmt.Errorf("descriptor discovery: bad handle %#x", h)
 		}
-		prev = h + 1
+		next = int(h) + 1
 		found = append(found, ble.Descriptor{UUID: uuidFromLE(entries[off+2 : off+size]), Handle: h})
 	}
 	return found, nil

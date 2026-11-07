@@ -740,9 +740,35 @@ func TestMalformedResponsesFail(t *testing.T) {
 	}
 }
 
-// scripted answers every request with the same bytes.
+// A peripheral answering Find Information with handle 0xffff followed by handle 0 made the handle check wrap
+// around, so the walk started over from handle 1 and never ended. Both walks must stop within a few requests.
+func TestDescriptorWalkEndsOnWrappedHandles(t *testing.T) {
+	rsp := []byte{opFindInfoRsp, 1, 0xff, 0xff, 0x01, 0x29, 0x00, 0x00, 0x01, 0x29}
+	for name, walk := range map[string]func(c *attClient) error{
+		"notify": func(c *attClient) error { return c.Notify(3, true) },
+		"descriptors": func(c *attClient) error {
+			_, err := c.discoverDescs(4, 0xffff)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &scripted{rsp: rsp, limit: 8, in: make(chan []byte, 1), closed: make(chan struct{})}
+			c := newATTClient(s, nil)
+			go c.run()
+			defer c.t.Close()
+			err := walk(c)
+			if err == nil || errors.Is(err, ble.ErrNotConnected) { // the limit makes a loop ErrNotConnected
+				t.Errorf("got %v, want a parse error", err)
+			}
+		})
+	}
+}
+
+// scripted answers every request with the same bytes. With a limit, it drops the link after that many requests.
 type scripted struct {
 	rsp    []byte
+	limit  int
+	writes int
 	in     chan []byte
 	closed chan struct{}
 	once   sync.Once
@@ -758,6 +784,11 @@ func (s *scripted) Read(b []byte) (int, error) {
 }
 
 func (s *scripted) Write(b []byte) (int, error) {
+	s.writes++
+	if s.limit > 0 && s.writes > s.limit {
+		s.Close()
+		return 0, io.ErrClosedPipe
+	}
 	s.in <- s.rsp
 	return len(b), nil
 }
