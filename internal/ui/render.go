@@ -4,6 +4,19 @@ import (
 	"strings"
 )
 
+// The page is built by string concatenation: html/template would add about 1.6 MB to the router build and
+// net/http about 3.4 MB (both measured on mipsle, 2026-11-07), for one form.
+
+// text is a plain-text response of one line, with any further header lines.
+func text(status int, msg string, headers ...string) *Response {
+	return &Response{Status: status, Type: "text/plain; charset=utf-8", Headers: headers, Body: []byte(msg + "\n")}
+}
+
+// html is an HTML response.
+func html(status int, body string) *Response {
+	return &Response{Status: status, Type: "text/html; charset=utf-8", Body: []byte(body)}
+}
+
 // esc escapes text for HTML element content and quoted attribute values.
 func esc(s string) string {
 	var b strings.Builder
@@ -86,7 +99,7 @@ func (s *Server) render(p Page, notice string, values map[string]string) *Respon
 		w(`<p><button class="p" type="submit">Save and restart</button></p>`)
 	}
 	w(`</form>`, script, `</body></html>`)
-	return &Response{Status: 200, Type: "text/html; charset=utf-8", Body: []byte(b.String())}
+	return html(200, b.String())
 }
 
 func (s *Server) field(w func(...string), f Field, v string, readOnly bool) {

@@ -1,4 +1,4 @@
-// Package ui serves btproxy's settings page. net/http would add about 4 MB to the router build (it brings
+// Package ui serves btproxy's settings page. net/http would add about 3.4 MB to the router build (it brings
 // crypto/tls along), so the package speaks just enough HTTP/1.1 itself: one request per connection
 // (Connection: close), no chunked bodies, strict size limits and one deadline for the whole exchange.
 package ui
@@ -92,7 +92,7 @@ func serveConn(c net.Conn, handle func(*Request) *Response, ioTimeout time.Durat
 	var resp *Response
 	switch e := (*httpError)(nil); {
 	case errors.As(err, &e):
-		resp = &Response{Status: e.status, Type: "text/plain; charset=utf-8", Body: []byte(e.msg + "\n")}
+		resp = text(e.status, e.msg)
 	case err != nil:
 		return // timeout or the client went away
 	default:
