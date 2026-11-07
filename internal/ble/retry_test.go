@@ -1,10 +1,15 @@
 package ble
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 var (
@@ -77,6 +82,63 @@ func TestConnectRetrySlowFailure(t *testing.T) {
 	}
 }
 
+// TestConnectRetrySlowLinkLost retries a link that came up and dropped however long that took: the attempt
+// lasted as long as the link.
+func TestConnectRetrySlowLinkLost(t *testing.T) {
+	r := ConnectRetry{Retries: 2, Delay: time.Millisecond, Fast: 10 * time.Millisecond, Budget: time.Second}
+	lost := fmt.Errorf("%w while connecting", ErrLinkLost)
+	calls := 0
+	retries, err := r.Do(func() error {
+		calls++
+		time.Sleep(20 * time.Millisecond)
+		if calls == 1 {
+			return lost
+		}
+		return nil
+	}, func(err error) bool { return errors.Is(err, ErrLinkLost) }, nil, nil)
+	if calls != 2 || retries != 1 || err != nil {
+		t.Errorf("calls %d retries %d err %v, want 2 calls, 1 retry and success", calls, retries, err)
+	}
+}
+
+// TestConnectRetryRun wraps the final error with the retry count and logs the retries.
+func TestConnectRetryRun(t *testing.T) {
+	var logs bytes.Buffer
+	log := logx.New(&logs, logx.LevelDebug, nil)
+	r := testRetry(2)
+	calls := 0
+	err := r.Run(log, attempts(&calls, errRadio, errRadio, errRadio), isRadio, nil)
+	if err == nil || !errors.Is(err, errRadio) || !strings.Contains(err.Error(), "connect, 2 retries: ") {
+		t.Errorf("error %v, want the radio error after 2 retries", err)
+	}
+	if n := strings.Count(logs.String(), "connect failed, retrying"); n != 2 {
+		t.Errorf("%d retry lines, want 2:\n%s", n, logs.String())
+	}
+	calls = 0
+	if err := r.Run(log, attempts(&calls, errOther), isRadio, nil); err == nil || err.Error() != "connect: not found" {
+		t.Errorf("error %v, want \"connect: not found\"", err)
+	}
+	calls = 0
+	logs.Reset()
+	if err := r.Run(log, attempts(&calls, errRadio), isRadio, nil); err != nil ||
+		!strings.Contains(logs.String(), "connected after retries") {
+		t.Errorf("error %v, logs %q, want success reported after a retry", err, logs.String())
+	}
+}
+
+// TestConnectOptionsRetry builds the ConnectRetry of the options on the shared budget, clamping negative retries.
+func TestConnectOptionsRetry(t *testing.T) {
+	if r := (ConnectOptions{ConnectRetries: -1}).Retry(time.Second); r.Retries != 0 {
+		t.Errorf("negative retries not clamped: %+v", r)
+	}
+	// Two retries with their doubling delays (1 s, then 2 s) must fit the budget.
+	r := ConnectOptions{ConnectRetries: 2, ConnectRetryDelay: time.Second}.Retry(3 * time.Second)
+	if r.Retries != 2 || r.Delay != time.Second || r.Fast != 3*time.Second || r.Budget != ConnectBudget ||
+		r.Budget < 3*r.Delay {
+		t.Errorf("bad options %+v", r)
+	}
+}
+
 // TestConnectRetryBudget starts no retry that would begin after Budget.
 func TestConnectRetryBudget(t *testing.T) {
 	r := ConnectRetry{Retries: 10, Delay: 10 * time.Millisecond, Fast: time.Second, Budget: 25 * time.Millisecond}
@@ -97,20 +159,17 @@ func TestConnectRetryWithdrawn(t *testing.T) {
 	}
 }
 
-// recordSleeps replaces sleep for the test and returns where the slept durations are collected.
-func recordSleeps(t *testing.T) *[]time.Duration {
-	t.Helper()
+// recordSleeps makes r record the delays it would sleep instead of sleeping, and returns where they go.
+func recordSleeps(r *ConnectRetry) *[]time.Duration {
 	var slept []time.Duration
-	saved := sleep
-	sleep = func(d time.Duration) { slept = append(slept, d) }
-	t.Cleanup(func() { sleep = saved })
+	r.sleep = func(d time.Duration) { slept = append(slept, d) }
 	return &slept
 }
 
 // TestConnectRetryBackoff doubles the delay before each retry: Delay, 2*Delay, 4*Delay.
 func TestConnectRetryBackoff(t *testing.T) {
-	slept := recordSleeps(t)
 	r := ConnectRetry{Retries: 3, Delay: 10 * time.Millisecond, Fast: time.Second, Budget: time.Second}
+	slept := recordSleeps(&r)
 	calls := 0
 	retries, err := r.Do(func() error { calls++; return errRadio }, isRadio, nil, nil)
 	if calls != 4 || retries != 3 || err != errRadio {
@@ -125,8 +184,8 @@ func TestConnectRetryBackoff(t *testing.T) {
 // TestConnectRetryBackoffBudget stops at the retry whose doubled delay would start it after Budget, even though
 // the base delay would still fit.
 func TestConnectRetryBackoffBudget(t *testing.T) {
-	slept := recordSleeps(t)
 	r := ConnectRetry{Retries: 10, Delay: 10 * time.Millisecond, Fast: time.Second, Budget: 30 * time.Millisecond}
+	slept := recordSleeps(&r)
 	calls := 0
 	retries, err := r.Do(func() error { calls++; return errRadio }, isRadio, nil, nil)
 	// Nothing really sleeps, so hardly any time passes: the third retry's 40 ms alone overruns the 30 ms budget,
@@ -140,8 +199,8 @@ func TestConnectRetryBackoffBudget(t *testing.T) {
 
 // TestConnectRetryDisabledSleepsNever makes one attempt and never sleeps with Retries 0.
 func TestConnectRetryDisabledSleepsNever(t *testing.T) {
-	slept := recordSleeps(t)
 	r := ConnectRetry{Retries: 0, Delay: 10 * time.Millisecond, Fast: time.Second, Budget: time.Second}
+	slept := recordSleeps(&r)
 	calls := 0
 	retries, err := r.Do(func() error { calls++; return errRadio }, isRadio, nil, nil)
 	if calls != 1 || retries != 0 || err != errRadio || len(*slept) != 0 {
