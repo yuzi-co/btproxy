@@ -1,6 +1,7 @@
 // Package logx is btproxy's leveled key=value logger. It writes lines in the format of log/slog's TextHandler
 // ("time=... level=INFO msg=... key=value") and passes each record to an optional Tap, which streams logs to API
-// clients. It replaces log/slog, whose package initialisation alone links encoding/json into the binary.
+// clients. It stands in for log/slog, which would need a custom Handler for the tap either way and costs about
+// 64 KB on mipsle (measured 2026-11-07; encoding/json, once the reason, is linked anyway by the kernel backend).
 package logx
 
 import (
