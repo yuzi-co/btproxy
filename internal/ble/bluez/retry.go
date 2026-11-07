@@ -27,6 +27,11 @@ const retryFast = 3 * time.Second
 // errLinkLost is ble.ErrLinkLost for a link that dropped before its services were resolved.
 var errLinkLost = fmt.Errorf("%w while resolving services", ble.ErrLinkLost)
 
+// retryable tells whether a connect error is worth another attempt: a radio failure, or a link that came up
+// and dropped (errLinkLost). Everything else, timeouts included, fails at once. Connect asks this through
+// ble.ConnectRetry, which holds a radio failure to retryFast and a lost link to the budget.
+func retryable(err error) bool { return errors.Is(err, ble.ErrLinkLost) || radioFailure(err) }
+
 // radioFailure tells whether a connect error is one the radio may not repeat: BlueZ's
 // "le-connection-abort-by-local", or a BlueZ error with an empty message (not "does not exist"). BlueZ 5.66
 // names the empty one org.bluez.Failed, without the usual ".Error".
