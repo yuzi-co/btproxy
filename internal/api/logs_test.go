@@ -220,7 +220,7 @@ func TestSubscribeLogs(t *testing.T) {
 	tc.send(999, nil)
 	fs = tc.expect(msgSubscribeLogsResponse)
 	if m := string(fs[1].data); fieldValue(fs, 1) != logInfo ||
-		!regexp.MustCompile(`\[I\]\[server:\d+\]: ignoring unsupported message client=127\.0\.0\.1:\d+ type=999`).MatchString(m) {
+		!regexp.MustCompile(`\[I\]\[client:\d+\]: ignoring unsupported message client=127\.0\.0\.1:\d+ type=999`).MatchString(m) {
 		t.Fatalf("log line: %q", m)
 	}
 }
