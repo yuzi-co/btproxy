@@ -95,10 +95,14 @@ const (
 	reqClearCache            = 6
 )
 
-// gattError is reported for failed GATT operations and connections (ESP_GATT_ERROR, 0x85).
+// gattError is reported for failed GATT operations and connections (ESP_GATT_ERROR, 0x85). aioesphomeapi
+// lists it in its BLE error table and Home Assistant shows "GATT operation error" for it.
 const gattError = 0x85
 
-// gattNotConnected is ESPHome's own error code for requests on a device that is not connected.
+// gattNotConnected is ESPHome's own code for a pairing or connection parameter request on a device that is
+// not connected: GATT_NOT_CONNECTED in its bluetooth_proxy component, -1 on purpose, since no ESP-IDF GATT
+// status is negative. Unlike ESPHome, a GATT request on a device that is not connected gets gattError here;
+// the client fails the request on either code.
 const gattNotConnected = -1
 
 type deviceInfo struct {
