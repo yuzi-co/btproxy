@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -21,12 +20,12 @@ import (
 // a file and shows a tray icon whose menu opens the settings page.
 
 var (
-	trayOn  bool
-	logFile string
+	trayOn  bool   // -tray
+	logFile string // -log-file
 
 	defaultConfig = filepath.Join(dataDir(), "config.json")
 	defaultUI     = "127.0.0.1:0" // a free port, opened from the tray
-	uiToken       = true
+	tokenLogin    = true          // the settings page takes a token from the tray in place of a password
 )
 
 // envWaitPID names the process a restarted btproxy waits for before it takes the port.
@@ -41,10 +40,13 @@ func hasConsole() bool {
 	return h != 0
 }
 
-func init() {
-	flag.BoolVar(&trayOn, "tray", !hasConsole(), "show a tray icon (Windows; default: when there is no console)")
-	flag.StringVar(&logFile, "log-file", "",
-		`log file (Windows; default: %LOCALAPPDATA%\btproxy\btproxy.log when there is no console to log to)`)
+// defaultTray is the -tray default: an icon when there is no console.
+func defaultTray() bool { return !hasConsole() }
+
+// setPlatformOptions copies the Windows flags into the variables the tray and the log file read.
+func setPlatformOptions(a *app) {
+	trayOn = a.boolean("tray")
+	logFile = a.str("log-file")
 }
 
 // dataDir is %LOCALAPPDATA%\btproxy, where the settings and the log file live.
@@ -75,7 +77,8 @@ func protectFile(path string) error {
 }
 
 // logOutput is stderr, plus or instead the log file: with -log-file, or by default when stderr goes nowhere.
-func logOutput() io.Writer {
+// It returns the log file's path, "" when there is none.
+func logOutput() (io.Writer, string) {
 	stderr := stdHandleOK(windows.STD_ERROR_HANDLE)
 	var w io.Writer
 	if stderr {
@@ -86,7 +89,7 @@ func logOutput() io.Writer {
 		path = filepath.Join(dataDir(), "btproxy.log")
 	}
 	if path == "" {
-		return w
+		return w, ""
 	}
 	var onOpen func(*os.File)
 	if !stderr {
@@ -97,15 +100,13 @@ func logOutput() io.Writer {
 	switch {
 	case err != nil && stderr:
 		fmt.Fprintln(os.Stderr, "log file:", err)
+		return w, ""
 	case err != nil:
+		return w, ""
 	case w != nil:
-		app.logPath = path
-		w = io.MultiWriter(w, f)
-	default:
-		app.logPath = path
-		w = f
+		return io.MultiWriter(w, f), path
 	}
-	return w
+	return f, path
 }
 
 // stdHandleOK tells whether a standard handle leads somewhere: a console, file or pipe.
@@ -153,16 +154,16 @@ func waitExit(pid uint32, timeout time.Duration) {
 	windows.WaitForSingleObject(h, uint32(timeout/time.Millisecond))
 }
 
-func startTray(log *logx.Logger) {
+func startTray(a *app) {
 	if !trayOn {
 		// To the console only: the URL can hold the login token, and the log also goes to a file and to API
 		// clients.
-		if u := settingsURL(); u != "" {
+		if u := a.settingsURL(); u != "" {
 			fmt.Fprintln(os.Stderr, "settings page:", u)
 		}
 		return
 	}
-	go runTray(log)
+	go runTray(a)
 }
 
 func beforeExit() { removeTrayIcon() }

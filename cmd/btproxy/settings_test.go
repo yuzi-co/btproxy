@@ -2,13 +2,12 @@ package main
 
 import (
 	"bytes"
-	"context"
+	"flag"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -26,12 +25,13 @@ func goodSettings() map[string]string {
 		"mdns-iface": "", "encryption-key": "", "connections": "3", "scan-mode": "active", "adv-allow": "",
 		"adv-deny": "", "adv-deny-random": "false", "adapter": "hci0", "agent": "true", "raw-adverts": "auto",
 		"scan-pause-on-connect": "true", "stall-timeout": "3m", "connect-retries": "2", "connect-retry-delay": "1s",
-		"bluetoothd-restart": "", "debug": "false",
+		"bluetoothd-restart": "", "usb-reset": "false", "bond-dir": "/etc/btproxy", "debug": "false",
 	}
 }
 
 func TestValidateSettings(t *testing.T) {
-	if errs := validateSettings(goodSettings()); len(errs) != 0 {
+	table := settingsTable()
+	if errs := validateSettings(table, goodSettings()); len(errs) != 0 {
 		t.Fatalf("good settings: %v", errs)
 	}
 	for _, c := range []struct{ key, value string }{
@@ -54,21 +54,23 @@ func TestValidateSettings(t *testing.T) {
 		{"adv-allow", "uuid:zz"},
 		{"adv-deny", "mfr:nope"},
 		{"stall-timeout", "3 minutes"},
+		{"stall-timeout", ""},
 		{"connect-retries", "-1"},
 		{"connect-retry-delay", "1 second"},
 		{"connect-retry-delay", "-1s"},
 		{"raw-adverts", "sometimes"},
+		{"usb-reset", "yes please"},
 		{"adapter", "hci0,hci0"},
 	} {
 		v := goodSettings()
 		v[c.key] = c.value
-		if errs := validateSettings(v); errs[c.key] == "" {
+		if errs := validateSettings(table, v); errs[c.key] == "" {
 			t.Errorf("%s=%q: no error (%v)", c.key, c.value, errs)
 		}
 	}
 	v := goodSettings()
 	v["mac"], v["encryption-key"], v["listen"] = "aa-bb-cc-dd-ee-ff", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", "127.0.0.1:6053"
-	if errs := validateSettings(v); len(errs) != 0 {
+	if errs := validateSettings(table, v); len(errs) != 0 {
 		t.Fatalf("%v", errs)
 	}
 }
@@ -116,115 +118,174 @@ func TestLoopbackAddr(t *testing.T) {
 	}
 }
 
-// A settings file that exists but cannot be used stops the proxy: it may hold the encryption key, and carrying
-// on would serve a plaintext API.
-func TestBadSettingsFile(t *testing.T) {
+// newTestApp builds the proxy in this process from args, as main would, with the fake backend, no mDNS and no
+// settings page or file unless args say otherwise.
+func newTestApp(t *testing.T, args ...string) (*app, error) {
+	t.Helper()
+	fs := flag.NewFlagSet("btproxy", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	return newApp(fs, append([]string{"-backend", "fake", "-mdns=false", "-ui", "", "-config", ""}, args...))
+}
+
+func writeSettings(t *testing.T, content string) string {
+	t.Helper()
 	cfg := filepath.Join(t.TempDir(), "btproxy.json")
-	if err := os.WriteFile(cfg, []byte(`{"encryption-key": `), 0o600); err != nil {
+	if err := os.WriteFile(cfg, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"-backend", "fake", "-mdns=false", "-name", "proxy", "-mac", "02:00:00:00:00:01",
-		"-listen", "127.0.0.1:" + freePort(t), "-config", cfg}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, os.Args[0], append(append([]string{}, testChildArgs...), args...)...)
-	cmd.Env = append(os.Environ(), "BTPROXY_RUN_MAIN=1")
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		t.Fatalf("still running with a bad settings file:\n%s", out)
+	return cfg
+}
+
+// A settings file that exists but cannot be used is an error main stops on: it may hold the encryption key,
+// and carrying on would serve a plaintext API.
+func TestBadSettingsFile(t *testing.T) {
+	cfg := writeSettings(t, `{"encryption-key": `)
+	a, err := newTestApp(t, "-config", cfg)
+	if err == nil || !strings.Contains(err.Error(), cfg) {
+		t.Fatalf("err %v", err)
 	}
-	if err == nil || !strings.Contains(string(out), "settings file") {
-		t.Fatalf("err %v, output:\n%s", err, out)
+	if a == nil || a.log == nil {
+		t.Fatal("no app to log the error with")
 	}
 }
 
-func freePort(t *testing.T) string {
+// The settings file holds any setting of the settings page, usb-reset included, as a flag would; the command
+// line wins over it, and what it cannot hold is reported without stopping the proxy.
+func TestSettingsFile(t *testing.T) {
+	for _, c := range []struct {
+		name, file string
+		args       []string
+		err        string
+		check      func(a *app) string
+	}{
+		{name: "usb-reset", file: `{"usb-reset": true, "connections": 2}`, check: func(a *app) string {
+			if !a.boolean("usb-reset") || !usbReset || a.integer("connections") != 2 {
+				return "not applied"
+			}
+			return ""
+		}},
+		{name: "command line wins", file: `{"connections": 2}`, args: []string{"-connections", "5"}, check: func(a *app) string {
+			if a.integer("connections") != 5 {
+				return "the settings file won"
+			}
+			return ""
+		}},
+		{name: "not a setting", file: `{"ui": ":8080", "name": "x"}`, err: `unknown setting "ui"`, check: func(a *app) string {
+			if a.str("name") != "x" {
+				return "the other setting did not apply"
+			}
+			return ""
+		}},
+		{name: "bad value", file: `{"connections": "many"}`, err: "setting connections"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, err := newTestApp(t, append([]string{"-config", writeSettings(t, c.file)}, c.args...)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := errString(a.configErr); c.err == "" && got != "" || !strings.Contains(got, c.err) {
+				t.Fatalf("configErr %q, want %q", got, c.err)
+			}
+			if c.check != nil {
+				if msg := c.check(a); msg != "" {
+					t.Fatal(msg)
+				}
+			}
+		})
+	}
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// The settings page needs a password, on loopback too, unless the platform hands out a token.
+func TestUINeedsPassword(t *testing.T) {
+	a, err := newTestApp(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.startUI("127.0.0.1:0", "", false); err == nil || !strings.Contains(err.Error(), "needs a password") {
+		t.Fatalf("err %v", err)
+	}
+	if err := a.startUI("", "", false); err != nil {
+		t.Fatalf("no page: %v", err)
+	}
+}
+
+// serveSettingsPage serves a's settings page, with password, and returns its base URL.
+func serveSettingsPage(t *testing.T, a *app, password string) string {
+	t.Helper()
+	srv := ui.New(settingsPage{a}, ui.Options{Password: password, Log: a.log})
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
-	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+	t.Cleanup(func() { l.Close() })
+	go srv.Serve(l)
+	return "http://" + l.Addr().String()
 }
 
-// TestSettingsPage runs the proxy with a settings file and the settings page, changes a setting through the
-// page and checks that the proxy restarts with it.
+// fetch makes a request to the settings page with the password pw, and returns the status and body.
+func fetch(t *testing.T, base, method, path string, form url.Values) (int, string) {
+	t.Helper()
+	var body io.Reader
+	if form != nil {
+		body = strings.NewReader(form.Encode())
+	}
+	req, _ := http.NewRequest(method, base+path, body)
+	req.SetBasicAuth("", "pw")
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err.Error()
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+var csrfRE = regexp.MustCompile(`name="csrf" value="([0-9a-f]+)"`)
+
+// TestSettingsPage runs the settings page in this process over a settings file: the page shows the file's
+// values, locks what the command line set, rejects a bad value, saves a good one and asks for a restart.
 func TestSettingsPage(t *testing.T) {
-	cfg := filepath.Join(t.TempDir(), "btproxy.json")
-	if err := os.WriteFile(cfg, []byte(`{"friendly-name": "Before", "connections": 2}`), 0o600); err != nil {
+	cfg := writeSettings(t, `{"friendly-name": "Before", "connections": 2}`)
+	a, err := newTestApp(t, "-name", "proxy", "-mac", "02:00:00:00:00:01", "-listen", "127.0.0.1:1", "-config", cfg)
+	if err != nil {
 		t.Fatal(err)
 	}
-	uiAddr := "127.0.0.1:" + freePort(t)
-	args := []string{"-backend", "fake", "-mdns=false", "-name", "proxy", "-mac", "02:00:00:00:00:01",
-		"-listen", "127.0.0.1:" + freePort(t), "-config", cfg, "-ui", uiAddr}
-	cmd := exec.Command(os.Args[0], append(append([]string{}, testChildArgs...), args...)...) // args win
-	cmd.Env = append(os.Environ(), "BTPROXY_RUN_MAIN=1", "BTPROXY_UI_PASSWORD=pw")
-	if testing.Verbose() {
-		cmd.Stderr = os.Stderr
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	pids := map[string]bool{strconv.Itoa(cmd.Process.Pid): true}
-	t.Cleanup(func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		for pid := range pids { // a restart on Windows is a new process
-			if p, err := strconv.Atoi(pid); err == nil {
-				if pr, err := os.FindProcess(p); err == nil {
-					pr.Kill()
-				}
-			}
+	restarted := make(chan string, 1)
+	a.exit = func(reason string, restart bool) {
+		if restart {
+			restarted <- reason
 		}
-	})
+	}
+	base := serveSettingsPage(t, a, "pw")
 
-	base := "http://" + uiAddr
-	fetch := func(method, path string, form url.Values) (int, string) {
-		var body io.Reader
-		if form != nil {
-			body = strings.NewReader(form.Encode())
-		}
-		req, _ := http.NewRequest(method, base+path, body)
-		req.SetBasicAuth("", "pw")
-		if form != nil {
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return 0, err.Error()
-		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		return resp.StatusCode, string(b)
+	code, page := fetch(t, base, "GET", "/", nil)
+	if code != 200 {
+		t.Fatalf("page: %d\n%s", code, page)
 	}
-	waitFor := func(what string, ok func() bool) {
-		t.Helper()
-		for deadline := time.Now().Add(20 * time.Second); !ok(); time.Sleep(100 * time.Millisecond) {
-			if time.Now().After(deadline) {
-				t.Fatal("timed out waiting for", what)
-			}
-		}
-	}
-
-	var page string
-	waitFor("the page", func() bool {
-		var code int
-		code, page = fetch("GET", "/", nil)
-		return code == 200
-	})
-	for _, want := range []string{`id="f-friendly-name" name="friendly-name"`, `value="Before"`, `value="2"`} {
+	for _, want := range []string{`id="f-friendly-name" name="friendly-name"`, `value="Before"`, `value="2"`,
+		`id="f-name" name="name" disabled`} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("page lacks %s:\n%s", want, page)
 		}
 	}
-	if !regexp.MustCompile(`id="f-name" name="name" disabled`).MatchString(page) {
-		t.Fatal("-name on the command line does not lock the field")
+	if strings.Contains(page, `id="f-agent"`) {
+		t.Fatal("a bluez setting is shown with the fake backend")
 	}
-	csrf := regexp.MustCompile(`name="csrf" value="([0-9a-f]+)"`).FindStringSubmatch(page)[1]
+	csrf := csrfRE.FindStringSubmatch(page)[1]
 
 	form := url.Values{"csrf": {csrf}, "friendly-name": {"After"}, "area": {""}, "listen": {"127.0.0.1:1"},
 		"connections": {"0"}, "scan-mode": {"active"}}
-	if code, body := fetch("POST", "/save", form); code != 400 || !strings.Contains(body, "out of range") {
+	if code, body := fetch(t, base, "POST", "/save", form); code != 400 || !strings.Contains(body, "out of range") {
 		t.Fatalf("invalid save: %d\n%s", code, body)
 	}
 	form.Set("connections", "3")
@@ -232,7 +293,7 @@ func TestSettingsPage(t *testing.T) {
 	if v := autostartFormValue(); v != "" {
 		form.Set("autostart", v) // leave the real autostart as it is: unchecked boxes are left out
 	}
-	if code, body := fetch("POST", "/save", form); code != 200 || !strings.Contains(body, "restarting") {
+	if code, body := fetch(t, base, "POST", "/save", form); code != 200 || !strings.Contains(body, "restarting") {
 		t.Fatalf("save: %d\n%s", code, body)
 	}
 	saved, err := os.ReadFile(cfg)
@@ -243,13 +304,67 @@ func TestSettingsPage(t *testing.T) {
 	if err != nil || m["friendly-name"] != "After" || m["connections"] != "" || len(m) != 1 {
 		t.Fatalf("settings file %s: %v", saved, err)
 	}
-	waitFor("the restarted proxy", func() bool {
-		code, body := fetch("GET", "/", nil)
+	select {
+	case reason := <-restarted:
+		if reason != "settings saved" {
+			t.Fatalf("restart reason %q", reason)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no restart after saving")
+	}
+}
+
+// TestSettingsPageRestart runs the proxy as a child process with the settings page, changes a setting through
+// the page and checks that the proxy restarts with it: the restart itself needs the real binary.
+func TestSettingsPageRestart(t *testing.T) {
+	cfg := writeSettings(t, `{"friendly-name": "Before"}`)
+	uiAddr := "127.0.0.1:" + freePort(t)
+	p := startProxy(t, []string{"BTPROXY_UI_PASSWORD=pw"}, "-backend", "fake", "-mdns=false", "-name", "proxy",
+		"-mac", "02:00:00:00:00:01", "-listen", "127.0.0.1:"+freePort(t), "-config", cfg, "-ui", uiAddr)
+	pids := map[string]bool{strconv.Itoa(p.cmd.Process.Pid): true}
+	t.Cleanup(func() {
+		for pid := range pids { // a restart on Windows is a new process
+			if n, err := strconv.Atoi(pid); err == nil {
+				if pr, err := os.FindProcess(n); err == nil {
+					pr.Kill()
+				}
+			}
+		}
+	})
+	base := "http://" + uiAddr
+	var page string
+	waitFor(t, "the page", func() bool {
+		var code int
+		code, page = fetch(t, base, "GET", "/", nil)
+		return code == 200
+	})
+	if !strings.Contains(page, `value="Before"`) {
+		t.Fatalf("page lacks the settings file's value:\n%s", page)
+	}
+	form := url.Values{"csrf": {csrfRE.FindStringSubmatch(page)[1]}, "friendly-name": {"After"}, "area": {""},
+		"connections": {"3"}, "scan-mode": {"active"}}
+	if v := autostartFormValue(); v != "" {
+		form.Set("autostart", v)
+	}
+	if code, body := fetch(t, base, "POST", "/save", form); code != 200 || !strings.Contains(body, "restarting") {
+		t.Fatalf("save: %d\n%s", code, body)
+	}
+	waitFor(t, "the restarted proxy", func() bool {
+		code, body := fetch(t, base, "GET", "/", nil)
 		return code == 200 && strings.Contains(body, `value="After"`)
 	})
-	_, status := fetch("GET", "/status.json", nil)
+	_, status := fetch(t, base, "GET", "/status.json", nil)
 	st, _ := ui.DecodeFlat([]byte(status))
 	pids[st["Process"]] = true
+}
+
+func freePort(t *testing.T) string {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
 }
 
 func TestProblemWatch(t *testing.T) {

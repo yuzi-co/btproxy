@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"os/exec"
 	"reflect"
 	"strconv"
 	"testing"
@@ -45,39 +43,18 @@ func TestPlanNodes(t *testing.T) {
 	}
 }
 
-// TestMain runs the proxy itself when TestTwoAdapters starts the test binary as a child.
-func TestMain(m *testing.M) {
-	if os.Getenv("BTPROXY_RUN_MAIN") == "1" {
-		os.Args = append([]string{"btproxy"}, os.Args[1:]...)
-		main()
-		return
-	}
-	os.Exit(m.Run())
-}
-
 // TestTwoAdapters runs the proxy with two fake adapters and checks that each is served as a device of its
 // own: the first exactly as with one adapter, the second on the next port with its own name and MAC.
 func TestTwoAdapters(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	port, err := strconv.Atoi(freePort(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
 	if port >= 65535 {
 		t.Skip("no port after", port)
 	}
-	args := []string{"-backend", "fake", "-adapter", "hci0,hci1", "-mdns=false",
-		"-name", "proxy", "-mac", "02:00:00:00:00:01", "-listen", "127.0.0.1:" + strconv.Itoa(port)}
-	cmd := exec.Command(os.Args[0], append(args, testChildArgs...)...)
-	cmd.Env = append(os.Environ(), "BTPROXY_RUN_MAIN=1")
-	if testing.Verbose() {
-		cmd.Stderr = os.Stderr
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	startProxy(t, nil, "-backend", "fake", "-adapter", "hci0,hci1", "-mdns=false",
+		"-name", "proxy", "-mac", "02:00:00:00:00:01", "-listen", "127.0.0.1:"+strconv.Itoa(port))
 
 	for i, want := range []deviceInfo{
 		{name: "proxy", mac: "02:00:00:00:00:01", btMAC: "00:11:22:33:44:55"},

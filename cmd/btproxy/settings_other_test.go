@@ -3,9 +3,6 @@
 package main
 
 import (
-	"bufio"
-	"os"
-	"os/exec"
 	"strings"
 	"testing"
 )
@@ -14,17 +11,6 @@ func autostartFormValue() string { return "" }
 
 // testChildArgs go to every proxy a test starts.
 var testChildArgs []string
-
-// The settings page needs a password, on loopback too.
-func TestUINeedsPassword(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-backend", "fake", "-mdns=false", "-name", "proxy",
-		"-mac", "02:00:00:00:00:01", "-listen", "127.0.0.1:"+freePort(t), "-ui", "127.0.0.1:"+freePort(t))
-	cmd.Env = append(os.Environ(), "BTPROXY_RUN_MAIN=1", "BTPROXY_UI_PASSWORD=")
-	out, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "needs a password") {
-		t.Fatalf("err %v, output:\n%s", err, out)
-	}
-}
 
 // The proxy warns at start when its API is plaintext and reachable from other hosts. Not run on Windows, where
 // listening on all interfaces would bring up a firewall prompt.
@@ -39,23 +25,11 @@ func TestPlaintextWarning(t *testing.T) {
 		{"all interfaces, key", "", key, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			cmd := exec.Command(os.Args[0], "-backend", "fake", "-mdns=false", "-name", "proxy",
-				"-mac", "02:00:00:00:00:01", "-listen", c.host+":"+freePort(t))
-			cmd.Env = append(os.Environ(), "BTPROXY_RUN_MAIN=1", "BTPROXY_ENCRYPTION_KEY="+c.key)
-			stderr, err := cmd.StderrPipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := cmd.Start(); err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+			p := startProxy(t, []string{"BTPROXY_ENCRYPTION_KEY=" + c.key}, "-backend", "fake", "-mdns=false",
+				"-name", "proxy", "-mac", "02:00:00:00:00:01", "-listen", c.host+":"+freePort(t))
 			got := false
-			for s := bufio.NewScanner(stderr); s.Scan(); {
-				got = got || strings.Contains(s.Text(), "API is not encrypted")
-				if strings.Contains(s.Text(), "btproxy started") {
-					break
-				}
+			for _, l := range p.waitLog(t, "btproxy started") {
+				got = got || strings.Contains(l, "API is not encrypted")
 			}
 			if got != c.want {
 				t.Errorf("warning: got %v, want %v", got, c.want)
