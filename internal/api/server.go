@@ -73,11 +73,8 @@ type Server struct {
 
 	scanKick chan struct{} // scanner status changed: tell the subscribers
 
-	stats         stats    // see stats.go
-	sensors       []sensor // the entities are fixed by NewServer
-	binarySensors []binarySensor
-	textSensors   []textSensor
-	buttons       []button
+	stats    stats    // see stats.go
+	entities []entity // in the order they are listed; fixed by NewServer
 
 	helloTimeout time.Duration // fields so the tests can shorten them
 	setupTimeout time.Duration
