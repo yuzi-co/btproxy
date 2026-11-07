@@ -46,13 +46,14 @@ func must(s string) ble.UUID {
 
 // Adapter is the fake controller; the zero value is ready to use.
 type Adapter struct {
-	Addr uint64 // controller address; 0 means AdapterAddr
+	Addr        uint64        // controller address; 0 means AdapterAddr
+	NotifyEvery time.Duration // how often the echo characteristic notifies; 0 is once a second
+
+	scan ble.ScanCell // the mode and status reported
 
 	mu       sync.Mutex
 	down     bool
 	scanning bool
-	mode     ble.ScanMode
-	statusFn func(ble.ScanStatus)
 	conns    map[*conn]bool
 }
 
@@ -73,38 +74,26 @@ func (*Adapter) RestartStack() error { return nil }
 func (*Adapter) AdvertSource() string { return "Fake" }
 
 func (a *Adapter) SetScanMode(m ble.ScanMode) {
-	a.mu.Lock()
-	a.mode = m
-	a.mu.Unlock()
+	a.scan.SetMode(m)
 	a.changed()
 }
 
-func (a *Adapter) ScanStatus() ble.ScanStatus {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	st := ble.ScanStatus{State: ble.ScanIdle, Mode: a.mode}
-	switch {
-	case a.scanning && a.down:
-		st.State = ble.ScanFailed
-	case a.scanning:
-		st.State = ble.ScanRunning
-	}
-	return st
-}
+func (a *Adapter) ScanStatus() ble.ScanStatus { return a.scan.Status() }
 
-func (a *Adapter) OnScanStatus(fn func(ble.ScanStatus)) {
-	a.mu.Lock()
-	a.statusFn = fn
-	a.mu.Unlock()
-}
+func (a *Adapter) OnScanStatus(fn func(ble.ScanStatus)) { a.scan.OnStatus(fn) }
 
+// changed reports the state the scanner is in: running while someone scans, failed while the adapter is lost.
 func (a *Adapter) changed() {
 	a.mu.Lock()
-	fn := a.statusFn
-	a.mu.Unlock()
-	if fn != nil {
-		fn(a.ScanStatus())
+	state := ble.ScanIdle
+	switch {
+	case a.scanning && a.down:
+		state = ble.ScanFailed
+	case a.scanning:
+		state = ble.ScanRunning
 	}
+	a.mu.Unlock()
+	a.scan.SetState(state)
 }
 
 // Lose simulates bluetoothd or the controller going away: scanning fails and connections drop.
@@ -178,7 +167,10 @@ func (a *Adapter) Connect(addr uint64, _ uint32, ev ble.Events) (ble.Conn, error
 		time.Sleep(time.Second)
 		return nil, errors.New("device not found")
 	}
-	c := &conn{ev: ev, value: []byte("hello"), done: make(chan struct{})}
+	c := &conn{ev: ev, value: []byte("hello"), done: make(chan struct{}), every: a.NotifyEvery}
+	if c.every == 0 {
+		c.every = time.Second
+	}
 	live.Lock()
 	live.conn = c
 	live.Unlock()
@@ -239,7 +231,8 @@ var live struct {
 }
 
 type conn struct {
-	ev ble.Events
+	ev    ble.Events
+	every time.Duration // how often the echo characteristic notifies
 
 	mu        sync.Mutex
 	value     []byte
@@ -308,16 +301,13 @@ func (c *conn) Notify(h uint16, enable bool) error {
 	// its next tick instead would keep going when they are turned off and on again before it.
 	if enable {
 		c.stop = make(chan struct{})
-		go c.notifyLoop(c.stop, notifyEvery)
+		go c.notifyLoop(c.stop, c.every)
 	} else {
 		close(c.stop)
 		c.stop = nil
 	}
 	return nil
 }
-
-// notifyEvery is how often the echo characteristic notifies; a variable, so the tests can shorten it.
-var notifyEvery = time.Second
 
 func (c *conn) notifyLoop(stop chan struct{}, every time.Duration) {
 	t := time.NewTicker(every)
