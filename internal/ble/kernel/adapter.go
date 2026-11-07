@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	retryDelay  = 200 * time.Millisecond
-	retryFast   = 3 * time.Second // an error other than a radio failure or a lost link is retried only if this fast
-	retryBudget = 5 * time.Second // leaves most of the time a client gives a connect to the last attempt
+	retryFast = 3 * time.Second // an error other than a radio failure or a lost link is retried only if this fast
+	// retryBudget is how long after the first attempt a retry may still start. A client gives a connect about
+	// 20 s, so 10 s fits the doubling delays of the default retries and leaves the last attempt as much again.
+	retryBudget = 10 * time.Second
 
 	defaultTick     = 5 * time.Second
 	defaultMaxStall = 30 * time.Minute
@@ -66,8 +67,11 @@ type Options struct {
 	USBReset bool
 	// PauseOnConnect stops all scanning while a connect is in progress.
 	PauseOnConnect bool
+	// ConnectRetries is how often a connect that failed on the radio or lost the link early is retried.
 	ConnectRetries int
-	Log            *logx.Logger
+	// ConnectRetryDelay is the wait before the first retry; each later one waits twice the previous. 0 retries at once.
+	ConnectRetryDelay time.Duration
+	Log               *logx.Logger
 
 	tick            time.Duration
 	maxStallBackoff time.Duration
@@ -749,7 +753,8 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	log := a.log.With("addr", ble.FormatMAC(addr))
 	var c *conn
 	var took time.Duration
-	retry := ble.ConnectRetry{Retries: max(a.opt.ConnectRetries, 0), Delay: retryDelay, Fast: retryBudget, Budget: retryBudget}
+	retry := ble.ConnectRetry{Retries: max(a.opt.ConnectRetries, 0), Delay: a.opt.ConnectRetryDelay,
+		Fast: retryBudget, Budget: retryBudget}
 	retries, err := retry.Do(func() error {
 		start := time.Now()
 		var err error

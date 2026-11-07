@@ -285,7 +285,8 @@ Home Assistant discovers it over mDNS. Otherwise add it by hand: Add integration
 | `-scan-mode` | `active` | `active` or `passive` |
 | `-raw-adverts` | `auto` | `auto`, `on`, `off`: use the HCI monitor (bluez), see [Advertisements](#advertisements) |
 | `-scan-pause-on-connect` | `true` | stop scanning while connecting; see [Scan pause and connect retries](#scan-pause-and-connect-retries) |
-| `-connect-retries` | 4 | retries of a connect that fails at once on the radio or loses the link right after; `0` disables |
+| `-connect-retries` | 2 | retries of a connect that fails at once on the radio or loses the link right after; `0` disables |
+| `-connect-retry-delay` | `1s` | wait before the first connect retry; doubles before each further one |
 | `-stall-timeout` | `3m` | restart scanning after this long without advertisements; `0` disables (kernel; bluez in active mode) |
 | `-bluetoothd-restart` | | (bluez) command run when `bluetoothd` hangs, such as `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"` |
 | `-usb-reset` | `false` | reset the adapter's USB device when nothing else brings scanning back (Linux); see [Hangs and recovery](#hangs-and-recovery) |
@@ -402,8 +403,9 @@ Differences from the Linux backends:
   bond.
 - Connect retries: an out-of-range device hits the 30 s limit (not retried). A link that fails in its first
   connection events (Unreachable, `ERROR_GEN_FAILURE`, `ERROR_DEVICE_NOT_AVAILABLE`, or down after discovery)
-  is retried after 500 ms, unless the attempt took over 5 s or the retry would start over 8 s after the first.
-  Not found, access denied, cancelled, ATT errors and timeouts fail at once.
+  is retried after `-connect-retry-delay` (doubling before each further retry), unless the attempt took over 5 s or
+  the retry would start over 10 s after the first. Not found, access denied, cancelled, ATT errors and timeouts
+  fail at once.
 - Other programs' watchers keep the radio scanning during the scan pause. A stopped watcher is restarted
   (checked every 10 s, retried every 5 s).
 
@@ -557,14 +559,16 @@ the same evening. Moving the stick away from the antennas with a USB extension c
 has not been measured.
 
 Failed connects are retried, still paused, up to `-connect-retries` times, and a retried connect logs
-`connected after retries`. The kernel backend retries HCI reason 0x3e and a link lost before that first exchange if
-the attempt took up to 5 s, and any other error if it came within 3 s. Errors another attempt cannot change, such as
-no permission or no adapter, are not retried.
+`connected after retries`. The first retry waits `-connect-retry-delay` (1 s by default) and each further one
+twice the previous (2 s, 4 s...), so that a device which drops a burst of attempts, or resets under one, gets a
+breather, and no retry starts more than 10 s after the first attempt. The kernel backend retries HCI reason 0x3e
+and a link lost before that first exchange if the attempt took up to 10 s, and any other error if it came within
+3 s. Errors another attempt cannot change, such as no permission or no adapter, are not retried.
 
 On BlueZ, connects that fail within about half a second (`le-connection-abort-by-local`, or an error without
-message) are retried after 200 ms, and so is a link that comes up and drops before its services are resolved,
+message) are retried the same way, and so is a link that comes up and drops before its services are resolved,
 usually a few seconds later. Not retried: those radio errors after 3 s, other errors, withdrawn connects, and retries
-more than 5 s after the first attempt.
+more than 10 s after the first attempt.
 
 A bonded device can also cause 0x3e on every attempt by ignoring other adapters: see
 [Bonded devices](#bonded-devices).

@@ -18,19 +18,21 @@ import (
 // later often succeeds, so Connect retries these, with scanning still paused, before failing. A link can also
 // come up and drop a few seconds later, before the services are resolved, which on a router next to its Wi-Fi
 // radio is as common. Connect retries that too, however long it took. Timeouts and every other error fail at once.
+// The wait before a retry comes from Options.ConnectRetryDelay and doubles with each retry (see ble.ConnectRetry).
 
 const (
-	retryDelay  = 200 * time.Millisecond
-	retryFast   = 3 * time.Second // a radio failure comes within about 0.5 s; slower ones are not retried
-	retryBudget = 5 * time.Second // leaves most of the time a client gives a connect to the last attempt
+	retryFast = 3 * time.Second // a radio failure comes within about 0.5 s; slower ones are not retried
+	// retryBudget is how long after the first attempt a retry may still start. A client gives a connect about
+	// 20 s, so 10 s fits the doubling delays of the default retries and leaves the last attempt as much again.
+	retryBudget = 10 * time.Second
 )
 
 var errLinkLost = errors.New("link lost while resolving services")
 
-func connectRetry(retries int) ble.ConnectRetry {
+func connectRetry(retries int, delay time.Duration) ble.ConnectRetry {
 	// Fast only keeps out what the budget would anyway: Connect applies retryFast to radio failures alone, as a
 	// lost link takes as long as the link was up.
-	return ble.ConnectRetry{Retries: max(retries, 0), Delay: retryDelay, Fast: retryBudget, Budget: retryBudget}
+	return ble.ConnectRetry{Retries: max(retries, 0), Delay: delay, Fast: retryBudget, Budget: retryBudget}
 }
 
 // radioFailure tells whether a connect error is one the radio may not repeat: BlueZ's

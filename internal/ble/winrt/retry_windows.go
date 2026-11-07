@@ -15,15 +15,18 @@ import (
 // The stack sometimes also fails discovery at once with ERROR_GEN_FAILURE ("A device attached to the system
 // is not functioning") or ERROR_DEVICE_NOT_AVAILABLE. Connect frees the device and session objects and tries
 // again with fresh ones. Not found, access denied, cancelled operations, ATT errors and timeouts fail at once.
+// The wait before a retry comes from Options.ConnectRetryDelay and doubles with each retry (see
+// ble.ConnectRetry); Windows takes a moment to drop the failed link, so it should not be much under 500 ms.
 
 const (
-	retryDelay  = 500 * time.Millisecond // Windows takes a moment to drop the failed link
-	retryFast   = 5 * time.Second        // lookup, session and link-up come before discovery fails
-	retryBudget = 8 * time.Second
+	retryFast = 5 * time.Second // lookup, session and link-up come before discovery fails
+	// retryBudget is how long after the first attempt a retry may still start. A client gives a connect about
+	// 20 s, so 10 s fits the doubling delays of the default retries and leaves the last attempt as much again.
+	retryBudget = 10 * time.Second
 )
 
-func connectRetry(retries int) ble.ConnectRetry {
-	return ble.ConnectRetry{Retries: max(retries, 0), Delay: retryDelay, Fast: retryFast, Budget: retryBudget}
+func connectRetry(retries int, delay time.Duration) ble.ConnectRetry {
+	return ble.ConnectRetry{Retries: max(retries, 0), Delay: delay, Fast: retryFast, Budget: retryBudget}
 }
 
 // errLinkLost is a link that went down between coming up and the end of service discovery.

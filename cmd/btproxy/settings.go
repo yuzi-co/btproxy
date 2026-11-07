@@ -61,6 +61,8 @@ var settings = []struct {
 			backend: "bluez,kernel,winrt"},
 		{name: "connect-retries", label: "Connect retries on radio failures", kind: ui.Number,
 			backend: "bluez,kernel,winrt"},
+		{name: "connect-retry-delay", label: "Wait before the first connect retry", backend: "bluez,kernel,winrt",
+			help: "Such as 1s; doubles before each further retry."},
 	}},
 	{"Linux", []setting{
 		{name: "adapter", label: "Adapters", backend: "bluez,kernel", help: "Comma-separated, such as hci0,hci1."},
@@ -593,6 +595,13 @@ func validateSettings(v map[string]string) map[string]string {
 	if d := v["stall-timeout"]; d != "" {
 		_, err := time.ParseDuration(d)
 		set("stall-timeout", err)
+	}
+	if d := v["connect-retry-delay"]; d != "" {
+		n, err := time.ParseDuration(d)
+		if err == nil && n < 0 {
+			err = errors.New("out of range")
+		}
+		set("connect-retry-delay", err)
 	}
 	return errs
 }

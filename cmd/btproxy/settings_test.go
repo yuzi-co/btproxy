@@ -25,8 +25,8 @@ func goodSettings() map[string]string {
 		"name": "btproxy-x", "friendly-name": "", "area": "", "mac": "", "listen": ":6053", "mdns": "true",
 		"mdns-iface": "", "encryption-key": "", "connections": "3", "scan-mode": "active", "adv-allow": "",
 		"adv-deny": "", "adv-deny-random": "false", "adapter": "hci0", "agent": "true", "raw-adverts": "auto",
-		"scan-pause-on-connect": "true", "stall-timeout": "3m", "connect-retries": "2", "bluetoothd-restart": "",
-		"debug": "false",
+		"scan-pause-on-connect": "true", "stall-timeout": "3m", "connect-retries": "2", "connect-retry-delay": "1s",
+		"bluetoothd-restart": "", "debug": "false",
 	}
 }
 
@@ -55,6 +55,8 @@ func TestValidateSettings(t *testing.T) {
 		{"adv-deny", "mfr:nope"},
 		{"stall-timeout", "3 minutes"},
 		{"connect-retries", "-1"},
+		{"connect-retry-delay", "1 second"},
+		{"connect-retry-delay", "-1s"},
 		{"raw-adverts", "sometimes"},
 		{"adapter", "hci0,hci0"},
 	} {

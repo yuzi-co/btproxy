@@ -44,8 +44,9 @@ var backends = map[string]func(adapter string, log *logx.Logger) (ble.Adapter, e
 // autoBackend picks the backend for -backend auto; set on Linux, the only place with a choice.
 var autoBackend func(log *logx.Logger) string
 
-// Flags read by the bluez backend; scan-pause-on-connect and connect-retries also by winrt; stall-timeout, usb-reset,
-// scan-pause-on-connect and connect-retries also by kernel. bond-dir only by kernel.
+// Flags read by the bluez backend; scan-pause-on-connect, connect-retries and connect-retry-delay also by winrt;
+// stall-timeout, usb-reset, scan-pause-on-connect, connect-retries and connect-retry-delay also by kernel. bond-dir
+// only by kernel.
 var (
 	bondDir           string
 	useAgent          bool
@@ -55,6 +56,7 @@ var (
 	rawAdverts        string
 	scanPause         bool
 	connectRetries    int
+	connectRetryDelay time.Duration
 )
 
 func main() {
@@ -97,8 +99,10 @@ func main() {
 		"read advertisements from the HCI monitor: auto, on or off (bluez backend; needs CAP_NET_RAW)")
 	flag.BoolVar(&scanPause, "scan-pause-on-connect", true,
 		"stop scanning while a connection is being made, like ESPHome (bluez, kernel and winrt backends)")
-	flag.IntVar(&connectRetries, "connect-retries", 4,
+	flag.IntVar(&connectRetries, "connect-retries", 2,
 		"retry a connect that fails at once on the radio (HCI 0x3e) or loses the link right after, this many times, 0 to disable (bluez, kernel and winrt backends)")
+	flag.DurationVar(&connectRetryDelay, "connect-retry-delay", time.Second,
+		"wait before the first connect retry, doubling before each further one (bluez, kernel and winrt backends)")
 	flag.Parse()
 	settingsErr := loadSettings(*configFile)
 
