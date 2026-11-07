@@ -255,7 +255,7 @@ given a key:
 CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -tags nonoise -trimpath -ldflags="-s -w" -o dist/btproxy-mipsle ./cmd/btproxy
 ```
 
-Generated code: `go generate ./internal/ble/winrt/gen` (WinRT bindings), `GOOS=windows go generate ./cmd/btproxy` (tray icon; the directive is in a Windows-only file).
+Generated code: `go generate ./internal/ble/winrt/gen` (WinRT bindings), `GOOS=windows go generate ./cmd/btproxy` (tray icon; the directive is in a Windows-only file). The flag table below is checked against the settings table in `cmd/btproxy/settings.go` by `go test ./cmd/btproxy`; `go test ./cmd/btproxy -run TestReadmeFlagTable -update-readme` rewrites it.
 
 ## Run
 
@@ -273,27 +273,27 @@ Home Assistant discovers it over mDNS. Otherwise add it by hand: Add integration
 | Flag | Default | Meaning |
 |---|---|---|
 | `-name` | `btproxy-<hostname>` | node name |
-| `-friendly-name` | the name | |
+| `-friendly-name` | the name | friendly name |
 | `-area` | | suggested area |
-| `-listen` | `:6053` | API address; see [several adapters](#several-adapters) |
-| `-backend` | `auto`, `winrt` on Windows | `auto`, `kernel`, `bluez`, `winrt` or `fake`; see [Backends](#backends) |
-| `-adapter` | `hci0` | adapter, or comma-separated list (Linux) |
-| `-bond-dir` | `/etc/btproxy` | keys of bonded devices (kernel) |
-| `-connections` | 3 | connection slots per adapter |
 | `-mac` | first interface MAC that is neither locally administered nor a hypervisor's | unique id Home Assistant keys the device on |
+| `-listen` | `:6053` | API address; see [several adapters](#several-adapters) |
 | `-mdns` | `true` | advertise over mDNS |
 | `-mdns-iface` | all up IPv4 interfaces except container, VM, VPN | comma-separated, see [mDNS](#mdns) |
-| `-scan-mode` | `active` | `active` or `passive` |
-| `-raw-adverts` | `auto` | `auto`, `on`, `off`: use the HCI monitor (bluez), see [Advertisements](#advertisements) |
-| `-scan-pause-on-connect` | `true` | stop scanning while connecting; see [Scan pause and connect retries](#scan-pause-and-connect-retries) |
-| `-connect-retries` | 2 | retries of a connect that fails at once on the radio or loses the link right after; `0` disables |
-| `-connect-retry-delay` | `1s` | wait before the first connect retry; doubles before each further one |
-| `-stall-timeout` | `3m` | restart scanning after this long without advertisements; `0` disables (kernel; bluez in active mode) |
-| `-bluetoothd-restart` | | (bluez) command run when `bluetoothd` hangs, such as `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"` |
-| `-usb-reset` | `false` | reset the adapter's USB device when nothing else brings scanning back (Linux); see [Hangs and recovery](#hangs-and-recovery) |
-| `-agent` | `true` | register a BlueZ pairing agent |
-| `-adv-allow`, `-adv-deny`, `-adv-deny-random` | | see [Advertisement filter](#advertisement-filter) |
 | `-encryption-key`, `-encryption-key-file` | | see [Encryption](#encryption); also `$BTPROXY_ENCRYPTION_KEY` |
+| `-backend` | `auto`, `winrt` on Windows | `auto`, `kernel`, `bluez`, `winrt` or `fake`; see [Backends](#backends) |
+| `-connections` | `3` | connection slots per adapter |
+| `-scan-mode` | `active` | `active` or `passive` |
+| `-adv-allow`, `-adv-deny`, `-adv-deny-random` | | see [Advertisement filter](#advertisement-filter) |
+| `-scan-pause-on-connect` | `true` | stop scanning while connecting; see [Scan pause and connect retries](#scan-pause-and-connect-retries) (bluez, kernel and winrt backends) |
+| `-connect-retries` | `2` | retries of a connect that fails at once on the radio or loses the link right after; `0` disables (bluez, kernel and winrt backends) |
+| `-connect-retry-delay` | `1s` | wait before the first connect retry; doubles before each further one (bluez, kernel and winrt backends) |
+| `-adapter` | `hci0` | adapter, or comma-separated list (bluez and kernel backends) |
+| `-agent` | `true` | register a BlueZ pairing agent (bluez backend) |
+| `-raw-adverts` | `auto` | `auto`, `on`, `off`: use the HCI monitor, see [Advertisements](#advertisements) (bluez backend) |
+| `-stall-timeout` | `3m` | restart scanning after this long without advertisements; `0` disables; on bluez in active mode only (bluez and kernel backends) |
+| `-bluetoothd-restart` | | command run when `bluetoothd` hangs, such as `"/etc/init.d/bluetoothd restart"` or `"systemctl restart bluetooth"` (bluez backend) |
+| `-usb-reset` | `false` | reset the adapter's USB device when nothing else brings scanning back; see [Hangs and recovery](#hangs-and-recovery) (bluez and kernel backends) |
+| `-bond-dir` | `/etc/btproxy` | keys of bonded devices (kernel backend) |
 | `-config` | Windows: `%LOCALAPPDATA%\btproxy\config.json` | settings file |
 | `-ui` | Windows: 127.0.0.1, free port | settings page address; needs a password, see [Settings page](#settings-page) |
 | `-ui-password`, `-ui-password-file` | | settings page password; also `$BTPROXY_UI_PASSWORD` |
