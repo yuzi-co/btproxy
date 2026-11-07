@@ -131,9 +131,11 @@ func TestRawSource(t *testing.T) {
 	src.fail <- errors.New("read: network is down")
 	bletest.WaitFor(t, "fallback", func() bool { a.mu.Lock(); defer a.mu.Unlock(); return a.raw == nil })
 	bletest.WaitFor(t, "discovery with DuplicateData", func() bool { return dupData(bz) })
-	if _, disc, reg := bz.state(); !disc || reg != 0 {
-		t.Errorf("after the fallback: discovering %v, %d monitors registered", disc, reg)
-	}
+	// The filter is set before discovery starts again, so discovery itself is waited for too.
+	bletest.WaitFor(t, "discovery again without the monitors", func() bool {
+		_, disc, reg := bz.state()
+		return disc && reg == 0
+	})
 	bz.advertise()
 	bletest.WaitFor(t, "BlueZ advertisement", func() bool { g := got(); return len(g) == 3 && g[2] == -60 })
 }
