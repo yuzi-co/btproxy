@@ -129,13 +129,15 @@ var tray struct {
 	nid            notifyIconData
 	added          bool
 	taskbarCreated uint32
+	app            *app
 	log            *logx.Logger
 }
 
 // runTray adds the icon and runs its window's message loop; it does not return.
-func runTray(log *logx.Logger) {
+func runTray(a *app) {
 	runtime.LockOSThread()
-	tray.log = log
+	tray.app, tray.log = a, a.log
+	log := a.log
 	var inst windows.Handle
 	if err := windows.GetModuleHandleEx(0, nil, &inst); err != nil {
 		log.Error("tray", "err", err)
@@ -200,7 +202,7 @@ func removeTrayIcon() {
 
 // tooltip names the node and its API port.
 func tooltip() string {
-	_, nodes := status()
+	_, nodes := tray.app.status()
 	if len(nodes) == 0 {
 		return "btproxy"
 	}
@@ -238,7 +240,7 @@ func trayWndProc(wnd, message, wParam, lParam uintptr) uintptr {
 	case message == wmQueryEndSession:
 		return 1
 	case message == wmEndSession && wParam != 0:
-		stop("Windows is shutting down", false)
+		tray.app.stop("Windows is shutting down", false)
 		return 0
 	}
 	r, _, _ := pDefWindowProc.Call(wnd, message, wParam, lParam)
@@ -251,7 +253,7 @@ func showMenu(wnd uintptr) {
 		return
 	}
 	defer pDestroyMenu.Call(menu)
-	st, nodes := status()
+	st, nodes := tray.app.status()
 	appendMenu(menu, mfString|mfGrayed, idStatus, statusText(st, len(nodes)))
 	appendMenu(menu, mfSeparator, 0, "")
 	auto := uint32(mfString)
@@ -259,10 +261,10 @@ func showMenu(wnd uintptr) {
 		auto |= mfChecked
 	}
 	appendMenu(menu, auto, idAutostart, "Start with Windows")
-	if settingsURL() != "" {
+	if tray.app.settingsURL() != "" {
 		appendMenu(menu, mfString, idSettings, "Settings...")
 	}
-	if app.logPath != "" {
+	if tray.app.logPath != "" {
 		appendMenu(menu, mfString, idOpenLog, "Open log")
 	}
 	appendMenu(menu, mfSeparator, 0, "")
@@ -282,11 +284,11 @@ func showMenu(wnd uintptr) {
 			messageBox("Start with Windows: "+err.Error(), true)
 		}
 	case idSettings:
-		shellOpen(settingsURL())
+		shellOpen(tray.app.settingsURL())
 	case idOpenLog:
-		shellOpen(app.logPath)
+		shellOpen(tray.app.logPath)
 	case idQuit:
-		stop("quit from the tray", false)
+		tray.app.stop("quit from the tray", false)
 	}
 }
 

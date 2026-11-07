@@ -17,12 +17,16 @@ import (
 var (
 	defaultConfig = ""    // -config default
 	defaultUI     = ""    // -ui default: off
-	uiToken       = false // the settings page asks for a token without a password (Windows: from the tray)
+	tokenLogin    = false // the settings page takes a token in place of a password (Windows: from the tray)
 )
 
-func logOutput() io.Writer             { return os.Stderr }
+// defaultTray is the -tray default, a Windows flag; here it only fills README's flag table.
+func defaultTray() bool { return false }
+
+func setPlatformOptions(*app)          {}
+func logOutput() (io.Writer, string)   { return os.Stderr, "" }
 func oneInstance(*logx.Logger, string) {}
-func startTray(*logx.Logger)           {}
+func startTray(*app)                   {}
 func platformFatal(string, []any)      {}
 func beforeExit()                      {}
 func autostartField() (ui.Field, bool) { return ui.Field{}, false }
