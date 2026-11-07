@@ -35,18 +35,23 @@ func TestClientLimit(t *testing.T) {
 	waitFor(t, "the slot used again", func() bool { return clientCount(s) == maxClients })
 }
 
-// A client that says nothing is dropped; one that has sent Hello may stay silent.
+// A client that says nothing is dropped after helloTimeout, well before setupTimeout, so connections that never
+// set up cannot hold the client slots for long; one that has sent Hello may stay silent.
 func TestSetupTimeout(t *testing.T) {
 	l := newPipeListener()
 	s := NewServer(Config{Name: "test"}, testAdapter{}, logx.Discard())
-	s.setupTimeout = 100 * time.Millisecond
+	s.helloTimeout, s.setupTimeout = 100*time.Millisecond, 2*time.Second
 	go s.Serve(l)
 	t.Cleanup(func() { l.Close() })
 
 	silent := l.dial(t)
+	start := time.Now()
 	silent.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := silent.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("silent client: want the connection closed, got %v", err)
+	}
+	if d := time.Since(start); d >= s.setupTimeout/2 {
+		t.Fatalf("silent client dropped after %v, want about %v", d, s.helloTimeout)
 	}
 
 	hello := l.dial(t)
@@ -57,7 +62,7 @@ func TestSetupTimeout(t *testing.T) {
 	if f, err := ReadFrame(bufio.NewReader(hello)); err != nil || f.Type != msgHelloResponse {
 		t.Fatalf("hello: %v %v", f, err)
 	}
-	time.Sleep(4 * s.setupTimeout)
+	time.Sleep(4 * s.helloTimeout)
 	if n := clientCount(s); n != 1 {
 		t.Fatalf("client that said hello: %d clients", n)
 	}

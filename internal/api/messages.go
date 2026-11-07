@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bytes"
+
 	"github.com/yuzi-co/btproxy/internal/ble"
 
 	"google.golang.org/protobuf/encoding/protowire"
@@ -342,7 +344,9 @@ type request struct {
 	data     []byte
 }
 
-// decRequest decodes a Bluetooth request; field numbers depend on the message type.
+// decRequest decodes a Bluetooth request; field numbers depend on the message type. Write data is copied out
+// of the frame: a request waits in its connection's queue, where only the data counts toward the byte limit,
+// and the frame must not be held with it.
 func decRequest(typ uint32, b []byte) (request, error) {
 	fs, err := fields(b)
 	if err != nil {
@@ -373,7 +377,7 @@ func decRequest(typ uint32, b []byte) (request, error) {
 			case 3:
 				r.flag = f.v != 0
 			case 4:
-				r.data = f.data
+				r.data = bytes.Clone(f.data)
 			}
 		default: // get services, read, read/write descriptor, notify
 			switch f.num {
@@ -385,7 +389,7 @@ func decRequest(typ uint32, b []byte) (request, error) {
 				if typ == msgBTGATTNotifyRequest {
 					r.flag = f.v != 0
 				} else {
-					r.data = f.data
+					r.data = bytes.Clone(f.data)
 				}
 			}
 		}

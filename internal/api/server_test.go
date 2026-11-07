@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,12 +79,18 @@ type testClient struct {
 
 func startServer(t *testing.T, a ble.Adapter) *testClient {
 	t.Helper()
+	return serve(t, NewServer(Config{Name: "test"}, a, logx.Discard()))
+}
+
+// serve starts s on a loopback listener and connects a client to it.
+func serve(t *testing.T, s *Server) *testClient {
+	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
-	go NewServer(Config{Name: "test"}, a, logx.Discard()).Serve(l)
+	go s.Serve(l)
 	c, err := net.Dial("tcp", l.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -241,6 +248,123 @@ func TestLastClientLeavesWhileConnecting(t *testing.T) {
 	case <-disconnected:
 	case <-time.After(5 * time.Second):
 		t.Fatal("connection completed after the last client left was not disconnected")
+	}
+}
+
+// TestConnectAfterClientLeft runs a connect whose client went away before it started, as happens when the
+// request and the close arrive in one packet: the connect must be refused, not made for nobody.
+func TestConnectAfterClientLeft(t *testing.T) {
+	var connects atomic.Int32
+	s := NewServer(Config{Name: "test"}, testAdapter{connect: func(ble.Events) (ble.Conn, error) {
+		connects.Add(1)
+		return &testConn{}, nil
+	}}, logx.Discard())
+	c := &client{s: s, c: discardConn{}, log: s.log, out: make(chan outMsg, outQueue)} // no writer: out keeps the replies
+	s.clients[c] = true
+	s.removeClient(c)
+	c.deviceRequest(request{kind: reqConnectV3WithCache, addr: testAddr})
+	if n := connects.Load(); n != 0 {
+		t.Fatalf("connected %d times for a client that had left", n)
+	}
+	s.mu.Lock()
+	slots := len(s.conns)
+	s.mu.Unlock()
+	if slots != 0 {
+		t.Fatalf("%d connection slots held for a client that had left", slots)
+	}
+	select {
+	case m := <-c.out:
+		fs, err := fields(m.payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.typ != msgBTDeviceConnectionResponse || fieldValue(fs, 2) != 0 || fieldValue(fs, 4) != gattError {
+			t.Fatalf("got message %d %+v, want a refused connection", m.typ, fs)
+		}
+	default:
+		t.Fatal("no reply to the refused connect")
+	}
+}
+
+// TestWithdrawnConnectNotRecorded withdraws a connect that then completes: it is neither a success nor a
+// failure, so the success rate must stay unknown.
+func TestWithdrawnConnectNotRecorded(t *testing.T) {
+	entered, release, disconnected := make(chan struct{}, 1), make(chan struct{}), make(chan struct{})
+	tconn := &testConn{stuck: disconnected}
+	s := NewServer(Config{Name: "test"}, testAdapter{connect: func(ble.Events) (ble.Conn, error) {
+		entered <- struct{}{}
+		<-release
+		return tconn, nil
+	}}, logx.Discard())
+	tc := serve(t, s)
+	var e enc
+	e.uint(1, testAddr)
+	e.uint(2, reqConnectV3WithCache)
+	tc.send(msgBTDeviceRequest, e.b)
+	<-entered
+	e = enc{}
+	e.uint(1, testAddr)
+	e.uint(2, reqDisconnect)
+	tc.send(msgBTDeviceRequest, e.b)
+	tc.expect(msgBTDeviceConnectionResponse)
+	close(release)
+	select {
+	case <-disconnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("withdrawn connection was not disconnected")
+	}
+	if v, ok := s.connSuccessRate(); ok {
+		t.Errorf("success rate %v after a withdrawn connect, want none", v)
+	}
+	if n := s.stats.connMade.Load(); n != 0 {
+		t.Errorf("connections made %d after a withdrawn connect, want 0", n)
+	}
+}
+
+// svcConn is a testConn with one service, the battery service, for GetServices.
+type svcConn struct{ *testConn }
+
+func (svcConn) Services() ([]ble.Service, error) {
+	return []ble.Service{{UUID: ble.UUID{Hi: 0x180f<<32 | 0x1000, Lo: 0x800000805f9b34fb}, Handle: 1}}, nil
+}
+
+// TestHelloVersionKept sends a second Hello with an older API version: it is answered, as ESPHome answers
+// it, but the version from the first one stays, so the GATT worker never sees it change.
+func TestHelloVersionKept(t *testing.T) {
+	tc := startServer(t, testAdapter{connect: func(ble.Events) (ble.Conn, error) {
+		return svcConn{&testConn{}}, nil
+	}})
+	hello := func(minor uint64) {
+		var e enc
+		e.uint(2, 1)
+		e.uint(3, minor)
+		tc.send(msgHelloRequest, e.b)
+		tc.expect(msgHelloResponse)
+	}
+	hello(12) // reads short_uuid
+	hello(11) // does not
+	if r := tc.connect(); fieldValue(r, 2) != 1 {
+		t.Fatalf("not connected: %+v", r)
+	}
+	var e enc
+	e.uint(1, testAddr)
+	tc.send(msgBTGATTGetServicesRequest, e.b)
+	services := 0
+	for _, f := range tc.expect(msgBTGATTGetServicesResponse) {
+		if f.num != 2 {
+			continue
+		}
+		services++
+		sf, err := fields(f.data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fieldValue(sf, 4) != 0x180f {
+			t.Fatalf("service without short_uuid: %+v; the second Hello changed the API version", sf)
+		}
+	}
+	if services != 1 {
+		t.Fatalf("%d services listed, want 1", services)
 	}
 }
 

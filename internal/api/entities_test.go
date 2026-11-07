@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bufio"
 	"errors"
 	"net"
 	"strings"
@@ -23,19 +22,8 @@ func startServerConfig(t *testing.T, cfg Config, a ble.Adapter) *testClient {
 
 func startServerLog(t *testing.T, cfg Config, a ble.Adapter, log *logx.Logger) *testClient {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { l.Close() })
 	cfg.Name = "test"
-	go NewServer(cfg, a, log).Serve(l)
-	c, err := net.Dial("tcp", l.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { c.Close() })
-	return &testClient{t: t, c: c, r: bufio.NewReader(c)}
+	return serve(t, NewServer(cfg, a, log))
 }
 
 // listed is one entity from ListEntities.
