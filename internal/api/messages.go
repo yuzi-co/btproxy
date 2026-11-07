@@ -95,10 +95,14 @@ const (
 	reqClearCache            = 6
 )
 
-// gattError is reported for failed GATT operations and connections (ESP_GATT_ERROR, 0x85).
+// gattError is reported for failed GATT operations and connections (ESP_GATT_ERROR, 0x85). aioesphomeapi
+// lists it in its BLE error table and Home Assistant shows "GATT operation error" for it.
 const gattError = 0x85
 
-// gattNotConnected is ESPHome's own error code for requests on a device that is not connected.
+// gattNotConnected is ESPHome's own code for a pairing or connection parameter request on a device that is
+// not connected: GATT_NOT_CONNECTED in its bluetooth_proxy component, -1 on purpose, since no ESP-IDF GATT
+// status is negative. Unlike ESPHome, a GATT request on a device that is not connected gets gattError here;
+// the client fails the request on either code.
 const gattNotConnected = -1
 
 type deviceInfo struct {
@@ -344,54 +348,64 @@ type request struct {
 	data     []byte
 }
 
-// decRequest decodes a Bluetooth request; field numbers depend on the message type. Write data is copied out
-// of the frame: a request waits in its connection's queue, where only the data counts toward the byte limit,
-// and the frame must not be held with it.
+// reqField says which request field a protobuf field of a Bluetooth request sets.
+type reqField uint8
+
+const (
+	fieldNone reqField = iota
+	fieldAddr
+	fieldHandle
+	fieldKind
+	fieldAddrType
+	fieldFlag
+	fieldData
+)
+
+// reqLayouts gives the fields of each Bluetooth request the proxy reads, by message type and field number:
+// the numbers api.proto declares for the message, which the proto test checks. An array, not a map: the
+// lookup is on the path of every GATT request and a map lookup showed in the device request benchmark.
+var reqLayouts = [msgBTScannerSetModeRequest + 1][]reqField{
+	msgBTDeviceRequest:              {1: fieldAddr, 2: fieldKind, 4: fieldAddrType},
+	msgSubscribeBTAdvertisements:    {1: fieldKind}, // flags
+	msgBTScannerSetModeRequest:      {1: fieldKind}, // mode
+	msgBTGATTGetServicesRequest:     {1: fieldAddr},
+	msgBTGATTReadRequest:            {1: fieldAddr, 2: fieldHandle},
+	msgBTGATTWriteRequest:           {1: fieldAddr, 2: fieldHandle, 3: fieldFlag, 4: fieldData},
+	msgBTGATTReadDescriptorRequest:  {1: fieldAddr, 2: fieldHandle},
+	msgBTGATTWriteDescriptorRequest: {1: fieldAddr, 2: fieldHandle, 3: fieldData},
+	msgBTGATTNotifyRequest:          {1: fieldAddr, 2: fieldHandle, 3: fieldFlag},
+}
+
+// decRequest decodes a Bluetooth request by its layout in reqLayouts. Write data is copied out of the frame:
+// a request waits in its connection's queue, where only the data counts toward the byte limit, and the frame
+// must not be held with it.
 func decRequest(typ uint32, b []byte) (request, error) {
 	fs, err := fields(b)
 	if err != nil {
 		return request{}, err
 	}
+	var layout []reqField
+	if typ < uint32(len(reqLayouts)) {
+		layout = reqLayouts[typ]
+	}
 	var r request
 	for _, f := range fs {
-		switch typ {
-		case msgBTDeviceRequest:
-			switch f.num {
-			case 1:
-				r.addr = f.v
-			case 2:
-				r.kind = uint32(f.v)
-			case 4:
-				r.addrType = uint32(f.v)
-			}
-		case msgSubscribeBTAdvertisements, msgBTScannerSetModeRequest: // flags, mode
-			if f.num == 1 {
-				r.kind = uint32(f.v)
-			}
-		case msgBTGATTWriteRequest:
-			switch f.num {
-			case 1:
-				r.addr = f.v
-			case 2:
-				r.handle = uint16(f.v)
-			case 3:
-				r.flag = f.v != 0
-			case 4:
-				r.data = bytes.Clone(f.data)
-			}
-		default: // get services, read, read/write descriptor, notify
-			switch f.num {
-			case 1:
-				r.addr = f.v
-			case 2:
-				r.handle = uint16(f.v)
-			case 3:
-				if typ == msgBTGATTNotifyRequest {
-					r.flag = f.v != 0
-				} else {
-					r.data = bytes.Clone(f.data)
-				}
-			}
+		if int(f.num) >= len(layout) {
+			continue
+		}
+		switch layout[f.num] {
+		case fieldAddr:
+			r.addr = f.v
+		case fieldHandle:
+			r.handle = uint16(f.v)
+		case fieldKind:
+			r.kind = uint32(f.v)
+		case fieldAddrType:
+			r.addrType = uint32(f.v)
+		case fieldFlag:
+			r.flag = f.v != 0
+		case fieldData:
+			r.data = bytes.Clone(f.data)
 		}
 	}
 	return r, nil

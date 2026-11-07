@@ -73,30 +73,59 @@ func (c *testConn) Write(_ uint16, data []byte, _ bool) error {
 // testClient speaks the plaintext API to a server started for one test.
 type testClient struct {
 	t *testing.T
+	s *Server
 	c net.Conn
 	r *bufio.Reader
 }
 
-func startServer(t *testing.T, a ble.Adapter) *testClient {
-	t.Helper()
-	return serve(t, NewServer(Config{Name: "test"}, a, logx.Discard()))
+// serverOption adjusts the server a test starts.
+type serverOption func(*serverOptions)
+
+type serverOptions struct {
+	cfg   Config
+	log   *logx.Logger
+	setup func(*Server) // runs on the server before it serves
 }
 
-// serve starts s on a loopback listener and connects a client to it.
-func serve(t *testing.T, s *Server) *testClient {
+// withConfig sets the configuration; the name stays "test" unless cfg names the node.
+func withConfig(cfg Config) serverOption { return func(o *serverOptions) { o.cfg = cfg } }
+
+func withLog(log *logx.Logger) serverOption { return func(o *serverOptions) { o.log = log } }
+
+func withSetup(setup func(*Server)) serverOption { return func(o *serverOptions) { o.setup = setup } }
+
+// newTestServer starts a server on adapter a, serving on a loopback listener until the test ends, and
+// returns it with its address.
+func newTestServer(t *testing.T, a ble.Adapter, opts ...serverOption) (*Server, string) {
 	t.Helper()
+	o := serverOptions{log: logx.Discard(), setup: func(*Server) {}}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if o.cfg.Name == "" {
+		o.cfg.Name = "test"
+	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
+	s := NewServer(o.cfg, a, o.log)
+	o.setup(s)
 	go s.Serve(l)
-	c, err := net.Dial("tcp", l.Addr().String())
+	return s, l.Addr().String()
+}
+
+// startServer starts a server on adapter a and connects a plaintext client to it.
+func startServer(t *testing.T, a ble.Adapter, opts ...serverOption) *testClient {
+	t.Helper()
+	s, addr := newTestServer(t, a, opts...)
+	c, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Close() })
-	return &testClient{t: t, c: c, r: bufio.NewReader(c)}
+	return &testClient{t: t, s: s, c: c, r: bufio.NewReader(c)}
 }
 
 func (tc *testClient) send(typ uint32, payload []byte) {
@@ -259,7 +288,8 @@ func TestConnectAfterClientLeft(t *testing.T) {
 		connects.Add(1)
 		return &testConn{}, nil
 	}}, logx.Discard())
-	c := &client{s: s, c: discardConn{}, log: s.log, out: make(chan outMsg, outQueue)} // no writer: out keeps the replies
+	c := &client{s: s, c: discardConn{}, log: s.log}
+	c.out.init(c.c, c.log, false) // no writer: the queue keeps the replies
 	s.clients[c] = true
 	s.removeClient(c)
 	c.deviceRequest(request{kind: reqConnectV3WithCache, addr: testAddr})
@@ -273,7 +303,7 @@ func TestConnectAfterClientLeft(t *testing.T) {
 		t.Fatalf("%d connection slots held for a client that had left", slots)
 	}
 	select {
-	case m := <-c.out:
+	case m := <-c.out.ch:
 		fs, err := fields(m.payload)
 		if err != nil {
 			t.Fatal(err)
@@ -291,12 +321,12 @@ func TestConnectAfterClientLeft(t *testing.T) {
 func TestWithdrawnConnectNotRecorded(t *testing.T) {
 	entered, release, disconnected := make(chan struct{}, 1), make(chan struct{}), make(chan struct{})
 	tconn := &testConn{stuck: disconnected}
-	s := NewServer(Config{Name: "test"}, testAdapter{connect: func(ble.Events) (ble.Conn, error) {
+	tc := startServer(t, testAdapter{connect: func(ble.Events) (ble.Conn, error) {
 		entered <- struct{}{}
 		<-release
 		return tconn, nil
-	}}, logx.Discard())
-	tc := serve(t, s)
+	}})
+	s := tc.s
 	var e enc
 	e.uint(1, testAddr)
 	e.uint(2, reqConnectV3WithCache)

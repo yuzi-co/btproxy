@@ -118,18 +118,14 @@ func TestStalledClient(t *testing.T) {
 func TestStalledClientAdverts(t *testing.T) {
 	conn := &stuckConn{entered: make(chan struct{}), closed: make(chan struct{})}
 	c := newClient(&Server{}, conn, logx.Discard())
-	defer c.closeQueue()
+	defer c.out.close()
 	c.send(msgPingRequest, nil)
 	<-conn.entered // the writer holds that message and waits
 	for range 4 * outQueue {
 		c.sendDroppable(msgBTRawAdvertisementsResponse, []byte{1})
 	}
-	alive := func() bool {
-		c.wmu.Lock()
-		defer c.wmu.Unlock()
-		return !c.dead
-	}
-	if n := len(c.out); !alive() || n != dropLimit {
+	alive := c.out.alive
+	if n := len(c.out.ch); !alive() || n != dropLimit {
 		t.Fatalf("alive %v with %d queued, want alive with %d", alive(), n, dropLimit)
 	}
 	for range outQueue - dropLimit {

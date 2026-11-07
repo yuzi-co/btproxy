@@ -22,7 +22,7 @@ func BenchmarkAdverts(b *testing.B) {
 	s := NewServer(Config{Name: "bench"}, testAdapter{}, logx.Discard())
 	c := newClient(s, discardConn{}, s.log)
 	c.advSubscribed = true
-	b.Cleanup(c.closeQueue)
+	b.Cleanup(c.out.close)
 	s.clients[c] = true
 	data := []byte{0x02, 0x01, 0x06, 0x1a, 0xff, 0x4c, 0x00, 0x02, 0x15, 0xe2, 0xc5, 0x6d, 0xb5, 0xdf, 0xfb, 0x48,
 		0xd2, 0xb0, 0x60, 0xd0, 0xf5, 0xa7, 0x10, 0x96, 0xe0, 0x00, 0x01, 0x00, 0x02, 0xc5}
@@ -47,5 +47,33 @@ func BenchmarkAdvertsFiltered(b *testing.B) {
 	}
 	if s.pendingN != 0 {
 		b.Fatal("advertisement not filtered")
+	}
+}
+
+// BenchmarkDecRequest measures decoding a GATT write request, the Bluetooth request with the most fields,
+// and a device request, which has the fewest.
+func BenchmarkDecRequest(b *testing.B) {
+	var w enc
+	w.uint(1, testAddr)
+	w.uint(2, 0x2a)
+	w.bool(3, true)
+	w.bytes(4, []byte{1, 2, 3, 4, 5, 6, 7, 8})
+	var d enc
+	d.uint(1, testAddr)
+	d.uint(2, reqConnectV3WithCache)
+	d.uint(4, 1)
+	for _, c := range []struct {
+		name string
+		typ  uint32
+		b    []byte
+	}{{"write", msgBTGATTWriteRequest, w.b}, {"device", msgBTDeviceRequest, d.b}} {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := decRequest(c.typ, c.b); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

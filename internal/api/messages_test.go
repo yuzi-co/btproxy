@@ -159,7 +159,7 @@ func TestAdvertBatching(t *testing.T) {
 	defer b.Close()
 	s := NewServer(Config{Name: "test"}, testAdapter{}, logx.Discard())
 	c := newClient(s, a, s.log)
-	defer c.closeQueue()
+	defer c.out.close()
 	c.advSubscribed = true
 	s.clients[c] = true
 	r := bufio.NewReader(b)

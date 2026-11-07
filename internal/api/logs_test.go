@@ -54,7 +54,7 @@ func newLogPeer(t *testing.T, logs *Logs, level int32) *logPeer {
 	a, b := net.Pipe()
 	t.Cleanup(func() { a.Close(); b.Close() })
 	c := newClient(&Server{}, a, logx.New(nil, logx.LevelInfo, logs))
-	t.Cleanup(c.closeQueue)
+	t.Cleanup(c.out.close)
 	logs.subscribe(c, level)
 	t.Cleanup(func() { logs.unsubscribe(c) })
 	return &logPeer{t: t, c: c, p: b, r: bufio.NewReader(b)}
@@ -180,7 +180,7 @@ func TestLogsDeadClient(t *testing.T) {
 	a, b := net.Pipe()
 	b.Close()
 	c := newClient(&Server{}, a, log)
-	defer c.closeQueue()
+	defer c.out.close()
 	logs.subscribe(c, logVeryVerbose)
 	defer logs.unsubscribe(c)
 	log.Info("first")
@@ -194,19 +194,8 @@ func TestLogsDeadClient(t *testing.T) {
 // server's own log lines.
 func TestSubscribeLogs(t *testing.T) {
 	logs := &Logs{}
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { l.Close() })
-	log := logx.New(io.Discard, logx.LevelInfo, logs)
-	go NewServer(Config{Name: "test", MaxConnections: 2, Logs: logs, Backend: "fake"}, testAdapter{}, log).Serve(l)
-	c, err := net.Dial("tcp", l.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { c.Close() })
-	tc := &testClient{t: t, c: c, r: bufio.NewReader(c)}
+	tc := startServer(t, testAdapter{}, withConfig(Config{MaxConnections: 2, Logs: logs, Backend: "fake"}),
+		withLog(logx.New(io.Discard, logx.LevelInfo, logs)))
 
 	var e enc
 	e.uint(1, logDebug)
@@ -220,7 +209,7 @@ func TestSubscribeLogs(t *testing.T) {
 	tc.send(999, nil)
 	fs = tc.expect(msgSubscribeLogsResponse)
 	if m := string(fs[1].data); fieldValue(fs, 1) != logInfo ||
-		!regexp.MustCompile(`\[I\]\[server:\d+\]: ignoring unsupported message client=127\.0\.0\.1:\d+ type=999`).MatchString(m) {
+		!regexp.MustCompile(`\[I\]\[client:\d+\]: ignoring unsupported message client=127\.0\.0\.1:\d+ type=999`).MatchString(m) {
 		t.Fatalf("log line: %q", m)
 	}
 }

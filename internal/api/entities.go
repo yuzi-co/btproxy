@@ -23,26 +23,53 @@ const scanSwitchID = "scanning"
 // shorten it. A stuck Bluetooth stack is the likely reason for the restart, so it must not be able to stop it.
 var restartDropTimeout = 5 * time.Second
 
+// entity is one entity of the proxy's device, of any kind. Each kind encodes its own ListEntities message
+// and state message; the loops over the entities do not know the kinds.
+type entity interface {
+	header() *entityHeader
+	// info returns the ListEntities message that describes the entity.
+	info() (typ uint32, payload []byte)
+	// state returns the entity's state message, or false for a kind without a state.
+	state() (typ uint32, payload []byte, ok bool)
+}
+
+// entityHeader is what every kind of entity carries: object id, name and icon.
+type entityHeader struct {
+	id, name, icon string
+}
+
+func (h *entityHeader) header() *entityHeader { return h }
+
+// key is the entity key, an FNV-1 hash of the object id as ESPHome computes it, so it stays the same across
+// restarts and versions.
+func (h *entityHeader) key() uint32 { return entityKey(h.id) }
+
 // binarySensor is a state that is on or off.
 type binarySensor struct {
-	id, name, icon, class string
-	value                 func() bool
+	entityHeader
+	class string
+	value func() bool
 }
 
 // textSensor is a state in words.
 type textSensor struct {
-	id, name, icon string
-	value          func() string
+	entityHeader
+	value func() string
+}
+
+// scanSwitch is the scanning switch, whose state is the server's scanOff under its lock.
+type scanSwitch struct {
+	entityHeader
+	s *Server
 }
 
 // button runs press in its own goroutine, since it may wait for the radio.
 type button struct {
-	id, name, icon string
-	press          func(c *client)
+	entityHeader
+	press func(c *client)
 }
 
-// entityKey is the key of an entity, an FNV-1 hash of the object id as ESPHome computes it, so it stays the
-// same across restarts and versions.
+// entityKey is the key of an entity, an FNV-1 hash of the object id as ESPHome computes it.
 func entityKey(id string) uint32 {
 	h := uint32(2166136261)
 	for i := 0; i < len(id); i++ {
@@ -52,40 +79,44 @@ func entityKey(id string) uint32 {
 	return h
 }
 
-// initEntities builds the entities that are not sensors. The restart buttons are disabled by default in Home
-// Assistant, because without an encryption key any host that can reach the API could press them.
+// initEntities lists the entities that are not sensors, after them. The restart buttons are disabled by
+// default in Home Assistant, because without an encryption key any host that can reach the API could press
+// them.
 func (s *Server) initEntities() {
-	s.binarySensors = []binarySensor{
-		{id: "bluetooth_stack", name: "Bluetooth stack", icon: "mdi:bluetooth", class: "running", value: s.stackOK},
-	}
-	s.textSensors = []textSensor{
-		{id: "adapter_address", name: "Adapter address", icon: "mdi:bluetooth-settings",
+	s.entities = append(s.entities,
+		&binarySensor{entityHeader: entityHeader{"bluetooth_stack", "Bluetooth stack", "mdi:bluetooth"},
+			class: "running", value: s.stackOK},
+		&textSensor{entityHeader: entityHeader{"adapter_address", "Adapter address", "mdi:bluetooth-settings"},
 			value: func() string { return ble.FormatMAC(s.adapter.MAC()) }},
-	}
+	)
 	if as, ok := s.adapter.(ble.AdvertSourcer); ok {
-		s.textSensors = append(s.textSensors, textSensor{id: "advertisement_source", name: "Advertisement source",
-			icon: "mdi:access-point", value: as.AdvertSource})
+		s.entities = append(s.entities, &textSensor{
+			entityHeader: entityHeader{"advertisement_source", "Advertisement source", "mdi:access-point"},
+			value:        as.AdvertSource})
 	}
 	if ss, ok := s.adapter.(ble.ScanSettinger); ok {
-		s.textSensors = append(s.textSensors, textSensor{id: "scan_setting", name: "Scan setting",
-			icon: "mdi:radar", value: ss.ScanSetting})
+		s.entities = append(s.entities, &textSensor{
+			entityHeader: entityHeader{"scan_setting", "Scan setting", "mdi:radar"}, value: ss.ScanSetting})
 	}
 	if s.cfg.LastProblem != nil {
-		s.textSensors = append(s.textSensors, textSensor{id: "last_problem", name: "Last problem",
-			icon: "mdi:alert-circle-outline", value: func() string {
+		s.entities = append(s.entities, &textSensor{
+			entityHeader: entityHeader{"last_problem", "Last problem", "mdi:alert-circle-outline"},
+			value: func() string {
 				if p := s.cfg.LastProblem(); p != "" {
 					return p
 				}
 				return "none"
 			}})
 	}
+	s.entities = append(s.entities, &scanSwitch{entityHeader{scanSwitchID, "Scanning", "mdi:bluetooth-audio"}, s})
 	if s.cfg.Restart != nil {
-		s.buttons = append(s.buttons, button{id: "restart_proxy", name: "Restart proxy", icon: "mdi:restart",
-			press: s.restartProxy})
+		s.entities = append(s.entities, &button{entityHeader{"restart_proxy", "Restart proxy", "mdi:restart"},
+			s.restartProxy})
 	}
 	if sr, ok := s.adapter.(ble.StackRestarter); ok && sr.StackRestartable() {
-		s.buttons = append(s.buttons, button{id: "restart_bluetooth", name: "Restart Bluetooth stack",
-			icon: "mdi:bluetooth-off", press: func(c *client) {
+		s.entities = append(s.entities, &button{
+			entityHeader{"restart_bluetooth", "Restart Bluetooth stack", "mdi:bluetooth-off"},
+			func(c *client) {
 				c.log.Info("Bluetooth stack restart requested through the API")
 				if err := sr.RestartStack(); err != nil {
 					c.log.Warn("Bluetooth stack not restarted", "err", err)
@@ -142,10 +173,10 @@ func (s *Server) setScanning(c *client, on bool) {
 }
 
 // switchCommand handles SwitchCommandRequest; an unknown key is ignored.
-func (c *client) switchCommand(payload []byte) error {
-	fs, err := fields(payload)
+func (c *client) switchCommand(f Frame) bool {
+	fs, err := fields(f.Payload)
 	if err != nil {
-		return err
+		return c.bad(f.Type, err)
 	}
 	var key uint32
 	var on bool
@@ -162,15 +193,15 @@ func (c *client) switchCommand(payload []byte) error {
 	} else {
 		c.log.Debug("command for an unknown switch", "key", key)
 	}
-	return nil
+	return true
 }
 
-// buttonCommand handles ButtonCommandRequest; an unknown key is ignored. False means too many requests are
-// running, which closes the client.
-func (c *client) buttonCommand(payload []byte) (bool, error) {
-	fs, err := fields(payload)
+// buttonCommand handles ButtonCommandRequest; an unknown key is ignored. The press runs in its own goroutine,
+// so false means too many requests are running, which closes the client.
+func (c *client) buttonCommand(f Frame) bool {
+	fs, err := fields(f.Payload)
 	if err != nil {
-		return true, err
+		return c.bad(f.Type, err)
 	}
 	var key uint32
 	for _, f := range fs {
@@ -178,75 +209,90 @@ func (c *client) buttonCommand(payload []byte) (bool, error) {
 			key = uint32(f.v)
 		}
 	}
-	for i := range c.s.buttons {
-		if b := &c.s.buttons[i]; entityKey(b.id) == key {
-			return c.spawn(func() { b.press(c) }), nil
+	for _, e := range c.s.entities {
+		if b, ok := e.(*button); ok && b.key() == key {
+			return c.spawn(func() { b.press(c) })
 		}
 	}
 	c.log.Debug("command for an unknown button", "key", key)
-	return true, nil
+	return true
 }
 
-func encBinarySensorInfo(e *binarySensor) []byte {
+// info encodes ListEntitiesBinarySensorResponse.
+func (e *binarySensor) info() (uint32, []byte) {
 	var m enc
 	m.str(1, e.id)
-	m.fixed32(2, entityKey(e.id))
+	m.fixed32(2, e.key())
 	m.str(3, e.name)
 	m.str(5, e.class)
 	m.str(8, e.icon)
 	m.uint(9, entityDiagnostic)
-	return m.b
+	return msgListEntitiesBinarySensorResponse, m.b
 }
 
-func encBinarySensorState(key uint32, on bool) []byte {
-	var m enc
-	m.fixed32(1, key)
-	m.bool(2, on)
-	return m.b
+// state encodes BinarySensorStateResponse.
+func (e *binarySensor) state() (uint32, []byte, bool) {
+	return msgBinarySensorStateResponse, encKeyBool(e.key(), e.value()), true
 }
 
-func encTextSensorInfo(e *textSensor) []byte {
+// info encodes ListEntitiesTextSensorResponse.
+func (e *textSensor) info() (uint32, []byte) {
 	var m enc
 	m.str(1, e.id)
-	m.fixed32(2, entityKey(e.id))
+	m.fixed32(2, e.key())
 	m.str(3, e.name)
 	m.str(5, e.icon)
 	m.uint(7, entityDiagnostic)
-	return m.b
+	return msgListEntitiesTextSensorResponse, m.b
 }
 
-func encTextSensorState(key uint32, text string) []byte {
+// state encodes TextSensorStateResponse.
+func (e *textSensor) state() (uint32, []byte, bool) {
 	var m enc
-	m.fixed32(1, key)
-	m.str(2, stateText(text))
-	return m.b
+	m.fixed32(1, e.key())
+	m.str(2, stateText(e.value()))
+	return msgTextSensorStateResponse, m.b, true
 }
 
-func encScanSwitchInfo() []byte {
-	var m enc
-	m.str(1, scanSwitchID)
-	m.fixed32(2, entityKey(scanSwitchID))
-	m.str(3, "Scanning")
-	m.str(5, "mdi:bluetooth-audio")
-	m.uint(8, entityConfig)
-	return m.b
-}
-
-func encSwitchState(key uint32, on bool) []byte {
-	var m enc
-	m.fixed32(1, key)
-	m.bool(2, on)
-	return m.b
-}
-
-func encButtonInfo(e *button) []byte {
+// info encodes ListEntitiesSwitchResponse.
+func (e *scanSwitch) info() (uint32, []byte) {
 	var m enc
 	m.str(1, e.id)
-	m.fixed32(2, entityKey(e.id))
+	m.fixed32(2, e.key())
+	m.str(3, e.name)
+	m.str(5, e.icon)
+	m.uint(8, entityConfig)
+	return msgListEntitiesSwitchResponse, m.b
+}
+
+// state encodes SwitchStateResponse.
+func (e *scanSwitch) state() (uint32, []byte, bool) {
+	e.s.mu.Lock()
+	on := !e.s.scanOff
+	e.s.mu.Unlock()
+	return msgSwitchStateResponse, encKeyBool(e.key(), on), true
+}
+
+// info encodes ListEntitiesButtonResponse.
+func (e *button) info() (uint32, []byte) {
+	var m enc
+	m.str(1, e.id)
+	m.fixed32(2, e.key())
 	m.str(3, e.name)
 	m.str(5, e.icon)
 	m.bool(6, true) // disabled_by_default
 	m.uint(7, entityConfig)
 	m.str(8, "restart")
+	return msgListEntitiesButtonResponse, m.b
+}
+
+// state: a button has none.
+func (e *button) state() (uint32, []byte, bool) { return 0, nil, false }
+
+// encKeyBool encodes the state of a binary sensor or a switch: key, then state.
+func encKeyBool(key uint32, on bool) []byte {
+	var m enc
+	m.fixed32(1, key)
+	m.bool(2, on)
 	return m.b
 }

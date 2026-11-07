@@ -16,12 +16,13 @@ type restartAdapter struct{ testAdapter }
 
 func (restartAdapter) Restarts() uint64 { return 7 }
 
-// TestSensorKeys checks that keys are ESPHome's FNV-1 hash of the object id, so they never change, and
-// unique.
+// TestSensorKeys checks that entity keys are ESPHome's FNV-1 hash of the object id, so they never change,
+// and unique.
 func TestSensorKeys(t *testing.T) {
 	s := NewServer(Config{Name: "test"}, restartAdapter{}, logx.Discard())
 	seen := map[uint32]string{}
-	for _, e := range s.sensors {
+	for _, en := range s.entities {
+		e := en.header()
 		h := fnv.New32()
 		h.Write([]byte(e.id))
 		if e.key() != h.Sum32() {
@@ -75,7 +76,7 @@ func TestListSensors(t *testing.T) {
 		if c := fieldValue(fs, 13); c != entityDiagnostic {
 			t.Errorf("%s: entity category %d", id, c)
 		}
-		if e := (&sensor{id: id}); uint32(fieldValue(fs, 2)) != e.key() {
+		if uint32(fieldValue(fs, 2)) != entityKey(id) {
 			t.Errorf("%s: key %#x", id, fieldValue(fs, 2))
 		}
 	}
@@ -93,7 +94,7 @@ func TestListSensors(t *testing.T) {
 // missing state.
 func (tc *testClient) stateOf(id string) float32 {
 	tc.t.Helper()
-	key := (&sensor{id: id}).key()
+	key := entityKey(id)
 	for {
 		fs := tc.expect(msgSensorStateResponse)
 		if uint32(fieldValue(fs, 1)) != key {
@@ -173,9 +174,10 @@ func TestConnSuccessWindow(t *testing.T) {
 // TestAdvertStats counts advertisements, their rate, and the ones dropped for a client that is behind.
 func TestAdvertStats(t *testing.T) {
 	s := NewServer(Config{Name: "test"}, testAdapter{}, logx.Discard())
-	c := &client{s: s, c: discardConn{}, log: s.log, out: make(chan outMsg, outQueue), advSubscribed: true}
+	c := &client{s: s, c: discardConn{}, log: s.log, advSubscribed: true}
+	c.out.init(c.c, c.log, false)
 	for range dropLimit { // a writer that does not run: the queue stays full
-		c.out <- outMsg{}
+		c.out.ch <- outMsg{}
 	}
 	s.clients[c] = true
 	for range advBatchSize {

@@ -83,28 +83,12 @@ type noiseClient struct {
 	send, recv *noiseCipher
 }
 
-func startNoiseServer(t *testing.T, key []byte) net.Conn {
+// startNoiseServer starts a server with the given encryption key and returns a raw connection to it, with a
+// deadline, for the client side of the handshake.
+func startNoiseServer(t *testing.T, key []byte, opts ...serverOption) net.Conn {
 	t.Helper()
-	return startNoiseServerWith(t, key, func(*Server) {})
-}
-
-// startNoiseServerWith lets a test adjust the server before it serves.
-func startNoiseServerWith(t *testing.T, key []byte, setup func(*Server)) net.Conn {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { l.Close() })
 	cfg := Config{Name: "test", MAC: "AA:BB:CC:00:11:22", EncryptionKey: key}
-	s := NewServer(cfg, testAdapter{}, logx.Discard())
-	setup(s)
-	go s.Serve(l)
-	c, err := net.Dial("tcp", l.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { c.Close() })
+	c := startServer(t, testAdapter{}, append([]serverOption{withConfig(cfg)}, opts...)...).c
 	c.SetDeadline(time.Now().Add(5 * time.Second))
 	return c
 }
@@ -217,7 +201,7 @@ func TestNoiseWrongKey(t *testing.T) {
 // the key gets setupTimeout for its Hello, and one that stalls in the handshake is dropped sooner.
 func TestNoiseSetupTimeouts(t *testing.T) {
 	timeouts := func(s *Server) { s.helloTimeout, s.setupTimeout = 100*time.Millisecond, 600*time.Millisecond }
-	c := startNoiseServerWith(t, testPSK, timeouts)
+	c := startNoiseServer(t, testPSK, withSetup(timeouts))
 	nc, _, _ := noiseHandshakeAsClient(t, c, testPSK)
 	time.Sleep(250 * time.Millisecond) // past helloTimeout, within setupTimeout
 	nc.write(msgHelloRequest, nil)
@@ -225,7 +209,7 @@ func TestNoiseSetupTimeouts(t *testing.T) {
 		t.Fatalf("got message %d, want HelloResponse", typ)
 	}
 
-	c = startNoiseServerWith(t, testPSK, timeouts)
+	c = startNoiseServer(t, testPSK, withSetup(timeouts))
 	c.Write([]byte{0x01, 0x00, 0x00}) // the client hello, then nothing
 	start := time.Now()
 	if _, err := io.ReadAll(c); err != nil {
@@ -264,15 +248,13 @@ func TestNoiseQueueOrder(t *testing.T) {
 	a, b := net.Pipe()
 	defer b.Close()
 	c := newClient(&Server{cfg: Config{EncryptionKey: testPSK}}, a, logx.Discard())
-	c.wmu.Lock()
-	c.sendC = newNoiseCipher(testPSK)
-	c.wmu.Unlock()
+	c.out.setCipher(newNoiseCipher(testPSK))
 	const n = outQueue // no more, or the queue could overflow
 	go func() {
 		for i := range n {
 			c.send(uint32(i%500), bytes.Repeat([]byte{byte(i)}, i%300))
 		}
-		c.closeQueue()
+		c.out.close()
 	}()
 	nc := &noiseClient{t: t, c: b, r: bufio.NewReader(b), recv: newNoiseCipher(testPSK)}
 	for i := range n {

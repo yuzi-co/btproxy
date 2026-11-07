@@ -48,19 +48,18 @@ type stats struct {
 	hasRate bool
 }
 
-// sensor is one entity. value returns the current state, or false while there is none.
+// sensor is a numeric entity. value returns the current state, or false while there is none.
 type sensor struct {
-	id, name, icon, unit, class string // object_id, name, icon, unit_of_measurement, device_class
-	accuracy                    int32
-	stateClass                  uint32
-	value                       func() (float32, bool)
+	entityHeader
+	unit, class string // unit_of_measurement, device_class
+	accuracy    int32
+	stateClass  uint32
+	value       func() (float32, bool)
 }
 
-// key is the entity key.
-func (e *sensor) key() uint32 { return entityKey(e.id) }
-
-// initStats starts the counters and builds the sensor list. The bluetoothd restart count is listed only
-// for adapters that report it, the memory only where /proc/self/statm is readable (Linux).
+// initStats starts the counters and lists the sensors, first among the entities. The bluetoothd restart
+// count is listed only for adapters that report it, the memory only where /proc/self/statm is readable
+// (Linux).
 func (s *Server) initStats() {
 	s.stats.start = time.Now()
 	s.stats.rateT = s.stats.start
@@ -68,45 +67,47 @@ func (s *Server) initStats() {
 		return func() (float32, bool) { return float32(v.Load()), true }
 	}
 	st := &s.stats
-	s.sensors = []sensor{
-		{id: "uptime", name: "Uptime", icon: "mdi:timer-outline", unit: "s", class: "duration",
+	s.entities = append(s.entities,
+		&sensor{entityHeader: entityHeader{"uptime", "Uptime", "mdi:timer-outline"}, unit: "s", class: "duration",
 			stateClass: stateTotalIncreasing, value: func() (float32, bool) {
 				return float32(math.Floor(time.Since(st.start).Seconds())), true
 			}},
-		{id: "connection_attempts", name: "Connection attempts", icon: "mdi:bluetooth-connect",
+		&sensor{entityHeader: entityHeader{"connection_attempts", "Connection attempts", "mdi:bluetooth-connect"},
 			stateClass: stateTotalIncreasing, value: count(&st.connTried)},
-		{id: "connections_made", name: "Connections made", icon: "mdi:bluetooth-connect",
+		&sensor{entityHeader: entityHeader{"connections_made", "Connections made", "mdi:bluetooth-connect"},
 			stateClass: stateTotalIncreasing, value: count(&st.connMade)},
-		{id: "connection_success_rate", name: "Connection success rate", icon: "mdi:percent", unit: "%",
-			stateClass: stateMeasurement, value: s.connSuccessRate},
-		{id: "advertisement_rate", name: "Advertisement rate", icon: "mdi:access-point", unit: "adv/s",
-			accuracy: 1, stateClass: stateMeasurement, value: s.advertRate},
-		{id: "advertisements_dropped", name: "Advertisements dropped", icon: "mdi:alert-circle-outline",
+		&sensor{entityHeader: entityHeader{"connection_success_rate", "Connection success rate", "mdi:percent"},
+			unit: "%", stateClass: stateMeasurement, value: s.connSuccessRate},
+		&sensor{entityHeader: entityHeader{"advertisement_rate", "Advertisement rate", "mdi:access-point"},
+			unit: "adv/s", accuracy: 1, stateClass: stateMeasurement, value: s.advertRate},
+		&sensor{entityHeader: entityHeader{"advertisements_dropped", "Advertisements dropped", "mdi:alert-circle-outline"},
 			stateClass: stateTotalIncreasing, value: count(&st.advDropped)},
-		{id: "active_connections", name: "Active connections", icon: "mdi:bluetooth-connect",
+		&sensor{entityHeader: entityHeader{"active_connections", "Active connections", "mdi:bluetooth-connect"},
 			stateClass: stateMeasurement, value: func() (float32, bool) {
 				n, _ := s.slots()
 				return float32(n), true
 			}},
-		{id: "free_connection_slots", name: "Free connection slots", icon: "mdi:bluetooth-settings",
+		&sensor{entityHeader: entityHeader{"free_connection_slots", "Free connection slots", "mdi:bluetooth-settings"},
 			stateClass: stateMeasurement, value: func() (float32, bool) {
 				_, free := s.slots()
 				return float32(free), true
 			}},
-	}
+	)
 	if rc, ok := s.adapter.(ble.RestartCounter); ok {
-		s.sensors = append(s.sensors, sensor{id: "bluetoothd_restarts", name: "bluetoothd restarts",
-			icon: "mdi:restart", stateClass: stateTotalIncreasing,
-			value: func() (float32, bool) { return float32(rc.Restarts()), true }})
+		s.entities = append(s.entities, &sensor{
+			entityHeader: entityHeader{"bluetoothd_restarts", "bluetoothd restarts", "mdi:restart"},
+			stateClass:   stateTotalIncreasing,
+			value:        func() (float32, bool) { return float32(rc.Restarts()), true }})
 	}
 	if rc, ok := s.adapter.(ble.RecoveryCounter); ok {
-		s.sensors = append(s.sensors, sensor{id: "adapter_recoveries", name: "Adapter recoveries",
-			icon: "mdi:restart-alert", stateClass: stateTotalIncreasing,
-			value: func() (float32, bool) { return float32(rc.Recoveries()), true }})
+		s.entities = append(s.entities, &sensor{
+			entityHeader: entityHeader{"adapter_recoveries", "Adapter recoveries", "mdi:restart-alert"},
+			stateClass:   stateTotalIncreasing,
+			value:        func() (float32, bool) { return float32(rc.Recoveries()), true }})
 	}
 	if _, ok := rssMiB(); ok {
-		s.sensors = append(s.sensors, sensor{id: "memory", name: "Memory", icon: "mdi:memory", unit: "MiB",
-			class: "data_size", accuracy: 1, stateClass: stateMeasurement, value: rssMiB})
+		s.entities = append(s.entities, &sensor{entityHeader: entityHeader{"memory", "Memory", "mdi:memory"},
+			unit: "MiB", class: "data_size", accuracy: 1, stateClass: stateMeasurement, value: rssMiB})
 	}
 }
 
@@ -201,19 +202,8 @@ func rssMiB() (float32, bool) {
 
 // sendEntities answers ListEntitiesRequest.
 func (c *client) sendEntities() {
-	s := c.s
-	for i := range s.sensors {
-		c.send(msgListEntitiesSensorResponse, encSensorInfo(&s.sensors[i]))
-	}
-	for i := range s.binarySensors {
-		c.send(msgListEntitiesBinarySensorResponse, encBinarySensorInfo(&s.binarySensors[i]))
-	}
-	for i := range s.textSensors {
-		c.send(msgListEntitiesTextSensorResponse, encTextSensorInfo(&s.textSensors[i]))
-	}
-	c.send(msgListEntitiesSwitchResponse, encScanSwitchInfo())
-	for i := range s.buttons {
-		c.send(msgListEntitiesButtonResponse, encButtonInfo(&s.buttons[i]))
+	for _, e := range c.s.entities {
+		c.send(e.info())
 	}
 	c.send(msgListEntitiesDoneResponse, nil)
 }
@@ -224,40 +214,29 @@ type stateMsg struct {
 	payload []byte
 }
 
-// states encodes the state of every entity. Values are read without Server.mu held, except the switch's.
+// states encodes the state of every entity that has one. Called without Server.mu held: the values that
+// need it take it themselves.
 func (s *Server) states() []stateMsg {
-	out := make([]stateMsg, 0, len(s.sensors)+len(s.binarySensors)+len(s.textSensors)+1)
-	for i := range s.sensors {
-		v, ok := s.sensors[i].value()
-		out = append(out, stateMsg{msgSensorStateResponse, encSensorState(s.sensors[i].key(), v, ok)})
+	out := make([]stateMsg, 0, len(s.entities))
+	for _, e := range s.entities {
+		if typ, payload, ok := e.state(); ok {
+			out = append(out, stateMsg{typ, payload})
+		}
 	}
-	for i := range s.binarySensors {
-		e := &s.binarySensors[i]
-		out = append(out, stateMsg{msgBinarySensorStateResponse, encBinarySensorState(entityKey(e.id), e.value())})
-	}
-	for i := range s.textSensors {
-		e := &s.textSensors[i]
-		out = append(out, stateMsg{msgTextSensorStateResponse, encTextSensorState(entityKey(e.id), e.value())})
-	}
-	s.mu.Lock()
-	on := !s.scanOff
-	s.mu.Unlock()
-	return append(out, stateMsg{msgSwitchStateResponse, encSwitchState(entityKey(scanSwitchID), on)})
+	return out
 }
 
 // pushStates sends every entity's state to the clients subscribed to states. They may be dropped for a
 // client that is behind: the next push brings them again.
 func (s *Server) pushStates() {
 	msgs := s.states()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for c := range s.clients {
+	s.fanOut(func(c *client) {
 		if c.statesSubscribed {
 			for _, m := range msgs {
 				c.sendDroppable(m.typ, m.payload)
 			}
 		}
-	}
+	})
 }
 
 func (s *Server) statsLoop() {
@@ -269,8 +248,8 @@ func (s *Server) statsLoop() {
 	}
 }
 
-// encSensorInfo encodes ListEntitiesSensorResponse.
-func encSensorInfo(e *sensor) []byte {
+// info encodes ListEntitiesSensorResponse.
+func (e *sensor) info() (uint32, []byte) {
 	var m enc
 	m.str(1, e.id)
 	m.fixed32(2, e.key())
@@ -281,7 +260,12 @@ func encSensorInfo(e *sensor) []byte {
 	m.str(9, e.class)
 	m.uint(10, uint64(e.stateClass))
 	m.uint(13, entityDiagnostic)
-	return m.b
+	return msgListEntitiesSensorResponse, m.b
+}
+
+func (e *sensor) state() (uint32, []byte, bool) {
+	v, ok := e.value()
+	return msgSensorStateResponse, encSensorState(e.key(), v, ok), true
 }
 
 // encSensorState encodes SensorStateResponse; ok false sends missing_state.
