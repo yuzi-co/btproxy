@@ -13,7 +13,7 @@ if [ $# -lt 3 ]; then
 fi
 
 here=$(cd "$(dirname "$0")" && pwd)
-root=$(cd "$here/.." && { pwd -W 2>/dev/null || pwd; }) # pwd -W: the path Docker needs under Git Bash
+root=$(cd "$here/../.." && { pwd -W 2>/dev/null || pwd; }) # pwd -W: the path Docker needs under Git Bash
 
 # GNU tar, for the flags that make the archives reproducible; the arguments pass through as the inner shell's own.
 "$here/alpine.sh" -v "$root:/src" -w /src -e "OWNER=$(id -u):$(id -g)" -- sh -c '
