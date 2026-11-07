@@ -97,15 +97,15 @@ func lookupSetting(name string) (setting, bool) {
 // app is the running proxy as the settings page, the tray and a restart see it.
 var app struct {
 	started    time.Time
-	cmdline    map[string]bool   // flags given on the command line
-	configPath string            // "" without a settings file
-	config     map[string]string // the settings file as loaded or last saved
-	configErr  error
+	cmdline    map[string]bool // flags given on the command line
+	configPath string          // "" without a settings file
 	problems   problemWatch
 	log        *logx.Logger
 	logPath    string // the log file, if any (Windows)
 
 	mu         sync.Mutex
+	config     map[string]string // the settings file as loaded or last saved
+	configErr  error
 	nodes      []appNode
 	responders []*mdns.Responder
 	uiAddr     string // the settings page's address, once it serves
@@ -416,8 +416,11 @@ func (settingsPage) Status() []ui.KV {
 func (p settingsPage) Page() ui.Page {
 	backend := flagValue("backend")
 	page := ui.Page{Title: "btproxy " + flagValue("name"), Status: p.Status()}
-	if app.configErr != nil {
-		page.Notice = "Settings file: " + app.configErr.Error()
+	app.mu.Lock()
+	configErr := app.configErr
+	app.mu.Unlock()
+	if configErr != nil {
+		page.Notice = "Settings file: " + configErr.Error()
 	}
 	if app.configPath == "" {
 		page.ReadOnly = "Read only: start btproxy with -config FILE to save settings from this page."
@@ -493,6 +496,10 @@ func (settingsPage) Save(values map[string]string) (map[string]string, bool, err
 	if len(errs) > 0 {
 		return errs, false, nil
 	}
+	// The page serves several connections at once: two saves must not each build on the file as it was
+	// before the other, or one's keys are lost.
+	app.mu.Lock()
+	defer app.mu.Unlock()
 	cfg := make(map[string]string, len(app.config))
 	maps.Copy(cfg, app.config)
 	for k, v := range values {

@@ -80,6 +80,43 @@ func TestRotatingFile(t *testing.T) {
 	}
 }
 
+// While another process holds the log file (the old proxy, for a few seconds after a restart), the rename
+// fails: logging goes on in the same file, the older file is kept, and the next attempt waits for another
+// max bytes rather than repeating on every write.
+func TestRotatingFileHeld(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "btproxy.log")
+	if err := os.WriteFile(path+".1", []byte("older\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opened := 0
+	r, err := openRotating(path, 100, func(*os.File) { opened++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold, err := os.Open(path) // Go opens without FILE_SHARE_DELETE, so the file cannot be moved
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { hold.Close(); r.f.Close() }) // else TempDir cannot be removed after a failure
+	line := strings.Repeat("x", 39) + "\n"          // 40 bytes
+	for range 5 {
+		r.Write([]byte(line)) // the third and the fifth would rotate
+	}
+	cur, _ := os.ReadFile(path)
+	old, _ := os.ReadFile(path + ".1")
+	if len(cur) != 200 || string(old) != "older\n" || opened != 3 {
+		t.Fatalf("held: current %d bytes, old %q, opened %d times", len(cur), old, opened)
+	}
+	hold.Close()
+	r.Write([]byte(line)) // 80 bytes since the last attempt: not yet
+	r.Write([]byte(line)) // 120: rotates now
+	cur, _ = os.ReadFile(path)
+	old, _ = os.ReadFile(path + ".1")
+	if len(cur) != 40 || len(old) != 240 || opened != 4 {
+		t.Fatalf("released: current %d bytes, old %d bytes, opened %d times", len(cur), len(old), opened)
+	}
+}
+
 func TestPickIcon(t *testing.T) {
 	for size, want := range map[int]int{16: 16, 20: 24, 24: 24, 32: 32, 48: 32, 8: 16} {
 		img, ok := pickIcon(iconData, size)
