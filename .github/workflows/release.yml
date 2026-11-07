@@ -39,13 +39,8 @@ jobs:
             tar -C "$d" --owner=0 --group=0 -cf - btproxy LICENSE README.md | gzip -9 > "dist/btproxy-${d#pkg/}.tar.gz"
           done
           (cd pkg/windows-amd64 && zip -9q ../../dist/btproxy-windows-amd64.zip btproxy.exe LICENSE README.md)
-          docker run --rm -v "$PWD:/src" -w /src -e "VERSION=${GITHUB_REF_NAME#v}" alpine:3.23 sh -c '
-            apk add -q tar
-            for a in amd64 arm64 armv7 mipsle; do
-              contrib/openwrt/package.sh "$VERSION" "$a" "pkg/linux-$a/btproxy" dist
-            done
-            contrib/openwrt/package-luci.sh "$VERSION" dist'
-          sudo chown -R "$(id -u):$(id -g)" dist
+          contrib/openwrt/package-all.sh "${GITHUB_REF_NAME#v}" dist amd64=pkg/linux-amd64/btproxy \
+            arm64=pkg/linux-arm64/btproxy armv7=pkg/linux-armv7/btproxy mipsle=pkg/linux-mipsle/btproxy
           (cd dist && sha256sum btproxy* luci-app-btproxy* > SHA256SUMS)
       - name: Publish
         env:
@@ -74,7 +69,7 @@ jobs:
           (umask 077; printf '%s\n' "$USIGN_KEY" > "$key/usign"; printf '%s\n' "$APK_KEY" > "$key/apk")
           docker run --rm --entrypoint /bin/sh -v "$PWD:/src" -v "$key:/key:ro" -w /src openwrt/rootfs:x86_64-24.10.8 \
             contrib/openwrt/feed.sh opkg "$version" packages site /key/usign
-          docker run --rm -v "$PWD:/src" -v "$key:/key:ro" -w /src alpine:3.23 \
+          contrib/openwrt/alpine.sh -v "$PWD:/src" -v "$key:/key:ro" -w /src -- \
             sh contrib/openwrt/feed.sh apk "$version" packages site /key/apk
           sudo chown -R "$(id -u):$(id -g)" site
           cp contrib/openwrt/keys/usign.pub contrib/openwrt/keys/btproxy.pem site/keys/

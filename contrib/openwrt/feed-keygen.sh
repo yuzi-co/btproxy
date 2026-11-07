@@ -36,7 +36,7 @@ MSYS_NO_PATHCONV=1 docker run --rm --entrypoint /bin/sh -v "$mount:/keys" openwr
 	umask 077
 	usign -G -c "btproxy feed" -s /keys/usign.sec -p /keys/usign.pub'
 # SEC1, which is what "openssl ecparam -genkey" writes: apk does not read the PKCS#8 form.
-MSYS_NO_PATHCONV=1 docker run --rm -v "$mount:/keys" alpine:3.23 sh -c '
+"$here/alpine.sh" -v "$mount:/keys" -- sh -c '
 	umask 077
 	apk add -q openssl
 	openssl ecparam -name prime256v1 -genkey -noout -out /keys/apk.sec

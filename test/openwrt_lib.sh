@@ -1,9 +1,44 @@
 # Shared by the OpenWrt container tests, which source it once $version is set. $name must hold the router container
-# before run() is called. A script that wants the router's log on a failure sets log_tail to the command that prints
-# it, after sourcing.
+# before boot_router or run() is called. A script that wants the router's log on a failure sets log_tail to the
+# command that prints it, after sourcing.
 
 # Each command gets this long, so a hang fails with the command that hung instead of blocking the job.
 limit=180
+
+abspath() { (cd "$1" && { pwd -W 2>/dev/null || pwd; }); } # pwd -W: the path Docker needs under Git Bash
+
+# The package manager of this OpenWrt version and its verbs: opkg up to 24.10, apk from 25.12. A package file from
+# the build carries no signature, which apk has to be told to accept; a package by name comes from a feed and keeps
+# its check.
+case $version in
+24.*|23.*)
+	pkg=opkg
+	ext=ipk
+	install_cmd='opkg install'
+	add_cmd='opkg install'
+	remove_cmd='opkg remove'
+	;;
+*)
+	pkg=apk
+	ext=apk
+	install_cmd='apk add --allow-untrusted'
+	add_cmd='apk add'
+	remove_cmd='apk del'
+	;;
+esac
+
+# Each runs the package manager in the router, through run(), and returns its status.
+pkg_update() { run "$pkg update"; }
+pkg_install() { run "$install_cmd $*"; } # package files
+pkg_add() { run "$add_cmd $*"; }         # packages by name, from a feed
+pkg_remove() { run "$remove_cmd $*"; }
+pkg_installed() {
+	if [ "$pkg" = opkg ]; then
+		run "opkg status $1 | grep -q 'Status: install'"
+	else
+		run "apk info -e $1 >/dev/null"
+	fi
+}
 
 # GNU timeout, which macOS has only as gtimeout from Homebrew's coreutils. Without it the commands run untimed, and a
 # hang blocks until the CI job's own limit.
@@ -61,3 +96,25 @@ diagnose() {
 		echo "diag: docker exec itself does not answer" >&3
 	fi
 }
+
+# Starts the router container $name under procd, with the docker run options given (the package mounts), and waits
+# for it to boot. The router's own network and firewall services take over eth0 and block the way out: stop them,
+# and give back the address Docker assigned. The loopback comes up too, for a server a test runs inside the router.
+boot_router() {
+	MSYS_NO_PATHCONV=1 docker run -d --rm --name "$name" --privileged --tmpfs /tmp "$@" \
+		"openwrt/rootfs:x86_64-$version" /sbin/init >/dev/null
+	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+		run 'logread 2>/dev/null | grep -q "init complete"' && break
+		sleep 2
+	done
+	ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}/{{.IPPrefixLen}}{{end}}' "$name")
+	gateway=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' "$name")
+	run '/etc/init.d/network stop; /etc/init.d/firewall stop; fw4 -q flush' >/dev/null 2>&1 || true
+	sleep 1
+	run "ip link set lo up; ip addr add 127.0.0.1/8 dev lo 2>/dev/null
+		ip link set eth0 up; ip addr flush dev eth0; ip addr add $ip dev eth0; ip route replace default via $gateway"
+	run 'mkdir -p /var/lock' # the package managers lock there, and the container boots without it
+}
+
+# Stops the router, if one was started.
+stop_router() { [ -z "${name:-}" ] || timed 30 docker stop -t 1 "$name" >/dev/null 2>&1 || true; }
