@@ -244,6 +244,7 @@ type conn struct {
 	mu        sync.Mutex
 	value     []byte
 	notifying bool
+	stop      chan struct{} // ends the notify loop; nil while notifications are off
 	done      chan struct{}
 	closed    bool
 }
@@ -299,27 +300,40 @@ func (c *conn) Notify(h uint16, enable bool) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if enable && !c.notifying {
-		go c.notifyLoop()
+	if enable == c.notifying {
+		return nil
 	}
 	c.notifying = enable
+	// Each enable runs a loop of its own, stopped by the matching disable: a loop that checked notifying on
+	// its next tick instead would keep going when they are turned off and on again before it.
+	if enable {
+		c.stop = make(chan struct{})
+		go c.notifyLoop(c.stop, notifyEvery)
+	} else {
+		close(c.stop)
+		c.stop = nil
+	}
 	return nil
 }
 
-func (c *conn) notifyLoop() {
-	t := time.NewTicker(time.Second)
+// notifyEvery is how often the echo characteristic notifies; a variable, so the tests can shorten it.
+var notifyEvery = time.Second
+
+func (c *conn) notifyLoop(stop chan struct{}, every time.Duration) {
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for n := byte(0); ; n++ {
 		select {
 		case <-c.done:
 			return
+		case <-stop:
+			return
 		case <-t.C:
 		}
-		c.mu.Lock()
-		on := c.notifying
-		c.mu.Unlock()
-		if !on {
+		select { // a tick that came with the stop
+		case <-stop:
 			return
+		default:
 		}
 		c.ev.Notification(HandleEcho, []byte{n})
 	}

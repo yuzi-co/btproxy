@@ -45,7 +45,12 @@ const (
 
 // callTimeout bounds every call that bluetoothd answers at once (see Adapter.call). Variables, so the tests
 // can shorten them.
-var callTimeout = 10 * time.Second
+var (
+	callTimeout = 10 * time.Second
+	// disconnectWait is how long a disconnect waits for its Connected=false signal to be handled (see
+	// conn.Disconnect). Dispatch normally gets there within milliseconds.
+	disconnectWait = 2 * time.Second
+)
 
 type Adapter struct {
 	bus  *dbus.Conn
@@ -110,6 +115,23 @@ func Open(name string, opt Options) (*Adapter, error) {
 		bus: bus, path: dbus.ObjectPath("/org/bluez/" + name), signals: signals,
 		devices: map[dbus.ObjectPath]*device{}, conns: map[dbus.ObjectPath]*conn{},
 	}
+	a.kick = make(chan struct{}, 1)
+	// Nothing below outlives the bus connection but the supervisor and dispatch, which start last: closing it
+	// on failure ends the godbus reader and the signal queue, and drops the match rules and exported objects.
+	ok := false
+	defer func() {
+		if ok {
+			return
+		}
+		a.mu.Lock()
+		m := a.raw
+		a.raw = nil
+		a.mu.Unlock()
+		if m != nil {
+			m.Close()
+		}
+		bus.Close()
+	}()
 	if opt.Log == nil {
 		opt.Log = logx.Discard()
 	}
@@ -148,14 +170,15 @@ func Open(name string, opt Options) (*Adapter, error) {
 		}
 	}
 	a.mu.Unlock()
-	if err := a.initScan(); err != nil {
+	if err := a.initRaw(name, opt.RawAdverts); err != nil {
 		return nil, err
 	}
-	if err := a.initRaw(name, opt.RawAdverts); err != nil {
+	if err := a.initScan(); err != nil { // starts the supervisor, so after everything that can fail
 		return nil, err
 	}
 	go a.dispatch()
 	opened.add(a)
+	ok = true
 	return a, nil
 }
 
@@ -547,13 +570,10 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	// connection events, and service discovery is a burst of traffic right after.
 	defer a.pauseScan()()
 	fail := func(err error) (ble.Conn, error) {
-		a.mu.Lock()
-		if a.conns[p] == c {
-			delete(a.conns, p)
-		}
-		a.mu.Unlock()
-		a.call(p, ifDevice+".Disconnect")
-		c.unwatch()
+		c.mu.Lock()
+		c.closed = true
+		c.mu.Unlock()
+		c.release(a.call(p, ifDevice+".Disconnect").Err)
 		return nil, err
 	}
 
@@ -765,6 +785,10 @@ func (c *conn) deviceChanged(changed map[string]dbus.Variant) {
 		c.markResolved()
 	}
 	if v, ok := changed["Connected"]; ok && v.Value() == false {
+		// Torn down before lost closes: a Connect being retried wakes on lost and sets the connection up
+		// again at once (see rearm), and a teardown that ran after would undo that. The two locks are never
+		// nested, here or elsewhere.
+		c.forget()
 		c.mu.Lock()
 		select {
 		case <-c.lost:
@@ -774,16 +798,38 @@ func (c *conn) deviceChanged(changed map[string]dbus.Variant) {
 		report := c.up && !c.closed
 		c.closed = true
 		c.mu.Unlock()
-		c.a.mu.Lock()
-		if c.a.conns[c.path] == c {
-			delete(c.a.conns, c.path)
-		}
-		c.a.mu.Unlock()
-		c.unwatch()
 		if report {
 			c.ev.Disconnected(errors.New("link lost"))
 		}
 	}
+}
+
+// forget takes the connection off the adapter: its place in a.conns and its match rule.
+func (c *conn) forget() {
+	c.a.mu.Lock()
+	if c.a.conns[c.path] == c {
+		delete(c.a.conns, c.path)
+	}
+	c.a.mu.Unlock()
+	c.unwatch()
+}
+
+// release is forget for a connection that asked BlueZ to disconnect, and got the answer err. BlueZ reports
+// Connected=false before it answers, so the signal is queued, or already handled, when the answer arrives.
+// Until dispatch has handled it, the connection keeps its place in a.conns: a new connection to the device
+// registered meanwhile would get the signal and read it as its own link going down. Dispatch normally gets
+// there within milliseconds; one that stays behind must not hold the device for good, so the wait is bounded.
+// No wait when the call failed: there is no signal to come, or it was handled before the call.
+func (c *conn) release(err error) {
+	if err == nil {
+		select {
+		case <-c.lostCh():
+		case <-time.After(disconnectWait):
+			c.a.log.Warn("link not reported down after disconnect, letting go of the device", "path", c.path,
+				"after", disconnectWait)
+		}
+	}
+	c.forget()
 }
 
 func (c *conn) valueChanged(p dbus.ObjectPath, data []byte) {
@@ -1063,8 +1109,14 @@ func (c *conn) Notify(h uint16, enable bool) error {
 	if err != nil {
 		return err
 	}
+	// Set before StartNotify is called: the reply and the first Value change reach us on different goroutines,
+	// and valueChanged drops the value if it comes first. Undone if the call fails. StopNotify clears it after
+	// the reply, so values sent until then still go out.
 	c.mu.Lock()
 	already := c.notifying[h] == enable
+	if enable {
+		c.notifying[h] = true
+	}
 	c.mu.Unlock()
 	if already {
 		return nil
@@ -1073,28 +1125,24 @@ func (c *conn) Notify(h uint16, enable bool) error {
 	if enable {
 		method = ifChar + ".StartNotify"
 	}
-	if err := c.call(p, method).Err; err != nil {
-		return err
+	err = c.call(p, method).Err
+	if enable && err != nil || !enable && err == nil {
+		c.mu.Lock()
+		delete(c.notifying, h)
+		c.mu.Unlock()
 	}
-	c.mu.Lock()
-	c.notifying[h] = enable
-	c.mu.Unlock()
-	return nil
+	return err
 }
 
 func (c *conn) Disconnect() error {
 	c.mu.Lock()
 	c.closed = true
 	c.mu.Unlock()
-	c.a.mu.Lock()
-	if c.a.conns[c.path] == c {
-		delete(c.a.conns, c.path)
-	}
-	c.a.mu.Unlock()
 	start := time.Now()
 	err := c.call(c.path, ifDevice+".Disconnect").Err
-	c.unwatch()
-	if took := time.Since(start); took > 5*time.Second {
+	took := time.Since(start)
+	c.release(err)
+	if took > 5*time.Second {
 		c.a.log.Warn("slow disconnect", "path", c.path, "took", took.Round(time.Millisecond))
 	}
 	// BlueZ answers a disconnect within the supervision timeout. No answer has been the first sign of a hung

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // openPauseTest opens an adapter that pauses scanning for connects, against a fake bluetoothd with the
@@ -266,7 +267,8 @@ func TestPauseQuiet(t *testing.T) {
 	waitFor(t, "advertisement", func() bool { return got.Load() > n })
 }
 
-// TestPauseOff: without PauseOnConnect, scanning goes on during connects.
+// TestPauseOff: without PauseOnConnect, scanning goes on during connects, which still count as in progress
+// for the recovery steps (see strike).
 func TestPauseOff(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, true)
@@ -279,10 +281,45 @@ func TestPauseOff(t *testing.T) {
 	stop, _ := a.Scan(func(ble.Advert) {})
 	t.Cleanup(stop)
 	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
-	if err := <-connectAsync(a, 0xC1C2C3C4C5C6); err != nil {
+	hold := holdConnects(bz)
+	errc := connectAsync(a, 0xC1C2C3C4C5C6)
+	waitFor(t, "connect started", func() bool { return len(scanningAt(bz)) == 1 })
+	if n := connecting(a); n != 1 {
+		t.Fatalf("connecting = %d during a connect, want 1", n)
+	}
+	hold <- struct{}{}
+	if err := <-errc; err != nil {
 		t.Fatal(err)
 	}
 	if s := scanningAt(bz); len(s) != 1 || !s[0] {
 		t.Fatalf("scanning at connect: %v, want [true]", s)
+	}
+	if n := connecting(a); n != 0 {
+		t.Fatalf("connecting = %d after the connect, want 0", n)
+	}
+}
+
+func connecting(a *Adapter) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.connecting
+}
+
+// TestConnectCountedWithoutPause: pauseScan counts the connect whether or not it pauses scanning, and tells
+// the supervisor to pause only when asked to.
+func TestConnectCountedWithoutPause(t *testing.T) {
+	a := &Adapter{}
+	a.log = logx.Discard()
+	resume := a.pauseScan()
+	if n := connecting(a); n != 1 {
+		t.Fatalf("connecting = %d during a connect, want 1", n)
+	}
+	if paused, _ := a.takePause(); paused {
+		t.Fatal("scanning paused without PauseOnConnect")
+	}
+	resume()
+	resume() // may be called more than once
+	if n := connecting(a); n != 0 {
+		t.Fatalf("connecting = %d after the connect, want 0", n)
 	}
 }
