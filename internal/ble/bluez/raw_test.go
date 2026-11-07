@@ -63,7 +63,7 @@ func openRawTest(t *testing.T, mode RawMode, monitors bool) (*Adapter, *fakeBlue
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, monitors)
 	t.Cleanup(func() { bz.bus.Close() })
-	a, err := Open("hci0", Options{RawAdverts: mode})
+	a, err := Open("hci0", testOptions(Options{RawAdverts: mode}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestRawUnavailable(t *testing.T) {
 	bz.advertise()
 	bletest.WaitFor(t, "BlueZ advertisement", func() bool { return len(got()) == 1 })
 
-	if _, err := Open("hci0", Options{RawAdverts: RawOn}); err == nil {
+	if _, err := Open("hci0", testOptions(Options{RawAdverts: RawOn})); err == nil {
 		t.Error("RawOn opened without the monitor")
 	}
 }
@@ -131,9 +131,11 @@ func TestRawSource(t *testing.T) {
 	src.fail <- errors.New("read: network is down")
 	bletest.WaitFor(t, "fallback", func() bool { a.mu.Lock(); defer a.mu.Unlock(); return a.raw == nil })
 	bletest.WaitFor(t, "discovery with DuplicateData", func() bool { return dupData(bz) })
-	if _, disc, reg := bz.state(); !disc || reg != 0 {
-		t.Errorf("after the fallback: discovering %v, %d monitors registered", disc, reg)
-	}
+	// The filter is set before discovery starts again, so discovery itself is waited for too.
+	bletest.WaitFor(t, "discovery again without the monitors", func() bool {
+		_, disc, reg := bz.state()
+		return disc && reg == 0
+	})
 	bz.advertise()
 	bletest.WaitFor(t, "BlueZ advertisement", func() bool { g := got(); return len(g) == 3 && g[2] == -60 })
 }

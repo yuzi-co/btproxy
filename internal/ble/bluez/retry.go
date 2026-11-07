@@ -21,21 +21,11 @@ import (
 // radio is as common. Connect retries that too, however long it took. Timeouts and every other error fail at once.
 // The wait before a retry comes from Options.ConnectRetryDelay and doubles with each retry (see ble.ConnectRetry).
 
-const (
-	retryFast = 3 * time.Second // a radio failure comes within about 0.5 s; slower ones are not retried
-	// retryBudget is how long after the first attempt a retry may still start. A client gives a connect about
-	// 20 s, so 10 s fits the doubling delays of the default retries and leaves the last attempt as much again.
-	retryBudget = 10 * time.Second
-)
+// retryFast is ble.ConnectRetry.Fast here: a radio failure comes within about 0.5 s; slower ones are not retried.
+const retryFast = 3 * time.Second
 
 // errLinkLost is ble.ErrLinkLost for a link that dropped before its services were resolved.
 var errLinkLost = fmt.Errorf("%w while resolving services", ble.ErrLinkLost)
-
-func connectRetry(retries int, delay time.Duration) ble.ConnectRetry {
-	// Fast only keeps out what the budget would anyway: Connect applies retryFast to radio failures alone, as a
-	// lost link takes as long as the link was up.
-	return ble.ConnectRetry{Retries: max(retries, 0), Delay: delay, Fast: retryBudget, Budget: retryBudget}
-}
 
 // radioFailure tells whether a connect error is one the radio may not repeat: BlueZ's
 // "le-connection-abort-by-local", or a BlueZ error with an empty message (not "does not exist"). BlueZ 5.66

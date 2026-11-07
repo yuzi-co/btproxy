@@ -42,7 +42,7 @@ func (a *Adapter) addMatches() error {
 // matchCall adds or removes a match rule. The bus daemon answers at once; the timeout only guards against a
 // stuck one.
 func (a *Adapter) matchCall(add bool, m []dbus.MatchOption) error {
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), a.tm.callTimeout)
 	defer cancel()
 	if add {
 		return a.bus.AddMatchSignalContext(ctx, m...)

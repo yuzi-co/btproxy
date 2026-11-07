@@ -44,23 +44,29 @@ func (r *fakeRadio) watchers() []*fakeWatcher {
 	return append([]*fakeWatcher(nil), r.ws...)
 }
 
-func newTestAdapter(t *testing.T, pause bool) (*Adapter, *fakeRadio) {
+// testTimings are short enough for the tests to see the scanner retry and check, and long enough for a pause
+// to outlast a test unless it shortens pauseLimit.
+var testTimings = timings{scanRetry: 50 * time.Millisecond, scanCheck: 20 * time.Millisecond, pauseLimit: time.Minute}
+
+// fakeAdapter is an Adapter on a fake radio, not yet scanning.
+func fakeAdapter(pause bool, tm timings, newScanner func(ble.ScanMode) (scanWatcher, error)) *Adapter {
+	a := &Adapter{log: logx.Discard(), tm: tm, conns: map[uint64]*conn{}, uncached: map[uint64]bool{},
+		newScanner: newScanner}
+	a.initScan(ble.ScanActive, pause)
+	return a
+}
+
+// newTestAdapter is fakeAdapter with a scan running.
+func newTestAdapter(t *testing.T, pause bool, tm timings) (*Adapter, *fakeRadio) {
 	t.Helper()
 	r := &fakeRadio{}
-	a := &Adapter{log: logx.Discard(), pauseOnConnect: pause, mode: ble.ScanActive, conns: map[uint64]*conn{},
-		uncached: map[uint64]bool{}, newScanner: r.start}
+	a := fakeAdapter(pause, tm, r.start)
 	stop, err := a.Scan(func(ble.Advert) {})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(stop)
 	return a, r
-}
-
-func shorten(t *testing.T, v *time.Duration, d time.Duration) {
-	old := *v
-	*v = d
-	t.Cleanup(func() { *v = old })
 }
 
 func waitState(t *testing.T, a *Adapter, want ble.ScanState) {
@@ -100,14 +106,13 @@ func TestStopDoesNotWaitForClose(t *testing.T) {
 			release := make(chan struct{})
 			closed := make(chan struct{})
 			first := true
-			a := &Adapter{log: logx.Discard(), pauseOnConnect: true, mode: ble.ScanActive, conns: map[uint64]*conn{},
-				uncached: map[uint64]bool{}, newScanner: func(ble.ScanMode) (scanWatcher, error) {
-					if first { // the watcher a restart (mode, failed) replaces it with closes at once
-						first = false
-						return blockingWatcher{release, closed}, nil
-					}
-					return &fakeWatcher{}, nil
-				}}
+			a := fakeAdapter(true, testTimings, func(ble.ScanMode) (scanWatcher, error) {
+				if first { // the watcher a restart (mode, failed) replaces it with closes at once
+					first = false
+					return blockingWatcher{release, closed}, nil
+				}
+				return &fakeWatcher{}, nil
+			})
 			stop, err := a.Scan(func(ble.Advert) {})
 			if err != nil {
 				t.Fatal(err)
@@ -135,10 +140,10 @@ func TestStopDoesNotWaitForClose(t *testing.T) {
 // A scan whose watcher cannot start, e.g. with the radio off when Home Assistant subscribes, is not an error:
 // it is retried like a watcher that stops later, and the status reports the failure meanwhile.
 func TestScanStartFailureRetries(t *testing.T) {
-	shorten(t, &scanRetry, 20*time.Millisecond)
+	tm := testTimings
+	tm.scanRetry = 20 * time.Millisecond
 	r := &fakeRadio{fail: 2}
-	a := &Adapter{log: logx.Discard(), mode: ble.ScanActive, conns: map[uint64]*conn{}, uncached: map[uint64]bool{},
-		newScanner: r.start}
+	a := fakeAdapter(false, tm, r.start)
 	var states []ble.ScanState
 	var mu sync.Mutex
 	a.OnScanStatus(func(st ble.ScanStatus) {
@@ -183,7 +188,7 @@ func (w blockingWatcher) close()      { <-w.release; close(w.closed) }
 func (w blockingWatcher) alive() bool { return true }
 
 func TestPauseScan(t *testing.T) {
-	a, r := newTestAdapter(t, true)
+	a, r := newTestAdapter(t, true, testTimings)
 	waitState(t, a, ble.ScanRunning)
 	resume1 := a.pauseScan()
 	waitClosed(t, r.watchers()[0]) // stopped for the connect
@@ -204,7 +209,7 @@ func TestPauseScan(t *testing.T) {
 }
 
 func TestPauseScanOff(t *testing.T) {
-	a, r := newTestAdapter(t, false)
+	a, r := newTestAdapter(t, false, testTimings)
 	a.pauseScan()()
 	if r.watchers()[0].closed.Load() || a.ScanStatus().State != ble.ScanRunning {
 		t.Fatal("scanning paused although pausing is off")
@@ -212,8 +217,9 @@ func TestPauseScanOff(t *testing.T) {
 }
 
 func TestPauseLimit(t *testing.T) {
-	shorten(t, &pauseLimit, 50*time.Millisecond)
-	a, r := newTestAdapter(t, true)
+	tm := testTimings
+	tm.pauseLimit = 50 * time.Millisecond
+	a, r := newTestAdapter(t, true, tm)
 	resume := a.pauseScan()
 	waitState(t, a, ble.ScanIdle)
 	waitState(t, a, ble.ScanRunning) // the hung connect no longer holds scanning
@@ -224,8 +230,7 @@ func TestPauseLimit(t *testing.T) {
 }
 
 func TestResumeRetriesFailedStart(t *testing.T) {
-	shorten(t, &scanRetry, 50*time.Millisecond)
-	a, r := newTestAdapter(t, true)
+	a, r := newTestAdapter(t, true, testTimings)
 	resume := a.pauseScan()
 	r.mu.Lock()
 	r.fail = 1
@@ -237,8 +242,7 @@ func TestResumeRetriesFailedStart(t *testing.T) {
 
 func TestScanWhilePaused(t *testing.T) {
 	r := &fakeRadio{}
-	a := &Adapter{log: logx.Discard(), pauseOnConnect: true, mode: ble.ScanActive, conns: map[uint64]*conn{},
-		uncached: map[uint64]bool{}, newScanner: r.start}
+	a := fakeAdapter(true, testTimings, r.start)
 	resume := a.pauseScan()
 	stop, err := a.Scan(func(ble.Advert) {})
 	if err != nil {
@@ -253,9 +257,7 @@ func TestScanWhilePaused(t *testing.T) {
 }
 
 func TestDeadWatcherRestarts(t *testing.T) {
-	shorten(t, &scanCheck, 20*time.Millisecond)
-	shorten(t, &scanRetry, 20*time.Millisecond)
-	a, r := newTestAdapter(t, true)
+	a, r := newTestAdapter(t, true, testTimings)
 	r.watchers()[0].dead.Store(true) // aborted without a Stopped event
 	deadline := time.Now().Add(2 * time.Second)
 	for len(r.watchers()) < 2 {

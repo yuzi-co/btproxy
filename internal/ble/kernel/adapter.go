@@ -15,19 +15,17 @@ import (
 )
 
 const (
-	retryFast = 3 * time.Second // an error other than a radio failure or a lost link is retried only if this fast
-	// retryBudget is how long after the first attempt a retry may still start. A client gives a connect about
-	// 20 s, so 10 s fits the doubling delays of the default retries and leaves the last attempt as much again.
-	retryBudget = 10 * time.Second
-
 	defaultTick     = 5 * time.Second
 	defaultMaxStall = 30 * time.Minute
 	// defaultPauseWait is how long a connect waits for scanning to stop before it goes ahead anyway.
 	defaultPauseWait = 2 * time.Second
+	// defaultPauseLimit bounds a pause, should a connect hang beyond its own timeouts.
+	defaultPauseLimit = connectTimeout + mtuTimeout
 	// defaultStackCheck is how often the supervisor looks for a bluetoothd that started after the proxy.
 	defaultStackCheck = time.Minute
 
-	mtuTimeout = 10 * time.Second
+	connectTimeout = 30 * time.Second // until the kernel reports the link up
+	mtuTimeout     = 10 * time.Second
 )
 
 var (
@@ -38,14 +36,16 @@ var (
 	errRadio = errors.New("connection failed to be established (HCI 0x3e)")
 )
 
-// retryable tells whether a connect error is worth another attempt. Most errors only are if they came fast,
-// as a slow one is a timeout.
-func retryable(err error, took time.Duration) bool {
+// retryable tells whether a connect error is worth another attempt: a link that came up and dropped, or HCI
+// reason 0x3e. Neither is held to a fast cut-off (Connect retries with ble.ConnectRetry.Fast at the budget):
+// the kernel waits for an advertisement before it connects, so a 0x3e can come after some seconds. Everything
+// else, timeouts included, fails at once.
+func retryable(err error) bool {
 	var perm permanentError
 	if errors.As(err, &perm) {
 		return false
 	}
-	return errors.Is(err, ble.ErrLinkLost) || errors.Is(err, errRadio) || took <= retryFast
+	return errors.Is(err, ble.ErrLinkLost) || errors.Is(err, errRadio)
 }
 
 // permanentError is a connect failure that another attempt will not change.
@@ -66,9 +66,11 @@ type Options struct {
 	// Log receives the adapter's log lines; nil discards them.
 	Log *logx.Logger
 
+	// Timings the tests shorten; zero takes the default.
 	tick            time.Duration
 	maxStallBackoff time.Duration
 	pauseWait       time.Duration
+	pauseLimit      time.Duration
 	stackCheck      time.Duration
 	resetUSB        func(adapter string) error
 }
@@ -106,25 +108,23 @@ type Adapter struct {
 	mgmt  mgmtConn
 	mac   uint64
 	bonds *bondStore
+	retry ble.ConnectRetry
 
 	dialMu sync.Mutex // the kernel makes one LE connection at a time
 
-	mu       sync.Mutex
-	scanFn   func(ble.Advert)
-	mode     ble.ScanMode
-	status   ble.ScanStatus
-	statusFn func(ble.ScanStatus)
-	conns    map[uint64]*conn
+	scan  ble.ScanCell  // the mode and status reported; ActiveOnly once the kernel turns out to have no advertisement monitors
+	pause ble.ScanPause // connects in progress, during which discovery must not start
+
+	mu     sync.Mutex
+	scanFn func(ble.Advert)
+	conns  map[uint64]*conn
 
 	// Supervisor state: the supervisor goroutine alone writes these, except where noted.
-	present     bool            // the controller exists (mu)
-	needSetup   bool            // the controller came back and has not been set up (mu)
-	monitor     uint16          // handle of the monitor registered; 0 if none
-	noMonitor   bool            // the kernel has no advertisement monitors (mu)
-	discovering bool            // (mu)
-	connecting  int             // connects in progress, during which discovery must not start (mu)
-	pauseWaiter []chan struct{} // connects waiting for scanning to stop (mu)
-	wedged      bool            // a command timed out (mu)
+	present     bool   // the controller exists (mu)
+	needSetup   bool   // the controller came back and has not been set up (mu)
+	monitor     uint16 // handle of the monitor registered; 0 if none
+	discovering bool   // (mu)
+	wedged      bool   // a command timed out (mu)
 	stallStep   int
 	stallNext   time.Time
 	stallWait   time.Duration
@@ -167,12 +167,20 @@ func open(name string, opt Options, sys system) (*Adapter, error) {
 	if opt.pauseWait == 0 {
 		opt.pauseWait = defaultPauseWait
 	}
+	if opt.pauseLimit == 0 {
+		opt.pauseLimit = defaultPauseLimit
+	}
 	if opt.stackCheck == 0 {
 		opt.stackCheck = defaultStackCheck
 	}
-	a := &Adapter{name: name, index: uint16(idx), opt: opt, log: opt.Log, sys: sys, mode: ble.ScanPassive,
+	a := &Adapter{name: name, index: uint16(idx), opt: opt, log: opt.Log, sys: sys,
 		conns: map[uint64]*conn{}, kick: make(chan struct{}, 1), stop: make(chan struct{}),
-		stopped: make(chan struct{}), present: true, status: ble.ScanStatus{State: ble.ScanIdle}}
+		stopped: make(chan struct{}), present: true}
+	// No fast cut-off short of the budget, see retryable.
+	a.retry = opt.Retry(ble.ConnectBudget)
+	a.scan.Log = a.log
+	a.pause = ble.ScanPause{Pause: opt.PauseOnConnect, Wait: opt.pauseWait, Limit: opt.pauseLimit,
+		Kick: a.kickSupervisor, Log: a.log}
 	a.lastAdvert.Store(time.Now().UnixNano())
 	a.mgmt, err = sys.openMgmt(a.index, a.event)
 	if err != nil {
@@ -272,7 +280,7 @@ func (a *Adapter) event(op uint16, data []byte) {
 		a.discovering = false
 		a.mu.Unlock()
 		a.log.Warn("adapter removed")
-		a.setStatus(ble.ScanFailed)
+		a.scan.SetState(ble.ScanFailed)
 		a.kickSupervisor()
 	case evIndexAdded:
 		a.mu.Lock()
@@ -353,7 +361,7 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 	a.scanFn = fn
 	a.mu.Unlock()
 	a.lastAdvert.Store(time.Now().UnixNano())
-	a.setStatus(ble.ScanStarting)
+	a.scan.SetState(ble.ScanStarting)
 	a.kickSupervisor()
 	var once sync.Once
 	return func() {
@@ -368,60 +376,21 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 
 // SetScanMode implements ble.ModeScanner.
 func (a *Adapter) SetScanMode(m ble.ScanMode) {
-	a.mu.Lock()
-	a.mode = m
-	a.mu.Unlock()
+	a.scan.SetMode(m)
 	a.kickSupervisor()
 }
 
 // ScanStatus implements ble.ModeScanner.
-func (a *Adapter) ScanStatus() ble.ScanStatus {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.status
-}
+func (a *Adapter) ScanStatus() ble.ScanStatus { return a.scan.Status() }
 
 // OnScanStatus implements ble.ModeScanner.
-func (a *Adapter) OnScanStatus(fn func(ble.ScanStatus)) {
-	a.mu.Lock()
-	a.statusFn = fn
-	a.mu.Unlock()
-}
-
-func (a *Adapter) effectiveMode() ble.ScanMode {
-	if a.noMonitor {
-		return ble.ScanActive
-	}
-	return a.mode
-}
-
-func (a *Adapter) setStatus(state ble.ScanState) {
-	a.mu.Lock()
-	st := ble.ScanStatus{State: state, Mode: a.effectiveMode()}
-	changed := a.status != st
-	a.status = st
-	fn := a.statusFn
-	a.mu.Unlock()
-	if changed && fn != nil {
-		fn(st)
-	}
-}
+func (a *Adapter) OnScanStatus(fn func(ble.ScanStatus)) { a.scan.OnStatus(fn) }
 
 // AdvertSource implements ble.AdvertSourcer.
 func (a *Adapter) AdvertSource() string { return "HCI monitor" }
 
 // ScanSetting implements ble.ScanSettinger.
-func (a *Adapter) ScanSetting() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	switch {
-	case a.noMonitor:
-		return "Active, passive unavailable"
-	case a.mode == ble.ScanActive:
-		return "Active"
-	}
-	return "Passive"
-}
+func (a *Adapter) ScanSetting() string { return a.scan.Setting() }
 
 // Recoveries implements ble.RecoveryCounter: the power cycles and USB resets the supervisor did.
 func (a *Adapter) Recoveries() uint64 { return a.recoveries.Load() }
@@ -458,16 +427,12 @@ func (a *Adapter) checkStack() {
 
 func (a *Adapter) reconcile() {
 	a.mu.Lock()
-	present, needSetup, want, connecting := a.present, a.needSetup, a.scanFn != nil, a.connecting > 0
+	present, needSetup, want := a.present, a.needSetup, a.scanFn != nil
 	noSource := a.source == nil
-	waiters := a.pauseWaiter
-	a.pauseWaiter = nil
 	a.mu.Unlock()
-	defer func() {
-		for _, w := range waiters {
-			close(w)
-		}
-	}()
+	connecting := a.pause.Connecting()
+	paused, release := a.pause.Take()
+	defer release() // once scanning is stopped, or cannot be
 	if !present {
 		return
 	}
@@ -485,7 +450,7 @@ func (a *Adapter) reconcile() {
 		if err := a.setup(); err != nil {
 			a.log.Warn("adapter setup failed", "err", err)
 			a.noteTimeout(err)
-			a.setStatus(ble.ScanFailed)
+			a.scan.SetState(ble.ScanFailed)
 			if want {
 				a.checkStall(true)
 			}
@@ -495,21 +460,21 @@ func (a *Adapter) reconcile() {
 		a.needSetup, a.discovering = false, false
 		a.mu.Unlock()
 	}
-	err := a.applyScan(want, connecting)
+	err := a.applyScan(want, connecting, paused)
 	a.noteTimeout(err)
 	switch {
 	case err != nil:
 		a.log.Warn("scan", "err", err)
-		a.setStatus(ble.ScanFailed)
+		a.scan.SetState(ble.ScanFailed)
 		if want {
 			a.checkStall(true)
 		}
 	case want:
-		a.setStatus(ble.ScanRunning)
+		a.scan.SetState(ble.ScanRunning)
 		a.checkStall(false)
 	default:
 		a.stallStep = 0
-		a.setStatus(ble.ScanIdle) // nothing is wrong: no client wants scanning, or it is switched off
+		a.scan.SetState(ble.ScanIdle) // nothing is wrong: no client wants scanning, or it is switched off
 	}
 }
 
@@ -524,19 +489,17 @@ func (a *Adapter) noteTimeout(err error) {
 // applyScan registers or removes the monitor, and starts or stops discovery. Discovery does not start during a
 // connect, which the kernel refuses or fails.
 //
-// The monitor goes too if PauseOnConnect is set. The kernel stops scanning to create a connection, but while a
-// monitor exists it scans again within milliseconds of the link coming up. A controller busy scanning right then
-// can miss the first six connection events, and the link fails with HCI reason 0x3e. Connecting does not need the
-// monitor: the kernel scans for the device it connects to by itself.
-func (a *Adapter) applyScan(want, connecting bool) error {
-	wantMonitor := want && !(connecting && a.opt.PauseOnConnect)
-	if wantMonitor && a.monitor == 0 && !a.monitorMissing() {
+// The monitor goes too while scanning is paused for a connect (see ble.ScanPause). The kernel stops scanning to
+// create a connection, but while a monitor exists it scans again within milliseconds of the link coming up. A
+// controller busy scanning right then can miss the first six connection events, and the link fails with HCI
+// reason 0x3e. Connecting does not need the monitor: the kernel scans for the device it connects to by itself.
+func (a *Adapter) applyScan(want, connecting, paused bool) error {
+	wantMonitor := want && !paused
+	if wantMonitor && a.monitor == 0 && !a.scan.ActiveOnly() {
 		rsp, err := a.mgmt.Command(opAddAdvMonitor, quietMonitor(), mgmtTimeout)
 		switch {
 		case isStatus(err, mgmtStatusUnknownCommand):
-			a.mu.Lock()
-			a.noMonitor = true
-			a.mu.Unlock()
+			a.scan.SetActiveOnly(true)
 			a.log.Warn("this kernel has no advertisement monitors, scanning actively only")
 		case err != nil:
 			return err
@@ -551,8 +514,8 @@ func (a *Adapter) applyScan(want, connecting bool) error {
 			return err
 		}
 	}
+	active := want && a.scan.Effective() == ble.ScanActive
 	a.mu.Lock()
-	active := want && a.effectiveMode() == ble.ScanActive
 	discovering := a.discovering
 	a.mu.Unlock()
 	a.activeScan.Store(active)
@@ -578,12 +541,6 @@ func (a *Adapter) applyScan(want, connecting bool) error {
 		a.mu.Unlock()
 	}
 	return nil
-}
-
-func (a *Adapter) monitorMissing() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.noMonitor
 }
 
 // checkStall brings scanning back after a silence: first by registering the scan again, then by power-cycling
@@ -715,58 +672,20 @@ func (a *Adapter) Unpair(addr uint64) error {
 // Connect implements ble.Adapter. Nothing is discovered here: Home Assistant usually has its own copy of the
 // services, and every round trip on a new link is a chance to lose it.
 func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn, error) {
-	stopped := make(chan struct{})
-	a.mu.Lock()
-	a.connecting++
-	if a.opt.PauseOnConnect {
-		a.pauseWaiter = append(a.pauseWaiter, stopped)
-	}
-	a.mu.Unlock()
-	a.kickSupervisor()
-	defer func() {
-		a.mu.Lock()
-		a.connecting--
-		a.mu.Unlock()
-		a.kickSupervisor()
-	}()
-	if a.opt.PauseOnConnect {
-		t := time.NewTimer(a.opt.pauseWait)
-		defer t.Stop()
-		select {
-		case <-stopped:
-		case <-t.C:
-			a.log.Warn("scanning not paused in time, connecting anyway", "after", a.opt.pauseWait)
-		}
-	}
+	defer a.pause.Begin()()
 	a.dialMu.Lock()
 	defer a.dialMu.Unlock()
 	if ev.Withdrawn != nil && ev.Withdrawn() {
 		return nil, errors.New("connect withdrawn")
 	}
-	log := a.log.With("addr", ble.FormatMAC(addr))
 	var c *conn
-	var took time.Duration
-	retry := ble.ConnectRetry{Retries: max(a.opt.ConnectRetries, 0), Delay: a.opt.ConnectRetryDelay,
-		Fast: retryBudget, Budget: retryBudget}
-	retries, err := retry.Do(func() error {
-		start := time.Now()
+	err := a.retry.Run(a.log.With("addr", ble.FormatMAC(addr)), func() error {
 		var err error
 		c, err = a.dial(addr, addrType, ev)
-		took = time.Since(start)
 		return err
-	}, func(err error) bool {
-		return retryable(err, took)
-	}, ev.Withdrawn, func(n int, err error) {
-		log.Debug("connect failed, retrying", "retry", n, "err", err)
-	})
+	}, retryable, ev.Withdrawn)
 	if err != nil {
-		if retries > 0 {
-			return nil, fmt.Errorf("connect, %d retries: %w", retries, err)
-		}
-		return nil, fmt.Errorf("connect: %w", err)
-	}
-	if retries > 0 {
-		log.Info("connected after retries", "retries", retries)
+		return nil, err
 	}
 	return c, nil
 }

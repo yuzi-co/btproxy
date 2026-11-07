@@ -6,6 +6,7 @@ package bluez
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -43,19 +44,47 @@ const (
 	readEchoWindow  = 2 * time.Second // how long a read result may take to show up as a Value change
 )
 
-// callTimeout bounds every call that bluetoothd answers at once (see Adapter.call). Variables, so the tests
-// can shorten them.
-var (
-	callTimeout = 10 * time.Second
+// timings are the waits that bound what bluetoothd and the supervisor do. The tests shorten them through
+// Options; a zero field takes the default.
+type timings struct {
+	// callTimeout bounds every call that bluetoothd answers at once (see Adapter.call).
+	callTimeout time.Duration
 	// disconnectWait is how long a disconnect waits for its Connected=false signal to be handled (see
 	// conn.Disconnect). Dispatch normally gets there within milliseconds.
-	disconnectWait = 2 * time.Second
-)
+	disconnectWait time.Duration
+	// scanRetry is how often the supervisor retries when the adapter cannot scan (powered off, scan start
+	// refused or unanswered) and checks for a stalled scan; recovery from a bluetoothd restart or an adapter
+	// coming back is driven by signals instead.
+	scanRetry time.Duration
+	// pingEvery is how often the supervisor checks that bluetoothd still answers. Advertisements are no proof
+	// once they come from the HCI monitor, which keeps reading the controller while bluetoothd hangs.
+	pingEvery time.Duration
+	// monitorRetry is the first wait before trying monitors BlueZ dropped again (see monitorReleased).
+	monitorRetry time.Duration
+	// pauseWait is how long a connect waits for the supervisor to stop scanning before it goes ahead anyway,
+	// for example while the supervisor is busy restarting bluetoothd.
+	pauseWait time.Duration
+	// pauseLimit bounds a pause, should a connect hang beyond its own timeouts.
+	pauseLimit time.Duration
+}
+
+func (t timings) withDefaults() timings {
+	return timings{
+		callTimeout:    cmp.Or(t.callTimeout, 10*time.Second),
+		disconnectWait: cmp.Or(t.disconnectWait, 2*time.Second),
+		scanRetry:      cmp.Or(t.scanRetry, 10*time.Second),
+		pingEvery:      cmp.Or(t.pingEvery, time.Minute),
+		monitorRetry:   cmp.Or(t.monitorRetry, time.Minute),
+		pauseWait:      cmp.Or(t.pauseWait, 2*time.Second),
+		pauseLimit:     cmp.Or(t.pauseLimit, connectTimeout+resolveTimeout),
+	}
+}
 
 type Adapter struct {
 	bus  *dbus.Conn
 	path dbus.ObjectPath
 	mac  uint64
+	tm   timings
 
 	mu      sync.Mutex
 	devices map[dbus.ObjectPath]*device // advertisement state of the devices BlueZ reports, see maxDevices
@@ -72,7 +101,8 @@ type Adapter struct {
 	retry ble.ConnectRetry // see retry.go
 }
 
-// Options configures the adapter: the scanner's watchdog (see watch.go) and connects (see pause.go and retry.go).
+// Options configures the adapter: the scanner's watchdog (see watch.go) and connects (see retry.go and
+// ble.ScanPause).
 type Options struct {
 	ble.WatchdogOptions // StallTimeout restarts active discovery
 	ble.ConnectOptions
@@ -83,6 +113,8 @@ type Options struct {
 	RawAdverts RawMode
 	// Log receives the adapter's log lines; nil discards them.
 	Log *logx.Logger
+
+	timings
 }
 
 // device caches the Device1 properties an advertisement is rebuilt from.
@@ -130,8 +162,12 @@ func Open(name string, opt Options) (*Adapter, error) {
 		opt.Log = logx.Discard()
 	}
 	a.log = opt.Log.With("adapter", string(a.path))
-	a.stallTimeout, a.restartCmd, a.pauseOnConnect = opt.StallTimeout, opt.RestartCmd, opt.PauseOnConnect
-	a.retry = connectRetry(opt.ConnectRetries, opt.ConnectRetryDelay)
+	a.tm = opt.timings.withDefaults()
+	a.stallTimeout, a.restartCmd = opt.StallTimeout, opt.RestartCmd
+	a.retry = opt.Retry(retryFast)
+	a.scan.Log = a.log
+	a.pause = ble.ScanPause{Pause: opt.PauseOnConnect, Wait: a.tm.pauseWait, Limit: a.tm.pauseLimit,
+		Kick: a.kickScan, Log: a.log}
 	if opt.USBReset {
 		a.resetUSB = func() error { return resetUSBDevice(name) }
 	}
@@ -209,16 +245,16 @@ func (l *adapterList) connected(p dbus.ObjectPath) bool {
 
 func (a *Adapter) obj(p dbus.ObjectPath) dbus.BusObject { return a.bus.Object(busName, p) }
 
-// call makes a method call that bluetoothd answers at once, giving up after callTimeout. A wedged bluetoothd
-// keeps its bus name but never replies, and without a timeout the caller would wait for good. Calls that
-// take long by design (connecting, pairing, GATT operations) have their own contexts instead.
+// call makes a method call that bluetoothd answers at once, giving up after the call timeout. A wedged
+// bluetoothd keeps its bus name but never replies, and without a timeout the caller would wait for good. Calls
+// that take long by design (connecting, pairing, GATT operations) have their own contexts instead.
 func (a *Adapter) call(p dbus.ObjectPath, method string, args ...any) *dbus.Call {
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), a.tm.callTimeout)
 	defer cancel()
 	c := a.obj(p).CallWithContext(ctx, method, 0, args...)
 	if errors.Is(c.Err, context.DeadlineExceeded) {
 		c.Err = fmt.Errorf("%s: no reply from bluetoothd in %v: %w", method[strings.LastIndex(method, ".")+1:],
-			callTimeout, c.Err)
+			a.tm.callTimeout, c.Err)
 	}
 	return c
 }
@@ -552,7 +588,7 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	a.mu.Unlock()
 	// Until the services are resolved or the connect fails: the link is most fragile in its first
 	// connection events, and service discovery is a burst of traffic right after.
-	defer a.pauseScan()()
+	defer a.pause.Begin()()
 	fail := func(err error) (ble.Conn, error) {
 		c.mu.Lock()
 		c.closed = true
@@ -564,9 +600,7 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	// One deadline for every attempt, retries included.
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	log := a.log.With("addr", ble.FormatMAC(addr))
-	var connectTook time.Duration
-	retries, err := a.retry.Do(func() error {
-		start := time.Now()
+	err := a.retry.Run(log, func() error {
 		err := a.connect(ctx, p, addr, addrType, known)
 		var de dbus.Error
 		if errors.As(err, &de) && (known && noObject(de.Name) || !known && de.Name == "org.bluez.Error.AlreadyExists") {
@@ -574,13 +608,12 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 			known = !known
 			err = a.connect(ctx, p, addr, addrType, known)
 		}
-		connectTook = time.Since(start)
 		if err != nil {
 			return err
 		}
 		return c.awaitResolved()
 	}, func(err error) bool {
-		if !errors.Is(err, ble.ErrLinkLost) && !(radioFailure(err) && connectTook <= retryFast) {
+		if !errors.Is(err, ble.ErrLinkLost) && !radioFailure(err) {
 			var de dbus.Error
 			errors.As(err, &de)
 			log.Debug("connect failed, not a radio failure", "err", err, "name", de.Name)
@@ -597,18 +630,10 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		default:
 		}
 		return true
-	}, ev.Withdrawn, func(n int, err error) {
-		log.Debug("connect failed on the radio, retrying", "retry", n, "err", err)
-	})
+	}, ev.Withdrawn)
 	cancel()
 	if err != nil {
-		if retries > 0 {
-			return fail(fmt.Errorf("connect, %d retries: %w", retries, err))
-		}
-		return fail(fmt.Errorf("connect: %w", err))
-	}
-	if retries > 0 {
-		log.Info("connected after retries", "retries", retries)
+		return fail(err)
 	}
 
 	if err := c.loadGATT(); err != nil {
@@ -808,9 +833,9 @@ func (c *conn) release(err error) {
 	if err == nil {
 		select {
 		case <-c.lostCh():
-		case <-time.After(disconnectWait):
+		case <-time.After(c.a.tm.disconnectWait):
 			c.a.log.Warn("link not reported down after disconnect, letting go of the device", "path", c.path,
-				"after", disconnectWait)
+				"after", c.a.tm.disconnectWait)
 		}
 	}
 	c.forget()

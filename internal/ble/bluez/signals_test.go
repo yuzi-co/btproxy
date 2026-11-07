@@ -140,7 +140,7 @@ func TestNoOrphan(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, false)
 	defer bz.bus.Close()
-	a, err := Open("hci0", Options{RawAdverts: RawOff})
+	a, err := Open("hci0", testOptions(Options{RawAdverts: RawOff}))
 	if err != nil {
 		t.Fatal(err)
 	}

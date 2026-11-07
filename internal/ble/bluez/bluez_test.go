@@ -304,10 +304,8 @@ func TestDisconnectWaitsForTheLinkDownSignal(t *testing.T) {
 
 // TestDisconnectGivesUpWaiting: a dispatch that stays behind must not hold Disconnect, or the device, for good.
 func TestDisconnectGivesUpWaiting(t *testing.T) {
-	old := disconnectWait
-	disconnectWait = 200 * time.Millisecond
-	t.Cleanup(func() { disconnectWait = old })
 	a, bz := openForRetries(t, 0, 0)
+	a.tm.disconnectWait = 200 * time.Millisecond
 	c := connectTo(t, a, retryEvents)
 	resume := stallDispatch(t, a, bz)
 	defer resume()
@@ -316,8 +314,8 @@ func TestDisconnectGivesUpWaiting(t *testing.T) {
 	if err := c.Disconnect(); err != nil {
 		t.Fatal(err)
 	}
-	if took := time.Since(start); took < disconnectWait || took > disconnectWait+time.Second {
-		t.Fatalf("Disconnect took %v, want about %v", took, disconnectWait)
+	if took := time.Since(start); took < a.tm.disconnectWait || took > a.tm.disconnectWait+time.Second {
+		t.Fatalf("Disconnect took %v, want about %v", took, a.tm.disconnectWait)
 	}
 	if connOf(a, fakeDevice) != nil || c.isWatched() {
 		t.Fatal("connection still registered after Disconnect gave up waiting")
@@ -404,7 +402,7 @@ func TestOpenFailureClosesTheBus(t *testing.T) {
 	bz := startFakeBlueZ(t, addr, true)
 	defer bz.bus.Close()
 	before := len(busNames(t, bz.bus))
-	if _, err := Open("hci0", Options{RawAdverts: RawOn}); err == nil {
+	if _, err := Open("hci0", testOptions(Options{RawAdverts: RawOn})); err == nil {
 		t.Fatal("opened without the HCI monitor")
 	}
 	bletest.WaitFor(t, "bus connection closed", func() bool { return len(busNames(t, bz.bus)) == before })

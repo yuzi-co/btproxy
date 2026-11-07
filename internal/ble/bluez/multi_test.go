@@ -46,7 +46,7 @@ func TestRestartShared(t *testing.T) {
 	}
 	var as []*Adapter
 	for range 2 {
-		a, err := Open("hci0", Options{RestartCmd: "echo restart >> '" + marker + "'"})
+		a, err := Open("hci0", testOptions(Options{RestartCmd: "echo restart >> '" + marker + "'"}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,7 +62,7 @@ func TestRestartShared(t *testing.T) {
 	n, _ := bz.calls()
 	// Both supervisors keep striking; with a restart limit of their own, each would have run the command once.
 	bletest.WaitFor(t, "more unanswered starts", func() bool { s, _ := bz.calls(); return s >= n+4*restartAfter })
-	time.Sleep(2 * scanRetry)
+	time.Sleep(2 * testScanRetry)
 	if r := restarts(); r != 1 {
 		t.Fatalf("restart command ran %d times within restartEvery", r)
 	}

@@ -29,10 +29,7 @@ func TestUnpair(t *testing.T) {
 // TestNotifyRestart turns notifications off and on again before the first one is sent: one loop must run,
 // not two, and turning them off stops it.
 func TestNotifyRestart(t *testing.T) {
-	old := notifyEvery
-	notifyEvery = 10 * time.Millisecond
-	t.Cleanup(func() { notifyEvery = old })
-	a := &Adapter{}
+	a := &Adapter{NotifyEvery: 10 * time.Millisecond}
 	got := make(chan byte, 64)
 	c, err := a.Connect(FakeAddr, 1, ble.Events{Notification: func(_ uint16, d []byte) { got <- d[0] },
 		Disconnected: func(error) {}})
@@ -64,11 +61,11 @@ func TestNotifyRestart(t *testing.T) {
 	if err := c.Notify(HandleEcho, false); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(3 * notifyEvery) // one may have been on its way
+	time.Sleep(3 * a.NotifyEvery) // one may have been on its way
 	for len(got) > 0 {
 		<-got
 	}
-	time.Sleep(5 * notifyEvery)
+	time.Sleep(5 * a.NotifyEvery)
 	if n := len(got); n != 0 {
 		t.Fatalf("%d notifications after turning them off", n)
 	}

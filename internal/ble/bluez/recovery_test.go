@@ -46,7 +46,7 @@ func TestRecoverySteps(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { resetUSBDevice = hci.ResetUSB })
-	a, err := Open("hci0", Options{RestartCmd: "touch '" + marker + "'", WatchdogOptions: ble.WatchdogOptions{USBReset: true}})
+	a, err := Open("hci0", testOptions(Options{RestartCmd: "touch '" + marker + "'", WatchdogOptions: ble.WatchdogOptions{USBReset: true}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestRecoveryWithOnlyThePowerStep(t *testing.T) {
 	bz.mu.Lock()
 	bz.onPowerOff = func() { off <- struct{}{} }
 	bz.mu.Unlock()
-	a, err := Open("hci0", Options{})
+	a, err := Open("hci0", testOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestHungBluetoothdSkipsThePowerStep(t *testing.T) {
 	bz := startFakeBlueZ(t, addr, false)
 	defer bz.bus.Close()
 	marker := filepath.Join(t.TempDir(), "restarted")
-	a, err := Open("hci0", Options{RestartCmd: "touch '" + marker + "'"})
+	a, err := Open("hci0", testOptions(Options{RestartCmd: "touch '" + marker + "'"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestPowerCycleKeepsPassiveScanning(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, true)
 	defer bz.bus.Close()
-	a, err := Open("hci0", Options{})
+	a, err := Open("hci0", testOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,19 +152,12 @@ func TestPowerCycleKeepsPassiveScanning(t *testing.T) {
 	}
 	time.Sleep(200 * time.Millisecond)
 	bletest.WaitFor(t, "running passively", statusIs(a, ble.ScanRunning, ble.ScanPassive))
-	a.mu.Lock()
-	noMonitor := a.noMonitor
-	a.mu.Unlock()
-	if noMonitor {
+	if a.scan.ActiveOnly() {
 		t.Error("passive scanning given up")
 	}
 }
 
-func noMonitor(a *Adapter) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.noMonitor
-}
+func noMonitor(a *Adapter) bool { return a.scan.ActiveOnly() }
 
 // A monitor call that timed out still runs when bluetoothd wakes up, and its Release then comes while the scanner
 // has registered the monitors again. Seen on a real router, where it cost two thirds of the advertisements until
@@ -173,7 +166,7 @@ func TestLateReleaseOfOurOwnCallKeepsPassiveScanning(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, true)
 	defer bz.bus.Close()
-	a, err := Open("hci0", Options{})
+	a, err := Open("hci0", testOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +199,7 @@ func TestReleasedMonitorIsTriedAgain(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, true)
 	defer bz.bus.Close()
-	a, err := Open("hci0", Options{})
+	a, err := Open("hci0", testOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,12 +227,10 @@ func TestReleasedMonitorIsTriedAgain(t *testing.T) {
 
 // A monitor BlueZ keeps refusing must not make the scanner restart every minute for ever.
 func TestMonitorRetryBacksOff(t *testing.T) {
-	saved := monitorRetry
-	monitorRetry = time.Minute
-	defer func() { monitorRetry = saved }()
 	a := &Adapter{}
 	a.log = logx.Discard()
 	a.kick = make(chan struct{}, 1)
+	a.tm = timings{}.withDefaults()
 	now := time.Now()
 	for _, want := range []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute} {
 		a.monitorUp = true
@@ -268,7 +259,7 @@ func TestMissingMonitorAPIIsNotTriedAgain(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, false)
 	defer bz.bus.Close()
-	a, err := Open("hci0", Options{})
+	a, err := Open("hci0", testOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +268,7 @@ func TestMissingMonitorAPIIsNotTriedAgain(t *testing.T) {
 	defer stop()
 	bletest.WaitFor(t, "active", statusIs(a, ble.ScanRunning, ble.ScanActive))
 	starts, _ := bz.calls()
-	time.Sleep(3 * monitorRetry)
+	time.Sleep(3 * testMonitorRetry)
 	if now, _ := bz.calls(); now != starts {
 		t.Errorf("discovery restarted %d times", now-starts)
 	}
@@ -287,9 +278,10 @@ func TestMissingMonitorAPIIsNotTriedAgain(t *testing.T) {
 func TestNoRecoveryDuringAConnect(t *testing.T) {
 	a := &Adapter{}
 	a.log = logx.Discard()
+	a.pause.Kick = a.kickScan
 	called := false
 	a.resetUSB = func() error { called = true; return nil }
-	a.connecting = 1
+	end := a.pause.Begin()
 	a.step = stepUSB
 	a.strikes = restartAfter
 	a.lastStrike = time.Now()
@@ -297,7 +289,7 @@ func TestNoRecoveryDuringAConnect(t *testing.T) {
 	if called {
 		t.Error("USB reset during a connect")
 	}
-	a.connecting = 0
+	end()
 	a.strike()
 	if !called {
 		t.Error("no USB reset after the connect")
