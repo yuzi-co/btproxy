@@ -49,3 +49,31 @@ func BenchmarkAdvertsFiltered(b *testing.B) {
 		b.Fatal("advertisement not filtered")
 	}
 }
+
+// BenchmarkDecRequest measures decoding a GATT write request, the Bluetooth request with the most fields,
+// and a device request, which has the fewest.
+func BenchmarkDecRequest(b *testing.B) {
+	var w enc
+	w.uint(1, testAddr)
+	w.uint(2, 0x2a)
+	w.bool(3, true)
+	w.bytes(4, []byte{1, 2, 3, 4, 5, 6, 7, 8})
+	var d enc
+	d.uint(1, testAddr)
+	d.uint(2, reqConnectV3WithCache)
+	d.uint(4, 1)
+	for _, c := range []struct {
+		name string
+		typ  uint32
+		b    []byte
+	}{{"write", msgBTGATTWriteRequest, w.b}, {"device", msgBTDeviceRequest, d.b}} {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := decRequest(c.typ, c.b); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
