@@ -12,6 +12,7 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/bletest"
 )
 
 func TestRadioFailure(t *testing.T) {
@@ -52,7 +53,7 @@ func openForRetries(t *testing.T, retries, drops int) (*Adapter, *fakeBlueZ) {
 		t.Fatal(err)
 	}
 	bz.advertise()
-	waitFor(t, "device", func() bool { _, ok := rssiOf(a, fakeDevice); return ok })
+	bletest.WaitFor(t, "device", func() bool { _, ok := rssiOf(a, fakeDevice); return ok })
 	bz.mu.Lock()
 	bz.dropLinks = drops
 	bz.mu.Unlock()

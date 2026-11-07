@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/bletest"
 )
 
 func init() {
@@ -75,7 +76,7 @@ func openRawTest(t *testing.T, mode RawMode, monitors bool) (*Adapter, *fakeBlue
 		mu.Unlock()
 	})
 	t.Cleanup(stop)
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
 	return a, bz, func() []int8 {
 		mu.Lock()
 		defer mu.Unlock()
@@ -100,7 +101,7 @@ func TestRawUnavailable(t *testing.T) {
 		t.Error("discovery without DuplicateData")
 	}
 	bz.advertise()
-	waitFor(t, "BlueZ advertisement", func() bool { return len(got()) == 1 })
+	bletest.WaitFor(t, "BlueZ advertisement", func() bool { return len(got()) == 1 })
 
 	if _, err := Open("hci0", Options{RawAdverts: RawOn}); err == nil {
 		t.Error("RawOn opened without the monitor")
@@ -128,13 +129,13 @@ func TestRawSource(t *testing.T) {
 	}
 
 	src.fail <- errors.New("read: network is down")
-	waitFor(t, "fallback", func() bool { a.mu.Lock(); defer a.mu.Unlock(); return a.raw == nil })
-	waitFor(t, "discovery with DuplicateData", func() bool { return dupData(bz) })
+	bletest.WaitFor(t, "fallback", func() bool { a.mu.Lock(); defer a.mu.Unlock(); return a.raw == nil })
+	bletest.WaitFor(t, "discovery with DuplicateData", func() bool { return dupData(bz) })
 	if _, disc, reg := bz.state(); !disc || reg != 0 {
 		t.Errorf("after the fallback: discovering %v, %d monitors registered", disc, reg)
 	}
 	bz.advertise()
-	waitFor(t, "BlueZ advertisement", func() bool { g := got(); return len(g) == 3 && g[2] == -60 })
+	bletest.WaitFor(t, "BlueZ advertisement", func() bool { g := got(); return len(g) == 3 && g[2] == -60 })
 }
 
 // TestRawSilent: in auto mode a monitor that delivers nothing while BlueZ reports advertisements is given
@@ -151,7 +152,7 @@ func TestRawSilent(t *testing.T) {
 		t.Fatalf("given up early: %d advertisements, closed %v", len(got()), src.closed.Load())
 	}
 	bz.advertise()
-	waitFor(t, "monitor closed", src.closed.Load)
-	waitFor(t, "BlueZ advertisement", func() bool { return len(got()) >= 1 })
-	waitFor(t, "discovery with DuplicateData", func() bool { return dupData(bz) })
+	bletest.WaitFor(t, "monitor closed", src.closed.Load)
+	bletest.WaitFor(t, "BlueZ advertisement", func() bool { return len(got()) >= 1 })
+	bletest.WaitFor(t, "discovery with DuplicateData", func() bool { return dupData(bz) })
 }

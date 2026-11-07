@@ -13,6 +13,7 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/bletest"
 )
 
 func TestHandleOf(t *testing.T) {
@@ -234,7 +235,7 @@ func stallDispatch(t *testing.T, a *Adapter, bz *fakeBlueZ) (resume func()) {
 			<-gate
 		}
 	})
-	waitFor(t, "running", func() bool { return a.ScanStatus().State == ble.ScanRunning })
+	bletest.WaitFor(t, "running", func() bool { return a.ScanStatus().State == ble.ScanRunning })
 	armed.Store(true)
 	bz.advertise()
 	select {
@@ -271,7 +272,7 @@ func TestDisconnectWaitsForTheLinkDownSignal(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() { errc <- c.Disconnect() }()
-	waitFor(t, "Disconnect call", func() bool { return bz.disconnectCalls() == 1 })
+	bletest.WaitFor(t, "Disconnect call", func() bool { return bz.disconnectCalls() == 1 })
 	select {
 	case err := <-errc:
 		t.Fatalf("Disconnect returned (%v) before its Connected=false signal was handled", err)
@@ -381,5 +382,5 @@ func TestOpenFailureClosesTheBus(t *testing.T) {
 	if _, err := Open("hci0", Options{RawAdverts: RawOn}); err == nil {
 		t.Fatal("opened without the HCI monitor")
 	}
-	waitFor(t, "bus connection closed", func() bool { return len(busNames(t, bz.bus)) == before })
+	bletest.WaitFor(t, "bus connection closed", func() bool { return len(busNames(t, bz.bus)) == before })
 }

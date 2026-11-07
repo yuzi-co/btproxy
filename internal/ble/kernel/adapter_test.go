@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/bletest"
 	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
@@ -181,17 +182,6 @@ func openTest(t *testing.T, k *fakeKernel, tweak func(*Options)) *Adapter {
 	return a
 }
 
-func eventually(t *testing.T, what string, ok func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !ok() {
-		if time.Now().After(deadline) {
-			t.Fatal("never: " + what)
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 func TestOpenSetsUpController(t *testing.T) {
 	k := newFakeKernel()
 	a := openTest(t, k, nil)
@@ -238,11 +228,11 @@ func TestPassiveScanUsesMonitorOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "monitor added", func() bool { m, _ := k.state(); return m == 1 })
+	bletest.WaitFor(t, "monitor added", func() bool { m, _ := k.state(); return m == 1 })
 	if _, d := k.state(); d {
 		t.Error("discovery started for a passive scan")
 	}
-	eventually(t, "running", func() bool {
+	bletest.WaitFor(t, "running", func() bool {
 		st := a.ScanStatus()
 		return st.State == ble.ScanRunning && st.Mode == ble.ScanPassive
 	})
@@ -250,7 +240,7 @@ func TestPassiveScanUsesMonitorOnly(t *testing.T) {
 		t.Errorf("setting %q", a.ScanSetting())
 	}
 	stop()
-	eventually(t, "monitor removed", func() bool { m, _ := k.state(); return m == 0 })
+	bletest.WaitFor(t, "monitor removed", func() bool { m, _ := k.state(); return m == 0 })
 }
 
 // The monitor stays during an active scan too: it is what turns the controller's duplicate filter off.
@@ -260,7 +250,7 @@ func TestActiveScanKeepsMonitorAndRestartsDiscovery(t *testing.T) {
 	a.SetScanMode(ble.ScanActive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	eventually(t, "discovery", func() bool { m, d := k.state(); return m == 1 && d })
+	bletest.WaitFor(t, "discovery", func() bool { m, d := k.state(); return m == 1 && d })
 	if got := k.lastParam(opStartDiscovery); !bytes.Equal(got, []byte{addrTypeLEAll}) {
 		t.Errorf("discovery type % x", got)
 	}
@@ -270,9 +260,9 @@ func TestActiveScanKeepsMonitorAndRestartsDiscovery(t *testing.T) {
 	k.discovery = false
 	k.mu.Unlock()
 	k.event(evDiscovering, []byte{addrTypeLEAll, 0})
-	eventually(t, "discovery restarted", func() bool { return k.count(opStartDiscovery) > n })
+	bletest.WaitFor(t, "discovery restarted", func() bool { return k.count(opStartDiscovery) > n })
 	a.SetScanMode(ble.ScanPassive)
-	eventually(t, "discovery stopped", func() bool { m, d := k.state(); return m == 1 && !d })
+	bletest.WaitFor(t, "discovery stopped", func() bool { m, d := k.state(); return m == 1 && !d })
 }
 
 func TestActiveWithoutMonitorSupport(t *testing.T) {
@@ -282,8 +272,8 @@ func TestActiveWithoutMonitorSupport(t *testing.T) {
 	a.SetScanMode(ble.ScanPassive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	eventually(t, "discovery instead", func() bool { _, d := k.state(); return d })
-	eventually(t, "reports active", func() bool {
+	bletest.WaitFor(t, "discovery instead", func() bool { _, d := k.state(); return d })
+	bletest.WaitFor(t, "reports active", func() bool {
 		return a.ScanStatus().Mode == ble.ScanActive && a.ScanSetting() == "Active, passive unavailable"
 	})
 }
@@ -293,7 +283,7 @@ func TestAdvertsDelivered(t *testing.T) {
 	a := openTest(t, k, nil)
 	got := make(chan ble.Advert, 1)
 	stop, _ := a.Scan(func(ad ble.Advert) { got <- ad })
-	eventually(t, "monitor runs", func() bool {
+	bletest.WaitFor(t, "monitor runs", func() bool {
 		k.mu.Lock()
 		defer k.mu.Unlock()
 		return k.mon != nil && k.mon.emit.Load() != nil
@@ -326,13 +316,13 @@ func TestStatusCallback(t *testing.T) {
 		mu.Unlock()
 	})
 	stop, _ := a.Scan(func(ble.Advert) {})
-	eventually(t, "running", func() bool {
+	bletest.WaitFor(t, "running", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return slices.Contains(states, ble.ScanRunning)
 	})
 	stop()
-	eventually(t, "idle", func() bool { return a.ScanStatus().State == ble.ScanIdle })
+	bletest.WaitFor(t, "idle", func() bool { return a.ScanStatus().State == ble.ScanIdle })
 }
 
 func conFor(t *testing.T, k *fakeKernel, a *Adapter, ev ble.Events) (*fakeSocket, ble.Conn) {
@@ -365,7 +355,7 @@ func TestDisconnectedReportedOnce(t *testing.T) {
 	var n atomic.Int32
 	s, _ := conFor(t, k, a, ble.Events{Disconnected: func(error) { n.Add(1) }})
 	s.Close()
-	eventually(t, "disconnected", func() bool { return n.Load() == 1 })
+	bletest.WaitFor(t, "disconnected", func() bool { return n.Load() == 1 })
 }
 
 func TestDisconnectRequestedIsSilent(t *testing.T) {
@@ -478,7 +468,7 @@ func TestDiscoveryPausedWhileConnecting(t *testing.T) {
 	a.SetScanMode(ble.ScanActive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	eventually(t, "discovery", func() bool { _, d := k.state(); return d })
+	bletest.WaitFor(t, "discovery", func() bool { _, d := k.state(); return d })
 	s := &fakeSocket{peripheral: heartRate()}
 	t.Cleanup(func() { s.Close() })
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -493,7 +483,7 @@ func TestDiscoveryPausedWhileConnecting(t *testing.T) {
 		done <- err
 	}()
 	<-entered
-	eventually(t, "discovery stopped for the connect", func() bool { _, d := k.state(); return !d })
+	bletest.WaitFor(t, "discovery stopped for the connect", func() bool { _, d := k.state(); return !d })
 	n := k.count(opStartDiscovery)
 	time.Sleep(30 * time.Millisecond) // several supervisor ticks
 	if k.count(opStartDiscovery) != n {
@@ -503,7 +493,7 @@ func TestDiscoveryPausedWhileConnecting(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "discovery back", func() bool { _, d := k.state(); return d })
+	bletest.WaitFor(t, "discovery back", func() bool { _, d := k.state(); return d })
 }
 
 // connectSeeing connects and reports how many monitors the kernel had when the attempt reached the radio.
@@ -526,11 +516,11 @@ func TestMonitorRemovedBeforeConnecting(t *testing.T) {
 	a := openTest(t, k, func(o *Options) { o.PauseOnConnect = true })
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	eventually(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
+	bletest.WaitFor(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
 	if m := connectSeeing(t, k, a); m != 0 {
 		t.Errorf("%d monitors during the connect: the kernel would scan through the first connection events", m)
 	}
-	eventually(t, "monitor back after the connect", func() bool { m, _ := k.state(); return m == 1 })
+	bletest.WaitFor(t, "monitor back after the connect", func() bool { m, _ := k.state(); return m == 1 })
 }
 
 func TestMonitorStaysWithoutPause(t *testing.T) {
@@ -538,7 +528,7 @@ func TestMonitorStaysWithoutPause(t *testing.T) {
 	a := openTest(t, k, nil)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	eventually(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
+	bletest.WaitFor(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
 	if m := connectSeeing(t, k, a); m != 1 {
 		t.Errorf("%d monitors during the connect", m)
 	}
@@ -709,7 +699,7 @@ func TestConfirmRequestAccepted(t *testing.T) {
 	putAddr(ev, testPeer)
 	ev[6] = bdAddrLERandom
 	k.event(evUserConfirm, ev)
-	eventually(t, "confirmed", func() bool { return k.count(opUserConfirm) == 1 })
+	bletest.WaitFor(t, "confirmed", func() bool { return k.count(opUserConfirm) == 1 })
 	if got := k.lastParam(opUserConfirm); !bytes.Equal(got, ev[:7]) {
 		t.Errorf("confirm % x", got)
 	}
@@ -720,20 +710,20 @@ func TestControllerReturnIsSetUpAgain(t *testing.T) {
 	a := openTest(t, k, nil)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	eventually(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
+	bletest.WaitFor(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
 	k.event(evIndexRemoved, nil)
-	eventually(t, "failed", func() bool { return a.ScanStatus().State == ble.ScanFailed })
+	bletest.WaitFor(t, "failed", func() bool { return a.ScanStatus().State == ble.ScanFailed })
 	k.mu.Lock()
 	k.monitors = 0
 	powered := len(k.params[opSetPowered])
 	k.mu.Unlock()
 	k.event(evIndexAdded, nil)
-	eventually(t, "set up again", func() bool {
+	bletest.WaitFor(t, "set up again", func() bool {
 		k.mu.Lock()
 		defer k.mu.Unlock()
 		return len(k.params[opSetPowered]) > powered && k.monitors == 1
 	})
-	eventually(t, "running", func() bool { return a.ScanStatus().State == ble.ScanRunning })
+	bletest.WaitFor(t, "running", func() bool { return a.ScanStatus().State == ble.ScanRunning })
 }
 
 func TestStallRecoveryLadder(t *testing.T) {
@@ -747,8 +737,8 @@ func TestStallRecoveryLadder(t *testing.T) {
 	})
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	eventually(t, "monitor rebuilt first", func() bool { return k.count(opAddAdvMonitor) >= 2 })
-	eventually(t, "power cycle", func() bool {
+	bletest.WaitFor(t, "monitor rebuilt first", func() bool { return k.count(opAddAdvMonitor) >= 2 })
+	bletest.WaitFor(t, "power cycle", func() bool {
 		k.mu.Lock()
 		defer k.mu.Unlock()
 		for _, p := range k.params[opSetPowered] {
@@ -758,7 +748,7 @@ func TestStallRecoveryLadder(t *testing.T) {
 		}
 		return false
 	})
-	eventually(t, "USB reset", func() bool { return resets.Load() > 0 })
+	bletest.WaitFor(t, "USB reset", func() bool { return resets.Load() > 0 })
 	if a.Recoveries() == 0 {
 		t.Error("recoveries not counted")
 	}
@@ -795,12 +785,12 @@ func TestRecoveryWhenCommandsKeepFailing(t *testing.T) {
 	})
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	eventually(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
+	bletest.WaitFor(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
 	k.setHang(true, opAddAdvMonitor, opSetLE)
-	eventually(t, "power cycle", k.poweredOff)
-	eventually(t, "USB reset", func() bool { return resets.Load() > 0 })
+	bletest.WaitFor(t, "power cycle", k.poweredOff)
+	bletest.WaitFor(t, "USB reset", func() bool { return resets.Load() > 0 })
 	k.setHang(false, opAddAdvMonitor, opSetLE)
-	eventually(t, "running", func() bool { return a.ScanStatus().State == ble.ScanRunning })
+	bletest.WaitFor(t, "running", func() bool { return a.ScanStatus().State == ble.ScanRunning })
 }
 
 // Recovery spaces its steps out, so that a slow controller is not power-cycled every pass.
@@ -809,10 +799,10 @@ func TestRecoveryWaitsBetweenSteps(t *testing.T) {
 	a := openTest(t, k, func(o *Options) { o.StallTimeout = time.Hour })
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	eventually(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
+	bletest.WaitFor(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
 	k.setHang(true, opAddAdvMonitor, opRemoveAdvMonitor)
 	a.lastAdvert.Store(time.Now().Add(-2 * time.Hour).UnixNano())
-	eventually(t, "first step", func() bool { return k.count(opAddAdvMonitor) >= 3 })
+	bletest.WaitFor(t, "first step", func() bool { return k.count(opAddAdvMonitor) >= 3 })
 	if k.poweredOff() {
 		t.Error("power-cycled straight after the first step")
 	}
@@ -829,7 +819,7 @@ func TestRecoveryIgnoresConnectionsWhenCommandsFail(t *testing.T) {
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
 	k.setHang(true, opAddAdvMonitor, opSetLE)
-	eventually(t, "power cycle", k.poweredOff)
+	bletest.WaitFor(t, "power cycle", k.poweredOff)
 }
 
 func TestStallRestartsDiscovery(t *testing.T) {
@@ -842,7 +832,7 @@ func TestStallRestartsDiscovery(t *testing.T) {
 	a.SetScanMode(ble.ScanActive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	eventually(t, "discovery stopped and started", func() bool {
+	bletest.WaitFor(t, "discovery stopped and started", func() bool {
 		return k.count(opStopDiscovery) >= 1 && k.count(opStartDiscovery) >= 2
 	})
 }
@@ -852,7 +842,7 @@ func TestPoweredOffIsSetUpAgain(t *testing.T) {
 	a := openTest(t, k, nil)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	eventually(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
+	bletest.WaitFor(t, "monitor", func() bool { m, _ := k.state(); return m == 1 })
 	before := k.count(opSetPowered)
 	k.event(evNewSettings, []byte{settingPowered, 0, 0, 0})
 	time.Sleep(30 * time.Millisecond)
@@ -860,8 +850,8 @@ func TestPoweredOffIsSetUpAgain(t *testing.T) {
 		t.Error("set up again while powered")
 	}
 	k.event(evNewSettings, []byte{0, 0, 0, 0})
-	eventually(t, "powered on again", func() bool { return k.count(opSetPowered) > before })
-	eventually(t, "monitor again", func() bool { return k.count(opAddAdvMonitor) >= 2 })
+	bletest.WaitFor(t, "powered on again", func() bool { return k.count(opSetPowered) > before })
+	bletest.WaitFor(t, "monitor again", func() bool { return k.count(opAddAdvMonitor) >= 2 })
 }
 
 func connLoops() int {
@@ -891,7 +881,7 @@ func TestFailedConnectLeavesNoLoop(t *testing.T) {
 			t.Fatal("no error")
 		}
 	}
-	eventually(t, "loops gone", func() bool { return connLoops() <= before })
+	bletest.WaitFor(t, "loops gone", func() bool { return connLoops() <= before })
 }
 
 // droppingSocket answers once and drops the link straight after.
@@ -913,7 +903,7 @@ func TestLinkLostAfterMTUIsNotKept(t *testing.T) {
 	for range 200 {
 		a.Connect(testPeer, ble.AddrPublic, ble.Events{})
 	}
-	eventually(t, "no connection recorded", func() bool {
+	bletest.WaitFor(t, "no connection recorded", func() bool {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		return len(a.conns) == 0
@@ -929,7 +919,7 @@ func TestStallDoesNotPowerCycleConnections(t *testing.T) {
 	conFor(t, k, a, ble.Events{})
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	eventually(t, "scan rebuilt", func() bool { return k.count(opAddAdvMonitor) >= 3 })
+	bletest.WaitFor(t, "scan rebuilt", func() bool { return k.count(opAddAdvMonitor) >= 3 })
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	for _, p := range k.params[opSetPowered] {
@@ -987,7 +977,7 @@ func TestBluetoothdStartingLaterIsReported(t *testing.T) {
 		o.stackCheck = time.Millisecond
 	})
 	k.running.Store(true)
-	eventually(t, "reported", func() bool { return strings.Contains(logs.String(), "bluetoothd started") })
+	bletest.WaitFor(t, "reported", func() bool { return strings.Contains(logs.String(), "bluetoothd started") })
 	time.Sleep(20 * time.Millisecond)
 	if n := strings.Count(logs.String(), "bluetoothd started"); n != 1 {
 		t.Errorf("reported %d times:\n%s", n, logs.String())
@@ -995,5 +985,5 @@ func TestBluetoothdStartingLaterIsReported(t *testing.T) {
 	k.running.Store(false)
 	time.Sleep(20 * time.Millisecond)
 	k.running.Store(true)
-	eventually(t, "reported again", func() bool { return strings.Count(logs.String(), "bluetoothd started") == 2 })
+	bletest.WaitFor(t, "reported again", func() bool { return strings.Count(logs.String(), "bluetoothd started") == 2 })
 }

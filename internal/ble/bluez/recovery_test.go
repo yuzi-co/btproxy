@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/bletest"
 	"github.com/yuzi-co/btproxy/internal/ble/hci"
 	"github.com/yuzi-co/btproxy/internal/logx"
 )
@@ -53,13 +54,13 @@ func TestRecoverySteps(t *testing.T) {
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
 
-	waitFor(t, "every step", func() bool {
+	bletest.WaitFor(t, "every step", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(steps) >= 3
 	})
 	n, _ := bz.calls()
-	waitFor(t, "more unanswered starts", func() bool { s, _ := bz.calls(); return s >= n+4 })
+	bletest.WaitFor(t, "more unanswered starts", func() bool { s, _ := bz.calls(); return s >= n+4 })
 	mu.Lock()
 	got := strings.Join(steps, " ")
 	mu.Unlock()
@@ -95,7 +96,7 @@ func TestRecoveryWithOnlyThePowerStep(t *testing.T) {
 		t.Fatal("adapter not power-cycled")
 	}
 	bz.setWedged(false)
-	waitFor(t, "running after the power cycle", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "running after the power cycle", statusIs(a, ble.ScanRunning, ble.ScanActive))
 }
 
 // A bluetoothd that does not answer cannot power-cycle anything, so the restart comes on the same strike.
@@ -141,7 +142,7 @@ func TestPowerCycleKeepsPassiveScanning(t *testing.T) {
 	a.SetScanMode(ble.ScanPassive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
 
 	if err := a.registerMonitors(false); err != nil {
 		t.Fatalf("registering again: %v", err)
@@ -150,7 +151,7 @@ func TestPowerCycleKeepsPassiveScanning(t *testing.T) {
 		t.Fatal("not cycled")
 	}
 	time.Sleep(200 * time.Millisecond)
-	waitFor(t, "running passively", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	bletest.WaitFor(t, "running passively", statusIs(a, ble.ScanRunning, ble.ScanPassive))
 	a.mu.Lock()
 	noMonitor := a.noMonitor
 	a.mu.Unlock()
@@ -179,7 +180,7 @@ func TestLateReleaseOfOurOwnCallKeepsPassiveScanning(t *testing.T) {
 	a.SetScanMode(ble.ScanPassive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
 
 	hung := make(chan struct{})
 	bz.mu.Lock()
@@ -215,17 +216,17 @@ func TestReleasedMonitorIsTriedAgain(t *testing.T) {
 	a.SetScanMode(ble.ScanPassive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
 	if got := a.ScanSetting(); got != "Passive" {
 		t.Errorf("setting %q while passive", got)
 	}
 
 	bz.releaseMonitors()
-	waitFor(t, "active after the release", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "active after the release", statusIs(a, ble.ScanRunning, ble.ScanActive))
 	if got := a.ScanSetting(); got != "Active, passive unavailable" {
 		t.Errorf("setting %q in the fallback", got)
 	}
-	waitFor(t, "passive again", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	bletest.WaitFor(t, "passive again", statusIs(a, ble.ScanRunning, ble.ScanPassive))
 	if got := a.ScanSetting(); got != "Passive" {
 		t.Errorf("setting %q after the retry", got)
 	}
@@ -274,7 +275,7 @@ func TestMissingMonitorAPIIsNotTriedAgain(t *testing.T) {
 	a.SetScanMode(ble.ScanPassive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	waitFor(t, "active", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "active", statusIs(a, ble.ScanRunning, ble.ScanActive))
 	starts, _ := bz.calls()
 	time.Sleep(3 * monitorRetry)
 	if now, _ := bz.calls(); now != starts {

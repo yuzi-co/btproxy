@@ -17,6 +17,7 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/bletest"
 )
 
 func init() {
@@ -443,17 +444,6 @@ func startBus(t *testing.T) string {
 	return addr
 }
 
-func waitFor(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
 func statusIs(a *Adapter, state ble.ScanState, mode ble.ScanMode) func() bool {
 	return func() bool { return a.ScanStatus() == ble.ScanStatus{State: state, Mode: mode} }
 }
@@ -471,27 +461,27 @@ func TestRecovery(t *testing.T) {
 	a.SetScanMode(ble.ScanPassive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 
-	waitFor(t, "passive scan", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	bletest.WaitFor(t, "passive scan", statusIs(a, ble.ScanRunning, ble.ScanPassive))
 	if _, disc, reg := bz.state(); disc || reg != len(monitorPatterns) {
 		t.Fatalf("discovering %v, %d monitors registered", disc, reg)
 	}
 
 	a.SetScanMode(ble.ScanActive)
-	waitFor(t, "active scan", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "active scan", statusIs(a, ble.ScanRunning, ble.ScanActive))
 	if _, disc, reg := bz.state(); !disc || reg != 0 {
 		t.Fatalf("discovering %v, %d monitors registered", disc, reg)
 	}
 
 	bz.setPowered(false)
-	waitFor(t, "re-power", func() bool { on, disc, _ := bz.state(); return on && disc })
-	waitFor(t, "running after re-power", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "re-power", func() bool { on, disc, _ := bz.state(); return on && disc })
+	bletest.WaitFor(t, "running after re-power", statusIs(a, ble.ScanRunning, ble.ScanActive))
 
 	a.SetScanMode(ble.ScanPassive)
 	bz.bus.Close() // bluetoothd exits
-	waitFor(t, "failed", func() bool { return a.ScanStatus().State == ble.ScanFailed })
+	bletest.WaitFor(t, "failed", func() bool { return a.ScanStatus().State == ble.ScanFailed })
 
 	bz = startFakeBlueZ(t, addr, false) // back without --experimental
-	waitFor(t, "active fallback", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "active fallback", statusIs(a, ble.ScanRunning, ble.ScanActive))
 	if _, disc, _ := bz.state(); !disc {
 		t.Fatal("not discovering after fallback")
 	}
@@ -501,12 +491,12 @@ func TestRecovery(t *testing.T) {
 	}
 
 	bz.bus.Close()
-	waitFor(t, "failed again", func() bool { return a.ScanStatus().State == ble.ScanFailed })
+	bletest.WaitFor(t, "failed again", func() bool { return a.ScanStatus().State == ble.ScanFailed })
 	bz = startFakeBlueZ(t, addr, true) // back with --experimental: passive again
-	waitFor(t, "passive after restart", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	bletest.WaitFor(t, "passive after restart", statusIs(a, ble.ScanRunning, ble.ScanPassive))
 
 	stop()
-	waitFor(t, "idle", statusIs(a, ble.ScanIdle, ble.ScanPassive))
+	bletest.WaitFor(t, "idle", statusIs(a, ble.ScanIdle, ble.ScanPassive))
 	if _, disc, reg := bz.state(); disc || reg != 0 {
 		t.Fatalf("after stop: discovering %v, %d monitors registered", disc, reg)
 	}
@@ -535,13 +525,13 @@ func TestUnanswered(t *testing.T) {
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
 
-	waitFor(t, "failed", statusIs(a, ble.ScanFailed, ble.ScanActive))
+	bletest.WaitFor(t, "failed", statusIs(a, ble.ScanFailed, ble.ScanActive))
 	if d := time.Since(start); d > callTimeout+time.Second {
 		t.Fatalf("failed only after %v", d)
 	}
-	waitFor(t, "restart command", func() bool { return restarts() == 1 })
+	bletest.WaitFor(t, "restart command", func() bool { return restarts() == 1 })
 	n, _ := bz.calls()
-	waitFor(t, "more unanswered starts", func() bool { s, _ := bz.calls(); return s >= n+2*restartAfter })
+	bletest.WaitFor(t, "more unanswered starts", func() bool { s, _ := bz.calls(); return s >= n+2*restartAfter })
 	if r := restarts(); r != 1 {
 		t.Fatalf("restart command ran %d times within restartEvery", r)
 	}
@@ -550,7 +540,7 @@ func TestUnanswered(t *testing.T) {
 	}
 
 	bz.setWedged(false)
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
 	bz.bus.Close()
 }
 
@@ -573,7 +563,7 @@ func TestStall(t *testing.T) {
 	var got atomic.Int32
 	stop, _ := a.Scan(func(ble.Advert) { got.Add(1) })
 	defer stop()
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
 
 	for i := 0; i < 10; i++ {
 		bz.advertise()
@@ -586,8 +576,8 @@ func TestStall(t *testing.T) {
 		t.Fatalf("while advertisements flowed: %d starts, %d stops, %d failures", starts, stops, failures.Load())
 	}
 
-	waitFor(t, "discovery restarted", func() bool { s, st := bz.calls(); return s >= 2 && st >= 1 })
-	waitFor(t, "running again", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "discovery restarted", func() bool { s, st := bz.calls(); return s >= 2 && st >= 1 })
+	bletest.WaitFor(t, "running again", statusIs(a, ble.ScanRunning, ble.ScanActive))
 	if failures.Load() == 0 {
 		t.Fatal("stall not reported as a failure")
 	}
@@ -616,7 +606,7 @@ func TestCallbackOutsideLock(t *testing.T) {
 		server.Lock()
 		server.Unlock()
 	})
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
 
 	server.Lock()
 	armed.Store(true)
@@ -660,7 +650,7 @@ func TestHealthCheck(t *testing.T) {
 	a.SetScanMode(ble.ScanPassive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
 	time.Sleep(5 * pingEvery)
 	if r := restarts(); r != 0 {
 		t.Fatalf("restart command ran %d times while bluetoothd answered", r)
@@ -669,7 +659,7 @@ func TestHealthCheck(t *testing.T) {
 	bz.mu.Lock()
 	bz.hung = hung
 	bz.mu.Unlock()
-	waitFor(t, "restart command", func() bool { return restarts() == 1 })
+	bletest.WaitFor(t, "restart command", func() bool { return restarts() == 1 })
 	bz.mu.Lock()
 	bz.hung = nil
 	bz.mu.Unlock()
