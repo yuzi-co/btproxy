@@ -118,10 +118,6 @@ func equal(a, b string) bool {
 
 const cookieName = "btproxy_session"
 
-func text(status int, msg string) *Response {
-	return &Response{Status: status, Type: "text/plain; charset=utf-8", Body: []byte(msg + "\n")}
-}
-
 func (s *Server) handle(r *Request) *Response {
 	if s.opt.Password == "" && !loopbackHost(r.Header["host"]) {
 		// Without a password the page relies on being reachable from this machine only; a foreign Host
@@ -170,8 +166,7 @@ func (s *Server) authorize(r *Request) *Response {
 			s.opt.Log.Warn("ui: wrong password", "user", user)
 			time.Sleep(time.Second) // slows down guessing; the connection limit caps parallel guesses
 		}
-		return &Response{Status: 401, Type: "text/plain; charset=utf-8", Body: []byte("password required\n"),
-			Headers: []string{`WWW-Authenticate: Basic realm="btproxy", charset="UTF-8"`}}
+		return text(401, "password required", `WWW-Authenticate: Basic realm="btproxy", charset="UTF-8"`)
 	case s.opt.Token != "":
 		if equal(cookie(r.Header["cookie"], cookieName), s.opt.Token) {
 			return nil
@@ -279,7 +274,7 @@ func (s *Server) save(r *Request) *Response {
 			time.Sleep(500 * time.Millisecond) // lets this response go out first
 			s.app.Restart()
 		}()
-		return &Response{Status: 200, Type: "text/html; charset=utf-8", Body: []byte(restartPage)}
+		return html(200, restartPage)
 	}
 	return &Response{Status: 303, Headers: []string{"Location: /"}}
 }
