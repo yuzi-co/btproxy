@@ -16,6 +16,7 @@ const (
 	typeSRV   = 33
 	typeANY   = 255
 	classIN   = 1
+	classANY  = 255    // the same value as typeANY, a different namespace (RFC 1035 sections 3.2.3 and 3.2.5)
 	topBit    = 0x8000 // cache-flush in an answer's class, unicast-response (QU) in a question's
 	ttlHost   = 120    // A and SRV, as ESPHome and RFC 6762 use
 	ttlOther  = 4500   // PTR and TXT
@@ -37,7 +38,7 @@ const (
 var errMalformed = errors.New("malformed packet")
 
 type question struct {
-	name    string // lower case, ending in a dot (see readName)
+	name    string // canonical (see record), from readName
 	wire    []byte // the name as the querier sent it, uncompressed, for the echo in a legacy response
 	qtype   uint16
 	qclass  uint16 // without the QU bit
@@ -176,8 +177,8 @@ func readLabels(b []byte, off int) ([]byte, int, error) {
 	}
 }
 
-// dotted turns an uncompressed wire name into the lower-cased dotted form the records use, with a dot inside a
-// label escaped.
+// dotted turns an uncompressed wire name into the canonical form the records use (see record): lower-cased,
+// dotted, with a dot inside a label escaped.
 func dotted(wire []byte) string {
 	var sb strings.Builder
 	for off := 0; off < len(wire) && wire[off] != 0; off += 1 + int(wire[off]) {
@@ -219,6 +220,10 @@ func appendName(b []byte, name string) []byte {
 	return append(b, 0)
 }
 
+// record is a resource record. Its name, and the name in PTR and SRV data, are canonical: ASCII lower case,
+// dotted labels ending in a dot, with a dot inside a label escaped. Names are put in that form once, where they
+// enter: readName and readData for the wire, newService for the configuration. Nothing lower-cases a name
+// after that, so records from the wire and ours compare as plain strings.
 type record struct {
 	name  string
 	rtype uint16
@@ -227,31 +232,24 @@ type record struct {
 	data  []byte
 }
 
+// key is the record's identity: name, type and data. The known-answer check and the maps of answered and sent
+// records all go by it, so that a record cannot match under one and not the others.
 func (r record) key() string { return r.name + "/" + string(rune(r.rtype)) + "/" + string(r.data) }
-
-// rdataKey returns r's data for comparison, with the name in PTR and SRV data lower-cased.
-func (r record) rdataKey() string {
-	switch {
-	case r.rtype == typePTR:
-		return lower(string(r.data))
-	case r.rtype == typeSRV && len(r.data) >= 6:
-		return string(r.data[:6]) + lower(string(r.data[6:]))
-	}
-	return string(r.data)
-}
 
 // knows reports whether the querier lists r among its known answers with a TTL of at least half of r's, in
 // which case r must not be sent again (RFC 6762 section 7.1).
 func (q query) knows(r record) bool {
+	key := r.key()
 	for _, k := range q.known {
-		if k.rtype == r.rtype && k.ttl >= r.ttl/2 && k.name == lower(r.name) && k.rdataKey() == r.rdataKey() {
+		if k.ttl >= r.ttl/2 && k.key() == key {
 			return true
 		}
 	}
 	return false
 }
 
-// service is what the responder advertises: one ESPHome API instance on one host.
+// service is what the responder advertises: one ESPHome API instance on one host. Its names are canonical (see
+// record).
 type service struct {
 	instance string // "<name>._esphomelib._tcp.local."
 	host     string // "<name>.local."
@@ -259,7 +257,10 @@ type service struct {
 	txt      []string
 }
 
+// newService lower-cases name, which Config.Name documents as a Label already, so that the records hold to
+// the invariant whatever the caller passed.
 func newService(name string, port int, txt []string) service {
+	name = lower(name)
 	return service{instance: name + "." + serviceType, host: name + ".local.", port: uint16(port), txt: txt}
 }
 
@@ -321,7 +322,7 @@ func (s service) answer(q query, ips []net.IP) (answers, extra []record, unicast
 	unicast = len(q.questions) > 0
 	for _, qs := range q.questions {
 		unicast = unicast && qs.unicast
-		if qs.qclass != classIN && qs.qclass != typeANY {
+		if qs.qclass != classIN && qs.qclass != classANY {
 			continue
 		}
 		is := func(t uint16) bool { return qs.qtype == t || qs.qtype == typeANY }
@@ -334,14 +335,14 @@ func (s service) answer(q query, ips []net.IP) (answers, extra []record, unicast
 			if is(typePTR) {
 				add(&answers, s.ptr())
 			}
-		case lower(s.instance):
+		case s.instance:
 			if is(typeSRV) {
 				add(&answers, s.srv())
 			}
 			if is(typeTXT) {
 				add(&answers, s.txtRecord())
 			}
-		case lower(s.host):
+		case s.host:
 			if is(typeA) {
 				add(&answers, s.addrs(ips)...)
 			}
