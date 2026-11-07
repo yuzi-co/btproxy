@@ -180,6 +180,7 @@ func TestQuestions(t *testing.T) {
 		{"A", []question{{name: "btproxy-bedroom.local.", qtype: typeA, qclass: classIN}}, []uint16{typeA}, nil, false},
 		{"ANY instance", []question{{name: "btproxy-bedroom._esphomelib._tcp.local.", qtype: typeANY, qclass: classIN}},
 			[]uint16{typeSRV, typeTXT}, []uint16{typeA}, false},
+		{"ANY class", []question{{name: "btproxy-bedroom.local.", qtype: typeA, qclass: classANY}}, []uint16{typeA}, nil, false},
 		{"AAAA", []question{{name: "btproxy-bedroom.local.", qtype: 28, qclass: classIN}}, nil, nil, false},
 		{"other host", []question{{name: "other.local.", qtype: typeA, qclass: classIN}}, nil, nil, false},
 		{"other service", []question{{name: "_http._tcp.local.", qtype: typePTR, qclass: classIN}}, nil, nil, false},

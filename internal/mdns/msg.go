@@ -16,6 +16,7 @@ const (
 	typeSRV   = 33
 	typeANY   = 255
 	classIN   = 1
+	classANY  = 255    // the same value as typeANY, a different namespace (RFC 1035 sections 3.2.3 and 3.2.5)
 	topBit    = 0x8000 // cache-flush in an answer's class, unicast-response (QU) in a question's
 	ttlHost   = 120    // A and SRV, as ESPHome and RFC 6762 use
 	ttlOther  = 4500   // PTR and TXT
@@ -321,7 +322,7 @@ func (s service) answer(q query, ips []net.IP) (answers, extra []record, unicast
 	unicast = len(q.questions) > 0
 	for _, qs := range q.questions {
 		unicast = unicast && qs.unicast
-		if qs.qclass != classIN && qs.qclass != typeANY {
+		if qs.qclass != classIN && qs.qclass != classANY {
 			continue
 		}
 		is := func(t uint16) bool { return qs.qtype == t || qs.qtype == typeANY }
