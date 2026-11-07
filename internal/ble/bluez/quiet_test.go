@@ -25,7 +25,7 @@ func TestQuietPassive(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, true)
 	t.Cleanup(func() { bz.bus.Close() })
-	a, err := Open("hci0", Options{RawAdverts: RawOn})
+	a, err := Open("hci0", testOptions(Options{RawAdverts: RawOn}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestQuietOffload(t *testing.T) {
 	bz := startFakeBlueZ(t, addr, true)
 	bz.offload = true
 	t.Cleanup(func() { bz.bus.Close() })
-	a, err := Open("hci0", Options{RawAdverts: RawOn})
+	a, err := Open("hci0", testOptions(Options{RawAdverts: RawOn}))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -63,7 +63,7 @@ func openRawTest(t *testing.T, mode RawMode, monitors bool) (*Adapter, *fakeBlue
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, monitors)
 	t.Cleanup(func() { bz.bus.Close() })
-	a, err := Open("hci0", Options{RawAdverts: mode})
+	a, err := Open("hci0", testOptions(Options{RawAdverts: mode}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestRawUnavailable(t *testing.T) {
 	bz.advertise()
 	bletest.WaitFor(t, "BlueZ advertisement", func() bool { return len(got()) == 1 })
 
-	if _, err := Open("hci0", Options{RawAdverts: RawOn}); err == nil {
+	if _, err := Open("hci0", testOptions(Options{RawAdverts: RawOn})); err == nil {
 		t.Error("RawOn opened without the monitor")
 	}
 }

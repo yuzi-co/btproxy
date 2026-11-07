@@ -119,9 +119,8 @@ func (monitorProps) Set(string, string, dbus.Variant) *dbus.Error {
 	return dbus.NewError("org.freedesktop.DBus.Error.PropertyReadOnly", []any{"read-only"})
 }
 
-var (
-	monitorRetry    = time.Minute      // the first wait before trying monitors BlueZ dropped again
-	monitorRetryMax = 30 * time.Minute // the longest; twice this without a drop starts over
+const (
+	monitorRetryMax = 30 * time.Minute // the longest wait before trying dropped monitors again; twice this without a drop starts over
 	ownRelease      = 2 * time.Second  // how long Release calls can trail our UnregisterMonitor's reply
 	lateOwnRelease  = time.Minute      // the same when the call timed out, and runs when bluetoothd gets to it
 )
@@ -207,7 +206,7 @@ func (a *Adapter) unregisterMonitors() {
 // or much later when the call timed out, since a slow bluetoothd still runs it when it gets to it. They must not
 // read as BlueZ dropping the monitors.
 func (a *Adapter) callUnregister() {
-	a.expectRelease(callTimeout + ownRelease)
+	a.expectRelease(a.tm.callTimeout + ownRelease)
 	if isTimeout(a.call(a.path, ifMonitorManager+".UnregisterMonitor", monitorRoot).Err) {
 		a.expectRelease(lateOwnRelease)
 	} else {
@@ -230,9 +229,9 @@ func (a *Adapter) monitorReleased() {
 	var wait time.Duration
 	if up {
 		a.monitorUp = false
-		a.noMonitor = true
+		a.scan.SetActiveOnly(true)
 		a.epoch++
-		wait = monitorRetry
+		wait = a.tm.monitorRetry
 		if now.Sub(a.lastRelease) < 2*monitorRetryMax {
 			wait = min(2*a.releaseWait, monitorRetryMax)
 		}
@@ -248,9 +247,9 @@ func (a *Adapter) monitorReleased() {
 // retryMonitors ends the fallback of monitorReleased when its time is up. The new epoch makes reconcile arm again.
 func (a *Adapter) retryMonitors() {
 	a.mu.Lock()
-	due := a.noMonitor && !a.retryMonitorAt.IsZero() && !time.Now().Before(a.retryMonitorAt)
+	due := a.scan.ActiveOnly() && !a.retryMonitorAt.IsZero() && !time.Now().Before(a.retryMonitorAt)
 	if due {
-		a.noMonitor = false
+		a.scan.SetActiveOnly(false)
 		a.retryMonitorAt = time.Time{}
 		a.epoch++
 	}

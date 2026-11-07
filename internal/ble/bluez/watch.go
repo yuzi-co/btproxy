@@ -17,19 +17,12 @@ import (
 	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
-// Timings, variables so the tests can shorten them. scanRetry is how often the supervisor retries when the
-// adapter cannot scan (powered off, scan start refused or unanswered) and checks for a stalled scan; recovery
-// from a bluetoothd restart or an adapter coming back is driven by signals instead.
-var (
-	scanRetry      = 10 * time.Second
+const (
 	restartEvery   = 10 * time.Minute // at most one bluetoothd restart this often
 	restartTimeout = 30 * time.Second
 	// manualRestartEvery is how soon after any restart someone may ask for another. Shorter than restartEvery:
 	// a person who asks has looked, and may have just seen the last restart fail to help.
 	manualRestartEvery = time.Minute
-	// pingEvery is how often the supervisor checks that bluetoothd still answers. Advertisements are no proof
-	// once they come from the HCI monitor, which keeps reading the controller while bluetoothd hangs.
-	pingEvery = time.Minute
 )
 
 // restartAfter is how many stalls or unanswered calls in a row make the supervisor start on the recovery steps.
@@ -44,18 +37,20 @@ const (
 
 // scanState is the scanner part of Adapter. One goroutine, supervise, makes every scan-related D-Bus call,
 // so mode switches, recovery and scan start and stop never race. Fields are guarded by Adapter.mu except
-// those marked as the supervisor's.
+// those marked as the supervisor's, and scan and pause, which have locks of their own.
 type scanState struct {
-	log      *logx.Logger
-	kick     chan struct{}
-	mode     ble.ScanMode // requested
-	status   ble.ScanStatus
-	statusFn func(ble.ScanStatus)
+	log  *logx.Logger
+	kick chan struct{}
+	// scan is the mode and status reported. ActiveOnly while the monitor API is missing or failed: scan
+	// actively until bluetoothd restarts, or retryMonitorAt.
+	scan ble.ScanCell
+	// pause counts the connects in progress, which hold off recovery (see strike) and, with PauseOnConnect,
+	// pause scanning (see reconcile).
+	pause ble.ScanPause
 
 	gone      bool         // bluetoothd or the adapter is not on the bus
 	off       bool         // the adapter is powered off
 	epoch     int          // bumped whenever BlueZ may have dropped our discovery session or monitor
-	noMonitor bool         // the monitor API is missing or failed: scan actively until bluetoothd restarts, or retryMonitorAt
 	monitorUp bool         // the monitor is (being) registered; a Release then means BlueZ dropped it
 	agentLog  *logx.Logger // set once RegisterAgent was called
 
@@ -65,14 +60,10 @@ type scanState struct {
 	ownReleaseUntil time.Time     // until when a Release comes from our own UnregisterMonitor
 	adverts         int           // advertisements delivered, for the stall watchdog
 
-	connecting   int             // connects in progress, which hold off recovery (see strike) and pause scanning (see pause.go)
-	pauseWaiters []chan struct{} // connects waiting for the supervisor to stop scanning
-
 	// Set by Open.
-	stallTimeout   time.Duration
-	restartCmd     string
-	resetUSB       func() error // nil turns the USB step off
-	pauseOnConnect bool
+	stallTimeout time.Duration
+	restartCmd   string
+	resetUSB     func() error // nil turns the USB step off
 
 	// The supervisor's own.
 	armed          bool
@@ -128,7 +119,7 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 	a.mu.Lock()
 	a.scanFn = fn
 	a.mu.Unlock()
-	a.setStatus(ble.ScanStarting, a.effectiveMode())
+	a.scan.SetState(ble.ScanStarting)
 	a.kickScan()
 	var once sync.Once
 	return func() {
@@ -142,51 +133,21 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 }
 
 func (a *Adapter) SetScanMode(m ble.ScanMode) {
-	a.mu.Lock()
-	a.mode = m
-	a.mu.Unlock()
+	a.scan.SetMode(m)
 	a.kickScan()
 }
 
-func (a *Adapter) ScanStatus() ble.ScanStatus {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.status
-}
+func (a *Adapter) ScanStatus() ble.ScanStatus { return a.scan.Status() }
 
-func (a *Adapter) OnScanStatus(fn func(ble.ScanStatus)) {
-	a.mu.Lock()
-	a.statusFn = fn
-	a.mu.Unlock()
-}
+func (a *Adapter) OnScanStatus(fn func(ble.ScanStatus)) { a.scan.OnStatus(fn) }
 
-// effectiveMode is the requested mode unless passive scanning is known not to work.
-func (a *Adapter) effectiveMode() ble.ScanMode {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.noMonitor {
-		return ble.ScanActive
-	}
-	return a.mode
-}
-
+// setStatus reports the state with the mode the scan runs in, which after arm is the armed one.
 func (a *Adapter) setStatus(state ble.ScanState, mode ble.ScanMode) {
-	st := ble.ScanStatus{State: state, Mode: mode}
-	a.mu.Lock()
-	changed := a.status != st
-	a.status = st
-	fn := a.statusFn
-	a.mu.Unlock()
-	if changed {
-		a.log.Debug("scanner status", "state", state, "mode", mode)
-		if fn != nil {
-			fn(st)
-		}
-	}
+	a.scan.Set(ble.ScanStatus{State: state, Mode: mode})
 }
 
 func (a *Adapter) supervise() {
-	t := time.NewTicker(scanRetry)
+	t := time.NewTicker(a.tm.scanRetry)
 	defer t.Stop()
 	for {
 		select {
@@ -205,14 +166,14 @@ func (a *Adapter) reconcile() {
 	if err := a.syncMatches(); err != nil {
 		a.log.Warn("scanner", "op", "D-Bus match rule", "err", err)
 	}
-	paused, waiters := a.takePause()
-	defer release(waiters) // once scanning is stopped, or cannot be
+	paused, release := a.pause.Take()
+	defer release() // once scanning is stopped, or cannot be
 	a.retryMonitors()
 	a.mu.Lock()
 	want := a.scanFn != nil
 	gone, off, epoch, adverts, raw := a.gone, a.off, a.epoch, a.adverts, a.rawProven()
 	a.mu.Unlock()
-	mode := a.effectiveMode()
+	mode := a.scan.Effective()
 	idle := func(fail ble.ScanState) {
 		if want {
 			a.setStatus(fail, mode)
@@ -236,7 +197,7 @@ func (a *Adapter) reconcile() {
 		idle(ble.ScanFailed)
 		return
 	}
-	if time.Since(a.lastPing) >= pingEvery {
+	if time.Since(a.lastPing) >= a.tm.pingEvery {
 		a.lastPing = time.Now()
 		// An answer here does not clear earlier strikes: a hung bluetoothd has been seen to leave some calls
 		// unanswered while others still work.
@@ -263,8 +224,11 @@ func (a *Adapter) reconcile() {
 		a.mu.Unlock()
 	}
 	if paused {
-		// Reported as idle, as an ESP32 does while it connects. The stall watchdog does not run on a
-		// disarmed scan.
+		// The kernel stops scanning to send LE Create Connection, but once the link is up it scans again at
+		// once if anything asks for it: a registered advertisement monitor (ours, the one that matches nothing
+		// included) or a discovery session. So while a connect is in progress discovery stops and the monitors
+		// go, and they come back once no connect is in progress (see ble.ScanPause). Reported as idle, as an
+		// ESP32 does while it connects. The stall watchdog does not run on a disarmed scan.
 		if a.armed {
 			start := time.Now()
 			a.disarm()
@@ -336,10 +300,7 @@ func (a *Adapter) strike() {
 	if a.strikes < restartAfter {
 		return
 	}
-	a.mu.Lock()
-	connecting := a.connecting > 0
-	a.mu.Unlock()
-	if !connecting {
+	if !a.pause.Connecting() {
 		a.takeStep()
 	}
 }
@@ -487,16 +448,14 @@ func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 			return err // bluetoothd is gone or stuck, which says nothing about the monitor API
 		}
 		a.log.Warn("passive scanning unavailable (bluetoothd needs --experimental), scanning actively", "err", err)
-		a.mu.Lock()
-		a.noMonitor = true
-		a.mu.Unlock()
+		a.scan.SetActiveOnly(true)
 	}
 	// Repeated advertisements matter only when they are rebuilt from Device1 properties; with the HCI monitor,
 	// leaving them out spares bluetoothd and the bus a signal per advertisement.
 	a.mu.Lock()
-	raw, noMonitor := a.raw != nil, a.noMonitor
+	raw := a.raw != nil
 	a.mu.Unlock()
-	if raw && !noMonitor {
+	if raw && !a.scan.ActiveOnly() {
 		if err := a.dupFilterOff(quiet); err != nil {
 			return err
 		}
@@ -528,17 +487,7 @@ func (a *Adapter) arm(mode ble.ScanMode, epoch int) error {
 
 // ScanSetting implements ble.ScanSettinger. The fallback gets its own wording because active scanning without
 // monitors is the one that costs advertisements: the controller then filters duplicates (see dupFilterOff).
-func (a *Adapter) ScanSetting() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	switch {
-	case a.noMonitor:
-		return "Active, passive unavailable"
-	case a.mode == ble.ScanActive:
-		return "Active"
-	}
-	return "Passive"
-}
+func (a *Adapter) ScanSetting() string { return a.scan.Setting() }
 
 // quietRSSI is the discovery RSSI threshold that keeps every device from bluetoothd: BlueZ accepts at most
 // 20 dBm, which no advertisement reaches.
@@ -586,9 +535,7 @@ func (a *Adapter) dupFilterOff(quiet bool) error {
 		return err
 	}
 	a.log.Info("advertisement monitors unavailable, the controller filters duplicate advertisements", "err", err)
-	a.mu.Lock()
-	a.noMonitor = true
-	a.mu.Unlock()
+	a.scan.SetActiveOnly(true)
 	return nil
 }
 
@@ -659,8 +606,8 @@ func (a *Adapter) watch(s *dbus.Signal) {
 			a.lost("bluetoothd stopped", true)
 		} else {
 			a.log.Info("bluetoothd started")
+			a.scan.SetActiveOnly(false) // it may have been restarted with --experimental
 			a.mu.Lock()
-			a.noMonitor = false // it may have been restarted with --experimental
 			a.retryMonitorAt = time.Time{}
 			agentLog := a.agentLog
 			a.mu.Unlock()

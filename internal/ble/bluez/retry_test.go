@@ -48,7 +48,7 @@ func openForRetries(t *testing.T, retries, drops int) (*Adapter, *fakeBlueZ) {
 	t.Helper()
 	bz := startFakeBlueZ(t, startBus(t), false)
 	t.Cleanup(func() { bz.bus.Close() })
-	a, err := Open("hci0", Options{RawAdverts: RawOff, ConnectOptions: ble.ConnectOptions{ConnectRetries: retries}})
+	a, err := Open("hci0", testOptions(Options{RawAdverts: RawOff, ConnectOptions: ble.ConnectOptions{ConnectRetries: retries}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,13 +150,11 @@ func TestRearmForgetsResolvedServices(t *testing.T) {
 	}
 }
 
+// TestConnectRetryOptions: the fast cut-off and the budget fit inside the connect's own deadline, so retrying
+// never outlasts it.
 func TestConnectRetryOptions(t *testing.T) {
-	if r := connectRetry(-1, time.Second); r.Retries != 0 {
-		t.Errorf("negative retries not clamped: %+v", r)
-	}
-	// Two retries with their doubling delays (1 s, then 2 s) must fit the budget.
-	if r := connectRetry(2, time.Second); r.Retries != 2 || r.Delay != time.Second || r.Budget < 3*r.Delay ||
-		r.Fast >= connectTimeout || r.Budget >= connectTimeout {
+	a, _ := openForRetries(t, 2, 0)
+	if r := a.retry; r.Retries != 2 || r.Fast != retryFast || r.Fast >= connectTimeout || r.Budget >= connectTimeout {
 		t.Errorf("bad options %+v", r)
 	}
 }

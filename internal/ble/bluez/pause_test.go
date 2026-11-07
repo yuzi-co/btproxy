@@ -9,7 +9,6 @@ import (
 
 	"github.com/yuzi-co/btproxy/internal/ble"
 	"github.com/yuzi-co/btproxy/internal/ble/bletest"
-	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
 // openPauseTest opens an adapter that pauses scanning for connects, against a fake bluetoothd with the
@@ -23,7 +22,7 @@ func openPauseTest(t *testing.T, mode ble.ScanMode, opt Options) (*Adapter, *fak
 	if opt.RawAdverts == RawAuto {
 		opt.RawAdverts = RawOff
 	}
-	a, err := Open("hci0", opt)
+	a, err := Open("hci0", testOptions(opt))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +91,7 @@ func TestPausePassive(t *testing.T) {
 	if !scanOff(bz) || a.ScanStatus() != (ble.ScanStatus{State: ble.ScanIdle, Mode: ble.ScanPassive}) {
 		t.Fatalf("while connecting: scanning %v, status %+v", !scanOff(bz), a.ScanStatus())
 	}
-	time.Sleep(4 * scanRetry) // the supervisor's ticks must not arm the scan again
+	time.Sleep(4 * testScanRetry) // the supervisor's ticks must not arm the scan again
 	if !scanOff(bz) {
 		t.Fatal("scanning again while the connect is in progress")
 	}
@@ -154,10 +153,7 @@ func TestPauseFailure(t *testing.T) {
 
 // TestPauseLimit: a connect that hangs holds scanning off for pauseLimit only.
 func TestPauseLimit(t *testing.T) {
-	old := pauseLimit
-	pauseLimit = 300 * time.Millisecond
-	t.Cleanup(func() { pauseLimit = old })
-	a, bz, _ := openPauseTest(t, ble.ScanPassive, Options{})
+	a, bz, _ := openPauseTest(t, ble.ScanPassive, Options{timings: timings{pauseLimit: 300 * time.Millisecond}})
 	hold := holdConnects(bz)
 	errc := connectAsync(a, 0xC1C2C3C4C5C6)
 	waitConnects(t, bz, 1)
@@ -171,7 +167,7 @@ func TestPauseLimit(t *testing.T) {
 	if err := <-errc; err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(4 * scanRetry) // the connect returning must not upset the count
+	time.Sleep(4 * testScanRetry) // the connect returning must not upset the count
 	if !passiveUp(a, bz)() {
 		t.Fatal("not scanning after the connect")
 	}
@@ -221,7 +217,7 @@ func TestPauseOverlap(t *testing.T) {
 		}
 		rest = errA
 	}
-	time.Sleep(4 * scanRetry)
+	time.Sleep(4 * testScanRetry)
 	if !scanOff(bz) {
 		t.Fatal("scanning again while the other connect is in progress")
 	}
@@ -242,7 +238,7 @@ func TestPauseQuiet(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, true)
 	t.Cleanup(func() { bz.bus.Close() })
-	a, err := Open("hci0", Options{RawAdverts: RawOn, ConnectOptions: ble.ConnectOptions{PauseOnConnect: true}})
+	a, err := Open("hci0", testOptions(Options{RawAdverts: RawOn, ConnectOptions: ble.ConnectOptions{PauseOnConnect: true}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +270,7 @@ func TestPauseOff(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, true)
 	t.Cleanup(func() { bz.bus.Close() })
-	a, err := Open("hci0", Options{RawAdverts: RawOff})
+	a, err := Open("hci0", testOptions(Options{RawAdverts: RawOff}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,8 +281,8 @@ func TestPauseOff(t *testing.T) {
 	hold := holdConnects(bz)
 	errc := connectAsync(a, 0xC1C2C3C4C5C6)
 	bletest.WaitFor(t, "connect started", func() bool { return len(scanningAt(bz)) == 1 })
-	if n := connecting(a); n != 1 {
-		t.Fatalf("connecting = %d during a connect, want 1", n)
+	if !a.pause.Connecting() {
+		t.Fatal("connect not counted while in progress")
 	}
 	hold <- struct{}{}
 	if err := <-errc; err != nil {
@@ -295,32 +291,7 @@ func TestPauseOff(t *testing.T) {
 	if s := scanningAt(bz); len(s) != 1 || !s[0] {
 		t.Fatalf("scanning at connect: %v, want [true]", s)
 	}
-	if n := connecting(a); n != 0 {
-		t.Fatalf("connecting = %d after the connect, want 0", n)
-	}
-}
-
-func connecting(a *Adapter) int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.connecting
-}
-
-// TestConnectCountedWithoutPause: pauseScan counts the connect whether or not it pauses scanning, and tells
-// the supervisor to pause only when asked to.
-func TestConnectCountedWithoutPause(t *testing.T) {
-	a := &Adapter{}
-	a.log = logx.Discard()
-	resume := a.pauseScan()
-	if n := connecting(a); n != 1 {
-		t.Fatalf("connecting = %d during a connect, want 1", n)
-	}
-	if paused, _ := a.takePause(); paused {
-		t.Fatal("scanning paused without PauseOnConnect")
-	}
-	resume()
-	resume() // may be called more than once
-	if n := connecting(a); n != 0 {
-		t.Fatalf("connecting = %d after the connect, want 0", n)
+	if a.pause.Connecting() {
+		t.Fatal("connect still counted after it returned")
 	}
 }

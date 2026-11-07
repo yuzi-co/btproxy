@@ -4,6 +4,7 @@ package bluez
 
 import (
 	"bufio"
+	"cmp"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,12 +21,21 @@ import (
 	"github.com/yuzi-co/btproxy/internal/ble/bletest"
 )
 
-func init() {
-	// Before any adapter exists: the supervisors of earlier tests keep running and read these.
-	scanRetry = 50 * time.Millisecond
-	callTimeout = 300 * time.Millisecond
-	pingEvery = 100 * time.Millisecond
-	monitorRetry = 400 * time.Millisecond
+// The waits the tests shorten, through testOptions.
+const (
+	testScanRetry    = 50 * time.Millisecond
+	testCallTimeout  = 300 * time.Millisecond
+	testPingEvery    = 100 * time.Millisecond
+	testMonitorRetry = 400 * time.Millisecond
+)
+
+// testOptions fills in the test timings opt does not set.
+func testOptions(opt Options) Options {
+	opt.scanRetry = cmp.Or(opt.scanRetry, testScanRetry)
+	opt.callTimeout = cmp.Or(opt.callTimeout, testCallTimeout)
+	opt.pingEvery = cmp.Or(opt.pingEvery, testPingEvery)
+	opt.monitorRetry = cmp.Or(opt.monitorRetry, testMonitorRetry)
+	return opt
 }
 
 // fakeBlueZ is a minimal org.bluez on a private bus: one adapter, discovery and, if monitors is set, the
@@ -469,7 +479,7 @@ func statusIs(a *Adapter, state ble.ScanState, mode ble.ScanMode) func() bool {
 func TestRecovery(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, true)
-	a, err := Open("hci0", Options{})
+	a, err := Open("hci0", testOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,7 +510,7 @@ func TestRecovery(t *testing.T) {
 	if _, disc, _ := bz.state(); !disc {
 		t.Fatal("not discovering after fallback")
 	}
-	time.Sleep(5 * scanRetry) // the bluetoothd start and the adapter's appearance must not both restart it
+	time.Sleep(5 * testScanRetry) // the bluetoothd start and the adapter's appearance must not both restart it
 	if starts, stops := bz.calls(); starts != 1 || stops != 0 {
 		t.Fatalf("after bluetoothd came back: %d StartDiscovery, %d StopDiscovery calls", starts, stops)
 	}
@@ -531,7 +541,7 @@ func TestUnanswered(t *testing.T) {
 		b, _ := os.ReadFile(marker)
 		return strings.Count(string(b), "\n")
 	}
-	a, err := Open("hci0", Options{RestartCmd: "echo restart >> '" + marker + "'"})
+	a, err := Open("hci0", testOptions(Options{RestartCmd: "echo restart >> '" + marker + "'"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +551,7 @@ func TestUnanswered(t *testing.T) {
 	defer stop()
 
 	bletest.WaitFor(t, "failed", statusIs(a, ble.ScanFailed, ble.ScanActive))
-	if d := time.Since(start); d > callTimeout+time.Second {
+	if d := time.Since(start); d > testCallTimeout+time.Second {
 		t.Fatalf("failed only after %v", d)
 	}
 	bletest.WaitFor(t, "restart command", func() bool { return restarts() == 1 })
@@ -564,7 +574,7 @@ func TestUnanswered(t *testing.T) {
 func TestStall(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, false)
-	a, err := Open("hci0", Options{WatchdogOptions: ble.WatchdogOptions{StallTimeout: 400 * time.Millisecond}})
+	a, err := Open("hci0", testOptions(Options{WatchdogOptions: ble.WatchdogOptions{StallTimeout: 400 * time.Millisecond}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +615,7 @@ func TestCallbackOutsideLock(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, false)
 	defer bz.bus.Close()
-	a, err := Open("hci0", Options{RawAdverts: RawOff})
+	a, err := Open("hci0", testOptions(Options{RawAdverts: RawOff}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +668,7 @@ func TestHealthCheck(t *testing.T) {
 		b, _ := os.ReadFile(marker)
 		return strings.Count(string(b), "\n")
 	}
-	a, err := Open("hci0", Options{RestartCmd: "echo restart >> '" + marker + "'"})
+	a, err := Open("hci0", testOptions(Options{RestartCmd: "echo restart >> '" + marker + "'"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +676,7 @@ func TestHealthCheck(t *testing.T) {
 	stop, _ := a.Scan(func(ble.Advert) {})
 	defer stop()
 	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
-	time.Sleep(5 * pingEvery)
+	time.Sleep(5 * testPingEvery)
 	if r := restarts(); r != 0 {
 		t.Fatalf("restart command ran %d times while bluetoothd answered", r)
 	}
