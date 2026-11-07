@@ -34,6 +34,8 @@ var (
 type Options struct {
 	// ConnectRetries is how often a connect that failed at once on the radio is retried (see retry_windows.go).
 	ConnectRetries int
+	// ConnectRetryDelay is the wait before the first retry; each later one waits twice the previous. 0 retries at once.
+	ConnectRetryDelay time.Duration
 	// PauseOnConnect stops scanning while a connect is in progress (see pause_windows.go).
 	PauseOnConnect bool
 	// Log receives the adapter's log lines; nil discards them.
@@ -101,8 +103,8 @@ func Open(opt Options) (*Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &Adapter{log: log, mac: mac, connRetry: connectRetry(opt.ConnectRetries), pauseOnConnect: opt.PauseOnConnect,
-		mode: ble.ScanActive, conns: map[uint64]*conn{}, uncached: map[uint64]bool{}}
+	a := &Adapter{log: log, mac: mac, connRetry: connectRetry(opt.ConnectRetries, opt.ConnectRetryDelay),
+		pauseOnConnect: opt.PauseOnConnect, mode: ble.ScanActive, conns: map[uint64]*conn{}, uncached: map[uint64]bool{}}
 	if a.presets, err = loadPresets(); err != nil {
 		log.Debug("no connection parameter presets (Windows 11 needed), not offering connection parameters", "err", err)
 	} else {

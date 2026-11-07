@@ -87,6 +87,8 @@ type Options struct {
 	PauseOnConnect bool
 	// ConnectRetries is how often a connect that failed on the radio or lost the link early is retried (see retry.go).
 	ConnectRetries int
+	// ConnectRetryDelay is the wait before the first retry; each later one waits twice the previous. 0 retries at once.
+	ConnectRetryDelay time.Duration
 	// Log receives the adapter's log lines; nil discards them.
 	Log *logx.Logger
 }
@@ -137,7 +139,7 @@ func Open(name string, opt Options) (*Adapter, error) {
 	}
 	a.log = opt.Log.With("adapter", string(a.path))
 	a.stallTimeout, a.restartCmd, a.pauseOnConnect = opt.StallTimeout, opt.RestartCmd, opt.PauseOnConnect
-	a.retry = connectRetry(opt.ConnectRetries)
+	a.retry = connectRetry(opt.ConnectRetries, opt.ConnectRetryDelay)
 	if opt.USBReset {
 		a.resetUSB = func() error { return resetUSBDevice(name) }
 	}

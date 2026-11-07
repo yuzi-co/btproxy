@@ -150,10 +150,12 @@ func TestRearmForgetsResolvedServices(t *testing.T) {
 }
 
 func TestConnectRetryOptions(t *testing.T) {
-	if r := connectRetry(-1); r.Retries != 0 {
+	if r := connectRetry(-1, time.Second); r.Retries != 0 {
 		t.Errorf("negative retries not clamped: %+v", r)
 	}
-	if r := connectRetry(2); r.Retries != 2 || r.Fast >= connectTimeout || r.Budget >= connectTimeout {
+	// Two retries with their doubling delays (1 s, then 2 s) must fit the budget.
+	if r := connectRetry(2, time.Second); r.Retries != 2 || r.Delay != time.Second || r.Budget < 3*r.Delay ||
+		r.Fast >= connectTimeout || r.Budget >= connectTimeout {
 		t.Errorf("bad options %+v", r)
 	}
 }

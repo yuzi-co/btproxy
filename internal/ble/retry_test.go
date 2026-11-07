@@ -2,6 +2,7 @@ package ble
 
 import (
 	"errors"
+	"slices"
 	"testing"
 	"time"
 )
@@ -93,5 +94,58 @@ func TestConnectRetryWithdrawn(t *testing.T) {
 		func() bool { return calls >= 2 }, nil)
 	if calls != 2 || retries != 1 || err != errRadio {
 		t.Errorf("calls %d retries %d err %v, want 2 calls, 1 retry and the error", calls, retries, err)
+	}
+}
+
+// recordSleeps replaces sleep for the test and returns where the slept durations are collected.
+func recordSleeps(t *testing.T) *[]time.Duration {
+	t.Helper()
+	var slept []time.Duration
+	saved := sleep
+	sleep = func(d time.Duration) { slept = append(slept, d) }
+	t.Cleanup(func() { sleep = saved })
+	return &slept
+}
+
+// TestConnectRetryBackoff doubles the delay before each retry: Delay, 2*Delay, 4*Delay.
+func TestConnectRetryBackoff(t *testing.T) {
+	slept := recordSleeps(t)
+	r := ConnectRetry{Retries: 3, Delay: 10 * time.Millisecond, Fast: time.Second, Budget: time.Second}
+	calls := 0
+	retries, err := r.Do(func() error { calls++; return errRadio }, isRadio, nil, nil)
+	if calls != 4 || retries != 3 || err != errRadio {
+		t.Fatalf("calls %d retries %d err %v, want 4 calls, 3 retries and the error", calls, retries, err)
+	}
+	want := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 40 * time.Millisecond}
+	if !slices.Equal(*slept, want) {
+		t.Errorf("slept %v, want %v", *slept, want)
+	}
+}
+
+// TestConnectRetryBackoffBudget stops at the retry whose doubled delay would start it after Budget, even though
+// the base delay would still fit.
+func TestConnectRetryBackoffBudget(t *testing.T) {
+	slept := recordSleeps(t)
+	r := ConnectRetry{Retries: 10, Delay: 10 * time.Millisecond, Fast: time.Second, Budget: 30 * time.Millisecond}
+	calls := 0
+	retries, err := r.Do(func() error { calls++; return errRadio }, isRadio, nil, nil)
+	// Nothing really sleeps, so hardly any time passes: the third retry's 40 ms alone overruns the 30 ms budget,
+	// while the base 10 ms would have fit.
+	want := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond}
+	if calls != 3 || retries != 2 || err != errRadio || !slices.Equal(*slept, want) {
+		t.Errorf("calls %d retries %d err %v slept %v, want 3 calls, 2 retries, the error and %v",
+			calls, retries, err, *slept, want)
+	}
+}
+
+// TestConnectRetryDisabledSleepsNever makes one attempt and never sleeps with Retries 0.
+func TestConnectRetryDisabledSleepsNever(t *testing.T) {
+	slept := recordSleeps(t)
+	r := ConnectRetry{Retries: 0, Delay: 10 * time.Millisecond, Fast: time.Second, Budget: time.Second}
+	calls := 0
+	retries, err := r.Do(func() error { calls++; return errRadio }, isRadio, nil, nil)
+	if calls != 1 || retries != 0 || err != errRadio || len(*slept) != 0 {
+		t.Errorf("calls %d retries %d err %v slept %v, want 1 call, no retry, the error and no sleep",
+			calls, retries, err, *slept)
 	}
 }

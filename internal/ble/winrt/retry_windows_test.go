@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestRadioFailure(t *testing.T) {
@@ -34,13 +35,14 @@ func TestRadioFailure(t *testing.T) {
 }
 
 func TestConnectRetryDefaults(t *testing.T) {
-	r := connectRetry(-1)
+	r := connectRetry(-1, time.Second)
 	if r.Retries != 0 {
 		t.Errorf("negative retries: %d", r.Retries)
 	}
-	r = connectRetry(2)
-	// Two retries must fit the budget, which must leave a client's 30 s connect most of its time.
-	if r.Budget < 2*r.Delay || r.Budget > 10*1e9 || r.Fast > r.Budget {
+	r = connectRetry(2, time.Second)
+	// Two retries with their doubling delays (1 s, then 2 s) must fit the budget, which must leave a client's
+	// 30 s connect most of its time.
+	if r.Delay != time.Second || r.Budget < 3*r.Delay || r.Budget > 10*time.Second || r.Fast > r.Budget {
 		t.Errorf("odd timings: %+v", r)
 	}
 }
