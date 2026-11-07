@@ -362,8 +362,9 @@ const (
 )
 
 // reqLayouts gives the fields of each Bluetooth request the proxy reads, by message type and field number:
-// the numbers api.proto declares for the message, which the proto test checks.
-var reqLayouts = map[uint32][]reqField{
+// the numbers api.proto declares for the message, which the proto test checks. An array, not a map: the
+// lookup is on the path of every GATT request and a map lookup showed in the device request benchmark.
+var reqLayouts = [msgBTScannerSetModeRequest + 1][]reqField{
 	msgBTDeviceRequest:              {1: fieldAddr, 2: fieldKind, 4: fieldAddrType},
 	msgSubscribeBTAdvertisements:    {1: fieldKind}, // flags
 	msgBTScannerSetModeRequest:      {1: fieldKind}, // mode
@@ -383,7 +384,10 @@ func decRequest(typ uint32, b []byte) (request, error) {
 	if err != nil {
 		return request{}, err
 	}
-	layout := reqLayouts[typ]
+	var layout []reqField
+	if typ < uint32(len(reqLayouts)) {
+		layout = reqLayouts[typ]
+	}
 	var r request
 	for _, f := range fs {
 		if int(f.num) >= len(layout) {
