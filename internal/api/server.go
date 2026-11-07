@@ -325,8 +325,8 @@ func (s *Server) connect(c *client, addr uint64, addrType uint32) {
 		s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, false, 0, gattError))
 		return
 	}
-	slot := &btConn{}
-	s.conns[addr] = slot
+	a := &connAttempt{s: s, addr: addr, slot: &btConn{}}
+	s.conns[addr] = a.slot
 	s.mu.Unlock()
 	s.sendConnectionsFree()
 
@@ -338,41 +338,20 @@ func (s *Server) connect(c *client, addr uint64, addrType uint32) {
 			s.broadcast(msgBTGATTNotifyDataResponse, encAddrHandleData(addr, h, data))
 		},
 		Disconnected: func(reason error) {
-			s.mu.Lock()
-			mine := s.conns[addr] == slot
-			if mine && slot.conn == nil { // Connect has not returned yet: it frees the slot
-				slot.dropped = true
-				mine = false
-			} else if mine {
-				delete(s.conns, addr)
-			}
-			s.mu.Unlock()
-			if mine {
+			if a.lost() {
 				log.Info("disconnected", "reason", reason)
-				s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, false, 0, 0))
-				s.sendConnectionsFree()
+				a.ended(0)
 			}
 		},
-		Withdrawn: func() bool {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			return s.conns[addr] != slot
-		},
+		Withdrawn: a.withdrawn,
 	})
 	if err != nil {
 		log.Warn("connect failed", "err", err)
 		s.recordConnect(false)
-		s.release(addr, slot)
-		s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, false, 0, gattError))
-		s.sendConnectionsFree()
+		a.ended(gattError)
 		return
 	}
-	s.mu.Lock()
-	withdrawn, dropped := s.conns[addr] != slot, slot.dropped
-	if !withdrawn && !dropped {
-		slot.conn = conn
-	}
-	s.mu.Unlock()
+	withdrawn, dropped := a.settle(conn)
 	if withdrawn { // disconnect requested, or the last client left, while connecting
 		// Neither a success nor a failure: nobody wanted the outcome, so the success rate leaves it out.
 		log.Info("connected after the request was withdrawn, disconnecting")
@@ -382,9 +361,7 @@ func (s *Server) connect(c *client, addr uint64, addrType uint32) {
 	s.recordConnect(!dropped)
 	if dropped {
 		log.Info("link lost while connecting")
-		s.release(addr, slot)
-		s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, false, 0, 0))
-		s.sendConnectionsFree()
+		a.ended(0)
 		return
 	}
 	log.Info("connected", "mtu", conn.MTU())
@@ -392,29 +369,96 @@ func (s *Server) connect(c *client, addr uint64, addrType uint32) {
 	s.pushStates()
 }
 
-// release frees a connection slot unless it has been replaced.
-func (s *Server) release(addr uint64, slot *btConn) {
-	s.mu.Lock()
-	if s.conns[addr] == slot {
-		delete(s.conns, addr)
-	}
-	s.mu.Unlock()
+// connAttempt is one attempt to hold a connection slot: the slot taken for addr, from the connect that takes
+// it until it is released. Every way an attempt ends, whether the connect fails, the link drops, a client
+// asks for the disconnect or the device is unpaired, goes through ended, so the slot is released once and
+// the clients are told once. The slot may change hands meanwhile: a disconnect withdraws a connect still
+// running and the address may be connected again, so the attempt only ever touches a slot that is its own.
+type connAttempt struct {
+	s    *Server
+	addr uint64
+	slot *btConn // nil for an attempt looked up on an address that holds no slot
 }
 
-func (s *Server) disconnect(addr uint64) {
+// attempt returns the attempt holding addr's slot, with a nil slot when there is none, and the connection if
+// it is established.
+func (s *Server) attempt(addr uint64) (a *connAttempt, conn ble.Conn) {
 	s.mu.Lock()
-	bc := s.conns[addr]
-	delete(s.conns, addr)
-	s.mu.Unlock()
-	if bc != nil && bc.conn != nil {
-		if err := bc.conn.Disconnect(); err != nil {
+	defer s.mu.Unlock()
+	a = &connAttempt{s: s, addr: addr, slot: s.conns[addr]}
+	if a.slot != nil {
+		conn = a.slot.conn
+	}
+	return a, conn
+}
+
+// release frees the slot if the attempt still holds it. Done before a disconnect is asked of the backend, so
+// that its report of the link going down finds the slot gone and is not reported to the clients again.
+func (a *connAttempt) release() {
+	a.s.mu.Lock()
+	if a.slot != nil && a.s.conns[a.addr] == a.slot {
+		delete(a.s.conns, a.addr)
+	}
+	a.s.mu.Unlock()
+}
+
+// ended reports the end of the attempt: the slot is released if the attempt still holds it, every client is
+// told the device is not connected, with code, and the free slots are announced.
+func (a *connAttempt) ended(code int32) {
+	a.release()
+	a.s.broadcast(msgBTDeviceConnectionResponse, encConnection(a.addr, false, 0, code))
+	a.s.sendConnectionsFree()
+}
+
+// lost handles the backend's report that the link went down. It reports whether the attempt held an
+// established connection, which it releases. While the connect is still running the slot stays, marked
+// dropped, and connect reports the loss when it returns.
+func (a *connAttempt) lost() bool {
+	a.s.mu.Lock()
+	defer a.s.mu.Unlock()
+	if a.s.conns[a.addr] != a.slot {
+		return false
+	}
+	if a.slot.conn == nil {
+		a.slot.dropped = true
+		return false
+	}
+	delete(a.s.conns, a.addr)
+	return true
+}
+
+// withdrawn reports whether the slot has been taken from the attempt: a disconnect was requested, or the
+// last client left, while the connect was running. Backends that retry a connect check it between tries.
+func (a *connAttempt) withdrawn() bool {
+	a.s.mu.Lock()
+	defer a.s.mu.Unlock()
+	return a.s.conns[a.addr] != a.slot
+}
+
+// settle records the connection the backend made on the slot, unless the attempt was withdrawn meanwhile
+// or the link was lost already, which it reports instead.
+func (a *connAttempt) settle(conn ble.Conn) (withdrawn, dropped bool) {
+	a.s.mu.Lock()
+	defer a.s.mu.Unlock()
+	withdrawn, dropped = a.s.conns[a.addr] != a.slot, a.slot.dropped
+	if !withdrawn && !dropped {
+		a.slot.conn = conn
+	}
+	return withdrawn, dropped
+}
+
+// disconnect ends the connection on addr, or withdraws the connect still making it.
+func (s *Server) disconnect(addr uint64) {
+	a, conn := s.attempt(addr)
+	a.release()
+	if conn != nil {
+		if err := conn.Disconnect(); err != nil {
 			s.log.Warn("disconnect", "addr", ble.FormatMAC(addr), "err", err)
 		} else {
 			s.log.Info("disconnected on request", "addr", ble.FormatMAC(addr))
 		}
 	}
-	s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, false, 0, 0))
-	s.sendConnectionsFree()
+	a.ended(0)
 }
 
 // disconnectAll drops every peripheral connection, as an ESP32 proxy does when its last client goes away.

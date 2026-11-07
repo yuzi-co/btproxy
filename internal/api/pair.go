@@ -4,12 +4,7 @@ import "github.com/yuzi-co/btproxy/internal/ble"
 
 // pair bonds with a connected device. As in ESPHome, the device must be connected through the proxy.
 func (s *Server) pair(c *client, addr uint64) {
-	s.mu.Lock()
-	var conn ble.Conn
-	if bc := s.conns[addr]; bc != nil {
-		conn = bc.conn
-	}
-	s.mu.Unlock()
+	_, conn := s.attempt(addr)
 	log := c.log.With("addr", ble.FormatMAC(addr))
 	if conn == nil {
 		log.Warn("pairing requested while not connected")
@@ -30,14 +25,10 @@ func (s *Server) pair(c *client, addr uint64) {
 // bond (BlueZ removes the whole device), so the slot is released here and the disconnection reported after
 // the unpairing response: Home Assistant's client fails the request if the connection state changes first.
 func (s *Server) unpair(c *client, addr uint64) {
-	s.mu.Lock()
-	bc := s.conns[addr]
-	if bc != nil && bc.conn != nil {
-		delete(s.conns, addr)
-	} else {
-		bc = nil
+	a, conn := s.attempt(addr)
+	if conn != nil { // a connect still running keeps its slot
+		a.release()
 	}
-	s.mu.Unlock()
 	log := c.log.With("addr", ble.FormatMAC(addr))
 	err := s.adapter.Unpair(addr)
 	code := int32(0)
@@ -48,12 +39,11 @@ func (s *Server) unpair(c *client, addr uint64) {
 		log.Info("unpaired")
 	}
 	c.send(msgBTDeviceUnpairingResponse, encAddrResult(addr, err == nil, code))
-	if bc == nil {
+	if conn == nil {
 		return
 	}
 	if err != nil { // the slot is already released: do not leave the link up without one
-		bc.conn.Disconnect()
+		conn.Disconnect()
 	}
-	s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, false, 0, 0))
-	s.sendConnectionsFree()
+	a.ended(0)
 }

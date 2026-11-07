@@ -6,12 +6,7 @@ import "github.com/yuzi-co/btproxy/internal/ble"
 // through the proxy, and the reply comes once the controller has taken the request, not when the new
 // parameters apply.
 func (s *Server) setConnParams(c *client, addr uint64, p ble.ConnParams) {
-	s.mu.Lock()
-	var conn ble.Conn
-	if bc := s.conns[addr]; bc != nil {
-		conn = bc.conn
-	}
-	s.mu.Unlock()
+	_, conn := s.attempt(addr)
 	log := c.log.With("addr", ble.FormatMAC(addr), "min", p.MinInterval, "max", p.MaxInterval,
 		"latency", p.Latency, "timeout", p.Timeout)
 	cs, ok := ble.CanSetConnParams(s.adapter)
