@@ -19,21 +19,9 @@ case $version in
 esac
 
 name=
-fail() {
-	echo "FAIL ($version): $*" >&2
-	docker exec "$name" sh -c 'logread | grep -a btproxy | tail -8' >&2 || true
-	exit 1
-}
-# Each command gets 3 minutes, so a hang fails with the command that hung instead of blocking the job. The message
-# goes to the script's own stderr, kept as fd 3, since callers often send a command's output to /dev/null.
-exec 3>&2
-run() {
-	run_rc=0
-	MSYS_NO_PATHCONV=1 timeout -k 10 180 docker exec "$name" sh -c "$1" || run_rc=$?
-	[ $run_rc -ne 124 ] || echo "FAIL ($version): timed out after 180 s: $1" >&3
-	return $run_rc
-}
-stop_container() { [ -z "$name" ] || docker stop -t 1 "$name" >/dev/null 2>&1 || true; }
+. "$(dirname "$0")/openwrt_lib.sh"
+log_tail='logread | grep -a btproxy | tail -8'
+stop_container() { [ -z "$name" ] || timed 30 docker stop -t 1 "$name" >/dev/null 2>&1 || true; }
 trap stop_container EXIT
 
 # Starts a router with the older package, BlueZ brought in as its dependency, and bluetoothd running.
