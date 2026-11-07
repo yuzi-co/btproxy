@@ -9,7 +9,36 @@ import (
 
 	"github.com/yuzi-co/btproxy/internal/ble"
 	"github.com/yuzi-co/btproxy/internal/logx"
+
+	"google.golang.org/protobuf/encoding/protowire"
 )
+
+// TestDecRequestCopiesData checks that write data does not alias the frame it came in: a queued request
+// would otherwise hold the whole frame, and the queue's byte limit counts the data only.
+func TestDecRequestCopiesData(t *testing.T) {
+	for _, tt := range []struct {
+		typ  uint32
+		data protowire.Number
+	}{
+		{msgBTGATTWriteRequest, 4},
+		{msgBTGATTWriteDescriptorRequest, 3},
+	} {
+		var e enc
+		e.uint(1, testAddr)
+		e.uint(2, 7)
+		e.bytes(tt.data, []byte{1, 2, 3})
+		r, err := decRequest(tt.typ, e.b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range e.b { // overwrite the frame, as a reused buffer would be
+			e.b[i] = 0xff
+		}
+		if !bytes.Equal(r.data, []byte{1, 2, 3}) {
+			t.Errorf("type %d: data %x follows the frame", tt.typ, r.data)
+		}
+	}
+}
 
 // TestEncServicesUUID checks that each attribute carries one UUID form: short_uuid for base UUIDs when the
 // client reads it (API 1.12+), the 128-bit pair otherwise.

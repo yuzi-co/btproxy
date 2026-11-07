@@ -34,9 +34,14 @@ type Config struct {
 	LastProblem    func() string  // the latest warning or error; nil leaves the sensor out
 }
 
-// setupTimeout bounds the time from accepting a client to its HelloRequest, including the encrypted handshake,
-// so a client that opens a connection and stalls is dropped. After Hello there is no read deadline.
-const setupTimeout = 30 * time.Second
+// A client that opens a connection and stalls is dropped, and quickly while it has proved nothing, so that
+// any host on the network cannot hold the client slots: helloTimeout bounds the time from accepting a client
+// to its HelloRequest, or with encryption to the end of the handshake, which proves the key. A client that has
+// proved it gets setupTimeout for its Hello. After Hello there is no read deadline.
+const (
+	helloTimeout = 5 * time.Second
+	setupTimeout = 30 * time.Second
+)
 
 // Limits on what clients can make the proxy hold. A client over maxClientWorkers is closed; an ordinary one
 // has a few requests waiting for the radio. A GATT request over the queue limits fails with a GATT error.
@@ -79,7 +84,8 @@ type Server struct {
 	textSensors   []textSensor
 	buttons       []button
 
-	setupTimeout time.Duration // a field so the tests can shorten it
+	helloTimeout time.Duration // fields so the tests can shorten them
+	setupTimeout time.Duration
 }
 
 // btConn is a connection slot. conn is nil while the connection is being made; dropped records a link that
@@ -106,7 +112,7 @@ func NewServer(cfg Config, adapter ble.Adapter, log *logx.Logger) *Server {
 	s := &Server{
 		cfg: cfg, adapter: adapter, log: log,
 		clients: map[*client]bool{}, conns: map[uint64]*btConn{}, scanKick: make(chan struct{}, 1),
-		setupTimeout: setupTimeout,
+		helloTimeout: helloTimeout, setupTimeout: setupTimeout,
 	}
 	s.initScanner()
 	s.initStats()
@@ -282,7 +288,10 @@ func (s *Server) sendConnectionsFree() {
 	s.pushStates() // the connection sensors changed
 }
 
-func (s *Server) connect(addr uint64, addrType uint32) {
+// connect makes the connection c asked for. A connect from a client that has gone, as when the request and
+// the close arrive together, is refused: its slot would otherwise be taken after disconnectAll has run for
+// the client, and the connection would be held for nobody.
+func (s *Server) connect(c *client, addr uint64, addrType uint32) {
 	s.mu.Lock()
 	if bc, ok := s.conns[addr]; ok {
 		conn := bc.conn
@@ -290,6 +299,12 @@ func (s *Server) connect(addr uint64, addrType uint32) {
 		if conn != nil { // already connected: confirm again
 			s.broadcast(msgBTDeviceConnectionResponse, encConnection(addr, true, conn.MTU(), 0))
 		}
+		return
+	}
+	if !s.clients[c] {
+		s.mu.Unlock()
+		c.log.Info("connect requested by a client that has left, refusing", "addr", ble.FormatMAC(addr))
+		c.send(msgBTDeviceConnectionResponse, encConnection(addr, false, 0, gattError))
 		return
 	}
 	if len(s.conns) >= s.cfg.MaxConnections {
@@ -346,12 +361,13 @@ func (s *Server) connect(addr uint64, addrType uint32) {
 		slot.conn = conn
 	}
 	s.mu.Unlock()
-	s.recordConnect(!dropped)
 	if withdrawn { // disconnect requested, or the last client left, while connecting
+		// Neither a success nor a failure: nobody wanted the outcome, so the success rate leaves it out.
 		log.Info("connected after the request was withdrawn, disconnecting")
 		conn.Disconnect()
 		return
 	}
+	s.recordConnect(!dropped)
 	if dropped {
 		log.Info("link lost while connecting")
 		s.release(addr, slot)
@@ -435,17 +451,24 @@ type client struct {
 	log *logx.Logger
 
 	wmu              sync.Mutex
-	out              chan outMsg  // to the writer; closed by run when it ends
-	closed           bool         // out is closed; guarded by wmu
-	dead             bool         // a write failed or the queue overflowed, nothing more is queued; guarded by wmu
-	sendC            *noiseCipher // set under wmu when the encrypted handshake is done, then used by the writer only
-	logDrops         atomic.Int64 // log lines dropped since the writer last reported drops
-	workers          atomic.Int32 // requests running in their own goroutines, see spawn
-	recv             *noiseCipher // used by run only
-	advSubscribed    bool         // guarded by s.mu
-	statesSubscribed bool         // guarded by s.mu
-	apiMajor         uint32
-	apiMinor         uint32 // set by HelloRequest, before any Bluetooth request
+	out              chan outMsg   // to the writer; closed by run when it ends
+	closed           bool          // out is closed; guarded by wmu
+	dead             bool          // a write failed or the queue overflowed, nothing more is queued; guarded by wmu
+	sendC            *noiseCipher  // set under wmu when the encrypted handshake is done, then used by the writer only
+	logDrops         atomic.Int64  // log lines dropped since the writer last reported drops
+	workers          atomic.Int32  // requests running in their own goroutines, see spawn
+	recv             *noiseCipher  // used by run only
+	advSubscribed    bool          // guarded by s.mu
+	statesSubscribed bool          // guarded by s.mu
+	hello            bool          // a HelloRequest has been handled; used by run only
+	apiVersion       atomic.Uint64 // the client's API version from its first HelloRequest, major<<32 | minor
+}
+
+// apiMajorMinor returns the client's API version, 0.0 before its Hello. The GATT worker reads it while the
+// client's reader may be handling another Hello, so it is kept atomically.
+func (c *client) apiMajorMinor() (major, minor uint32) {
+	v := c.apiVersion.Load()
+	return uint32(v >> 32), uint32(v)
 }
 
 // outMsg is a queued message. Raw ones are sent as they are, without framing or encryption.
@@ -567,13 +590,14 @@ func (c *client) run() {
 	c.log.Info("client connected")
 	r := bufio.NewReader(c.c)
 	read := ReadFrame
-	c.c.SetReadDeadline(time.Now().Add(c.s.setupTimeout)) // HelloRequest clears it
+	c.c.SetReadDeadline(time.Now().Add(c.s.helloTimeout)) // HelloRequest clears it
 	if c.s.cfg.EncryptionKey != nil {
 		if err := c.noiseHandshake(r); err != nil {
 			c.log.Warn("handshake failed", "err", err)
 			return
 		}
 		c.log.Debug("encrypted session established")
+		c.c.SetReadDeadline(time.Now().Add(c.s.setupTimeout)) // the key is proved: the usual time for Hello
 		read = c.readNoise
 	}
 	for {
@@ -602,13 +626,19 @@ func (c *client) handle(f Frame) bool {
 	s := c.s
 	switch f.Type {
 	case msgHelloRequest:
-		var err error
-		if c.apiMajor, c.apiMinor, err = decHello(f.Payload); err != nil {
+		major, minor, err := decHello(f.Payload)
+		if err != nil {
 			c.log.Warn("bad message", "type", f.Type, "err", err)
 			return false
 		}
 		c.c.SetReadDeadline(time.Time{})
-		c.log.Debug("hello", "api", fmt.Sprintf("%d.%d", c.apiMajor, c.apiMinor))
+		// Every Hello is answered, as ESPHome answers it, but the version comes from the first one: a client
+		// has no reason to change it, and requests already running keep the version they were sent with.
+		if !c.hello {
+			c.hello = true
+			c.apiVersion.Store(uint64(major)<<32 | uint64(minor))
+		}
+		c.log.Debug("hello", "api", fmt.Sprintf("%d.%d", major, minor))
 		c.send(msgHelloResponse, encHelloResponse("btproxy "+s.cfg.ProjectVersion, s.cfg.Name))
 	case msgDisconnectRequest:
 		c.send(msgDisconnectResponse, nil)
@@ -747,7 +777,7 @@ func (c *client) deviceRequest(r request) {
 	s := c.s
 	switch r.kind {
 	case reqConnectV3WithCache, reqConnectV3WithoutCache:
-		s.connect(r.addr, r.addrType)
+		s.connect(c, r.addr, r.addrType)
 	case reqDisconnect:
 		s.disconnect(r.addr)
 	case reqClearCache:
@@ -831,8 +861,9 @@ func (c *client) gatt(conn ble.Conn, typ uint32, r request) {
 			gattErr(err)
 			return
 		}
+		efficient := efficientUUIDs(c.apiMajorMinor())
 		for i := range svcs { // one service per message, like ESPHome
-			c.send(msgBTGATTGetServicesResponse, encServices(r.addr, svcs[i:i+1], efficientUUIDs(c.apiMajor, c.apiMinor)))
+			c.send(msgBTGATTGetServicesResponse, encServices(r.addr, svcs[i:i+1], efficient))
 		}
 		c.send(msgBTGATTGetServicesDoneResponse, encAddrHandle(r.addr, 0))
 	case msgBTGATTReadRequest, msgBTGATTReadDescriptorRequest:
