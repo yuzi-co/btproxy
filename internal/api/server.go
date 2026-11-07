@@ -257,20 +257,32 @@ func (s *Server) flush() {
 	if s.flushT != nil {
 		s.flushT.Stop()
 	}
-	for c := range s.clients {
+	s.eachClient(func(c *client) {
 		if c.advSubscribed && !c.sendDroppable(msgBTRawAdvertisementsResponse, msg) {
 			s.stats.advDropped.Add(uint64(n))
 		}
+	})
+}
+
+// eachClient calls f for every client. Called with s.mu held, so f must not block or take the lock: queueing
+// a message is fine.
+func (s *Server) eachClient(f func(*client)) {
+	for c := range s.clients {
+		f(c)
 	}
+}
+
+// fanOut calls f for every client under s.mu. Everything that goes to all clients at once, or to all the
+// subscribers of something, comes through here.
+func (s *Server) fanOut(f func(*client)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.eachClient(f)
 }
 
 // broadcast sends a Bluetooth connection message to every client. Home Assistant is normally the only one.
 func (s *Server) broadcast(typ uint32, payload []byte) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for c := range s.clients {
-		c.send(typ, payload)
-	}
+	s.fanOut(func(c *client) { c.send(typ, payload) })
 }
 
 func (s *Server) connectionsFree() []byte {

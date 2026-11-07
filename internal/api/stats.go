@@ -249,15 +249,13 @@ func (s *Server) states() []stateMsg {
 // client that is behind: the next push brings them again.
 func (s *Server) pushStates() {
 	msgs := s.states()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for c := range s.clients {
+	s.fanOut(func(c *client) {
 		if c.statesSubscribed {
 			for _, m := range msgs {
 				c.sendDroppable(m.typ, m.payload)
 			}
 		}
-	}
+	})
 }
 
 func (s *Server) statsLoop() {

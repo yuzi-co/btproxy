@@ -36,13 +36,11 @@ func (s *Server) scannerState() []byte {
 // sendScannerState reports the scanner state to the advertisement subscribers, as ESPHome does.
 func (s *Server) sendScannerState() {
 	msg := s.scannerState()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for c := range s.clients {
+	s.fanOut(func(c *client) {
 		if c.advSubscribed {
 			c.send(msgBTScannerStateResponse, msg)
 		}
-	}
+	})
 }
 
 func (s *Server) scanStatusLoop() {
