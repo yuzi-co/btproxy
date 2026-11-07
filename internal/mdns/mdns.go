@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -54,11 +55,19 @@ type Responder struct {
 	conn  *net.UDPConn
 	raw   syscall.RawConn
 
-	mu     sync.Mutex // guards ifaces and joined, and pairs IP_MULTICAST_IF with the write that depends on it
+	// write sends pkt to dst, or to the group on i when dst is nil. Tests replace it with a fake.
+	write func(i iface, dst *net.UDPAddr, pkt []byte) error
+
+	mu     sync.Mutex // guards ifaces, joined and sent, and pairs IP_MULTICAST_IF with the write that depends on it
 	ifaces []iface
 	joined map[string]string // interface name -> String() when the group was joined on it
+	// sent is when each record last went out, keyed by destination (an interface name for multicast, an address
+	// for unicast) and record, for the one-per-second limit of RFC 6762 section 6. Entries older than a second
+	// are swept on use.
+	sent map[string]time.Time
 
 	stop      chan struct{}
+	closed    atomic.Bool // set first thing in Close: only goodbyes may be multicast from then on
 	closeOnce sync.Once
 }
 
@@ -78,8 +87,9 @@ func Start(cfg Config, log *logx.Logger) (*Responder, error) {
 		conn.Close()
 		return nil, err
 	}
-	r := &Responder{svc: newService(cfg.Name, cfg.Port, cfg.TXT), names: cfg.Ifaces, log: log, conn: conn, raw: raw,
-		joined: map[string]string{}, stop: make(chan struct{})}
+	r := newResponder(newService(cfg.Name, cfg.Port, cfg.TXT), log, conn)
+	r.names, r.raw = cfg.Ifaces, raw
+	r.write = r.writeUDP
 	r.refresh()
 	if len(cfg.Ifaces) == 0 {
 		if _, skipped := scan(nil); len(skipped) > 0 {
@@ -97,12 +107,19 @@ func Start(cfg Config, log *logx.Logger) (*Responder, error) {
 	return r, nil
 }
 
-// Close sends goodbye packets (TTL 0) so browsers drop the service at once, then closes the socket.
+func newResponder(svc service, log *logx.Logger, conn *net.UDPConn) *Responder {
+	return &Responder{svc: svc, log: log, conn: conn, joined: map[string]string{}, sent: map[string]time.Time{},
+		stop: make(chan struct{})}
+}
+
+// Close sends goodbye packets (TTL 0) so browsers drop the service at once, then closes the socket. An
+// announcement in flight cannot follow the goodbyes: closed stops every other multicast first.
 func (r *Responder) Close() {
 	r.closeOnce.Do(func() {
+		r.closed.Store(true)
 		close(r.stop)
 		for _, i := range r.current() {
-			r.multicast(i, encodeResponse(0, nil, r.svc.all(i.ips), nil, false, true))
+			r.multicast(i, encodeResponse(0, nil, r.svc.all(i.ips), nil, false, true), true)
 		}
 		r.conn.Close()
 	})
@@ -132,6 +149,8 @@ func (r *Responder) watch() {
 	}
 }
 
+// announce multicasts the full record set announceN times, a second apart. Announcements are exempt from the
+// rate limit but count as the records' last multicast.
 func (r *Responder) announce() {
 	for n := range announceN {
 		if n > 0 {
@@ -141,10 +160,44 @@ func (r *Responder) announce() {
 			case <-time.After(time.Second):
 			}
 		}
+		now := time.Now()
 		for _, i := range r.current() {
-			r.multicast(i, encodeResponse(0, nil, r.svc.all(i.ips), nil, false, false))
+			rs := r.svc.all(i.ips)
+			r.mark(i.name, rs, now)
+			r.multicast(i, encodeResponse(0, nil, rs, nil, false, false), false)
 		}
 	}
+}
+
+// mark records rs as sent to dest at now.
+func (r *Responder) mark(dest string, rs []record, now time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rec := range rs {
+		r.sent[dest+"|"+rec.key()] = now
+	}
+}
+
+// limit drops the records sent to dest within the last second and marks the rest as sent now. extra is left
+// empty when nothing of answers remains, since a response needs an answer.
+func (r *Responder) limit(dest string, answers, extra []record, now time.Time) ([]record, []record) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, t := range r.sent {
+		if now.Sub(t) >= time.Second {
+			delete(r.sent, k)
+		}
+	}
+	fresh := func(rec record) bool { _, ok := r.sent[dest+"|"+rec.key()]; return !ok }
+	answers = slices.DeleteFunc(slices.Clone(answers), func(rec record) bool { return !fresh(rec) })
+	if len(answers) == 0 {
+		return nil, nil
+	}
+	extra = slices.DeleteFunc(slices.Clone(extra), func(rec record) bool { return !fresh(rec) })
+	for _, rec := range slices.Concat(answers, extra) {
+		r.sent[dest+"|"+rec.key()] = now
+	}
+	return answers, extra
 }
 
 // refresh rescans the interfaces, joins the group on new ones and reports whether anything changed.
@@ -238,40 +291,74 @@ func (r *Responder) read() {
 			r.log.Debug("mdns read", "err", err)
 			continue
 		}
-		i, ok := r.ifaceFor(src.IP)
-		if !ok {
-			continue
-		}
-		q, err := parseQuery(buf[:n])
-		if err != nil {
-			continue // responses, including our own looped back
-		}
-		answers, extra, unicast := r.svc.answer(q, i.ips)
-		if len(answers) == 0 {
-			continue
-		}
-		r.log.Debug("mdns query", "from", src, "iface", i.name, "questions", len(q.questions), "unicast", unicast)
-		switch {
-		case src.Port != port: // legacy unicast query (RFC 6762 section 6.7)
-			r.conn.WriteToUDP(encodeResponse(q.id, q.questions, answers, extra, true, false), src)
-		case unicast:
-			r.conn.WriteToUDP(encodeResponse(0, nil, answers, extra, false, false), src)
-		default:
-			r.multicast(i, encodeResponse(0, nil, answers, extra, false, false))
-		}
+		r.handle(buf[:n], src, time.Now())
 	}
 }
 
-func (r *Responder) multicast(i iface, pkt []byte) {
+// handle answers the query in b from src, received at now. Records the querier already knows, and records that
+// went to the same destination within the last second, are left out; the answer is dropped when nothing is left.
+func (r *Responder) handle(b []byte, src *net.UDPAddr, now time.Time) {
+	i, ok := r.ifaceFor(src.IP)
+	if !ok {
+		return
+	}
+	q, err := parseQuery(b)
+	if err != nil {
+		return // responses, including our own looped back
+	}
+	answers, extra, unicast := r.svc.answer(q, i.ips)
+	if len(answers) == 0 {
+		return
+	}
+	legacy := src.Port != port // legacy unicast query (RFC 6762 section 6.7)
+	dest := i.name
+	if legacy || unicast {
+		dest = src.String()
+	}
+	if answers, extra = r.limit(dest, answers, extra, now); len(answers) == 0 {
+		return
+	}
+	r.log.Debug("mdns query", "from", src, "iface", i.name, "questions", len(q.questions), "unicast", unicast)
+	switch {
+	case legacy:
+		r.unicast(encodeResponse(q.id, q.questions, answers, extra, true, false), src)
+	case unicast:
+		r.unicast(encodeResponse(0, nil, answers, extra, false, false), src)
+	default:
+		r.multicast(i, encodeResponse(0, nil, answers, extra, false, false), false)
+	}
+}
+
+func (r *Responder) unicast(pkt []byte, dst *net.UDPAddr) {
+	if err := r.write(iface{}, dst, pkt); err != nil {
+		r.log.Debug("mdns send", "to", dst, "err", err)
+	}
+}
+
+// multicast sends pkt to the group on i. Once Close has begun only goodbyes go out, so that a late announcement
+// cannot follow a goodbye and leave the service in browsers' caches for its TTL.
+func (r *Responder) multicast(i iface, pkt []byte, goodbye bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	err := control(r.raw, func(fd uintptr) error { return setIf(fd, i) })
-	if err == nil {
-		_, err = r.conn.WriteToUDP(pkt, &net.UDPAddr{IP: group, Port: port})
+	if r.closed.Load() && !goodbye {
+		return
 	}
-	if err != nil {
+	if err := r.write(i, nil, pkt); err != nil {
 		r.log.Debug("mdns send", "iface", i.name, "err", err)
 	}
+}
+
+// writeUDP is the write of a real socket. A multicast first selects the outgoing interface, which is why the
+// caller holds mu.
+func (r *Responder) writeUDP(i iface, dst *net.UDPAddr, pkt []byte) error {
+	if dst == nil {
+		if err := control(r.raw, func(fd uintptr) error { return setIf(fd, i) }); err != nil {
+			return err
+		}
+		dst = &net.UDPAddr{IP: group, Port: port}
+	}
+	_, err := r.conn.WriteToUDP(pkt, dst)
+	return err
 }
 
 // control runs f on the socket's descriptor and returns f's error.
