@@ -7,68 +7,29 @@
 set -eu
 
 version=$1
-abspath() { (cd "$1" && { pwd -W 2>/dev/null || pwd; }); } # pwd -W: the path Docker needs under Git Bash
+. "$(dirname "$0")/openwrt_lib.sh"
 new=$(abspath "$2")
 old=$(abspath "$3")
 name=btproxy-openwrt-test-$$
-
-case $version in
-24.*|23.*) ext=ipk ;;
-*) ext=apk ;;
-esac
-
-. "$(dirname "$0")/openwrt_lib.sh"
 log_tail='logread | tail -20'
-stop_container() { timed 30 docker stop -t 1 "$name" >/dev/null 2>&1 || true; }
-trap stop_container EXIT
+trap stop_router EXIT
 
-MSYS_NO_PATHCONV=1 docker run -d --rm --name "$name" --privileged --tmpfs /tmp \
-	-v "$new:/pkg/new:ro" -v "$old:/pkg/old:ro" \
-	"openwrt/rootfs:x86_64-$version" \
-	/sbin/init >/dev/null
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-	run 'logread 2>/dev/null | grep -q "init complete"' && break
-	sleep 2
-done
-# The router's own network and firewall services take over eth0 and block the way out: stop them, and give back
-# the address Docker assigned.
-ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}/{{.IPPrefixLen}}{{end}}' "$name")
-gateway=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' "$name")
-run '/etc/init.d/network stop; /etc/init.d/firewall stop; fw4 -q flush' >/dev/null 2>&1 || true
-sleep 1
-run "ip link set eth0 up; ip addr flush dev eth0; ip addr add $ip dev eth0; ip route replace default via $gateway"
-run 'mkdir -p /var/lock'
-
-if [ "$ext" = ipk ]; then
-	run 'opkg update >/dev/null'
-	install_new='opkg install /pkg/new/btproxy-linux-amd64.ipk'
-	install_old='opkg install /pkg/old/btproxy-linux-amd64.ipk'
-	remove='opkg remove btproxy'
-	installed='opkg status btproxy | grep -q "Status: install"'
-else
-	run 'apk update >/dev/null'
-	install_new='apk add --allow-untrusted /pkg/new/btproxy-linux-amd64.apk'
-	install_old='apk add --allow-untrusted /pkg/old/btproxy-linux-amd64.apk'
-	remove='apk del btproxy'
-	installed='apk info -e btproxy >/dev/null'
-fi
+boot_router -v "$new:/pkg/new:ro" -v "$old:/pkg/old:ro"
+pkg_update >/dev/null
+newpkg=/pkg/new/btproxy-linux-amd64.$ext
+oldpkg=/pkg/old/btproxy-linux-amd64.$ext
 
 # A package for another architecture says so, does not start, and can be replaced by the right one.
-if [ "$ext" = ipk ]; then
-	wrong='opkg install /pkg/new/btproxy-linux-mipsle.ipk'
-else
-	wrong='apk add --allow-untrusted /pkg/new/btproxy-linux-mipsle.apk'
-fi
-out=$(run "$wrong" 2>&1) || true
+out=$(pkg_install "/pkg/new/btproxy-linux-mipsle.$ext" 2>&1) || true
 echo "$out" | grep -q "does not run on this router" || fail "no explanation: $out"
 if run '/etc/init.d/btproxy enabled'; then fail "wrong architecture enabled the service"; fi
 if run 'pidof btproxy >/dev/null'; then fail "wrong architecture started the service"; fi
-run "$remove" >/dev/null || fail "removing the wrong architecture"
+pkg_remove btproxy >/dev/null || fail "removing the wrong architecture"
 
 # First install: the service is enabled and tries to start, without BlueZ, which is no longer a dependency.
 run 'mkdir -p /etc && echo "{\"connections\": \"2\"}" > /etc/btproxy.json'
-run "$install_old" >/dev/null || fail "install"
-run "$installed" || fail "not installed"
+pkg_install "$oldpkg" >/dev/null || fail "install"
+pkg_installed btproxy || fail "not installed"
 run 'test -x /usr/bin/btproxy' || fail "no binary"
 run 'test -f /etc/config/btproxy' || fail "no UCI config"
 if run 'command -v bluetoothd >/dev/null'; then fail "bluez-daemon was pulled in"; fi
@@ -124,7 +85,7 @@ run 'logread | grep "btproxy started" | tail -1 | grep -q encryption=true' || fa
 
 # Upgrade: settings stay, the new build runs, and a disabled service stays disabled.
 key=$(run 'cat /etc/btproxy.key')
-run "$install_new" >/dev/null || fail "upgrade"
+pkg_install "$newpkg" >/dev/null || fail "upgrade"
 sleep 3
 [ "$(run 'cat /etc/btproxy.key')" = "$key" ] || fail "upgrade changed the key"
 run 'grep -q secret-settings-marker /etc/btproxy.uipass' || fail "upgrade changed the settings page password"
@@ -135,8 +96,8 @@ run 'logread | grep "btproxy started" | tail -1 | grep -qv version=0.0.1' || fai
 run '/etc/init.d/btproxy enabled' || fail "upgrade disabled the service"
 
 run '/etc/init.d/btproxy stop; /etc/init.d/btproxy disable'
-run "$install_old" >/dev/null 2>&1 || true # downgrades are refused by some versions; only the next line matters
-run "$install_new" >/dev/null 2>&1 || true
+pkg_install "$oldpkg" >/dev/null 2>&1 || true # downgrades are refused by some versions; only the next line matters
+pkg_install "$newpkg" >/dev/null 2>&1 || true
 sleep 2
 run '/etc/init.d/btproxy enabled' && fail "reinstall enabled a disabled service"
 
@@ -147,14 +108,7 @@ run 'sysupgrade -l 2>/dev/null | grep -q /etc/btproxy/bonds-test.json' || fail "
 run 'sysupgrade -l 2>/dev/null | grep -q /etc/config/btproxy' || fail "sysupgrade drops the UCI config"
 
 # The LuCI page installs and removes on its own. Its access rules let it manage the key, but never read it.
-if [ "$ext" = ipk ]; then
-	install_luci='opkg install uhttpd /pkg/new/luci-app-btproxy.ipk'
-	remove_luci='opkg remove luci-app-btproxy'
-else
-	install_luci='apk add --allow-untrusted uhttpd /pkg/new/luci-app-btproxy.apk'
-	remove_luci='apk del luci-app-btproxy'
-fi
-run "$install_luci" >/dev/null || fail "LuCI page install"
+pkg_install uhttpd "/pkg/new/luci-app-btproxy.$ext" >/dev/null || fail "LuCI page install"
 run 'test -f /www/luci-static/resources/view/btproxy.js' || fail "no LuCI view"
 run 'test -f /usr/share/luci/menu.d/luci-app-btproxy.json' || fail "no LuCI menu entry"
 hash=$(run 'uhttpd -m acltest')
@@ -178,14 +132,14 @@ access file /bin/sh exec false
 access file /etc/shadow read false
 access uci btproxy write true
 access uci network read false
-run "$remove_luci" >/dev/null || fail "LuCI page removal"
+pkg_remove luci-app-btproxy >/dev/null || fail "LuCI page removal"
 if run 'test -e /www/luci-static/resources/view/btproxy.js'; then fail "LuCI view left behind"; fi
 run 'test -x /usr/bin/btproxy' || fail "removing the LuCI page removed the proxy"
 
 # Removal: the service stops and the binary goes.
 run '/etc/init.d/btproxy enable; /etc/init.d/btproxy start'
 sleep 2
-run "$remove" >/dev/null || fail "remove"
+pkg_remove btproxy >/dev/null || fail "remove"
 sleep 2
 if run 'pidof btproxy >/dev/null'; then fail "still running after removal"; fi
 if run 'test -e /usr/bin/btproxy'; then fail "binary left behind"; fi
