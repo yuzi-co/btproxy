@@ -15,17 +15,6 @@ import (
 	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
-func startServerConfig(t *testing.T, cfg Config, a ble.Adapter) *testClient {
-	t.Helper()
-	return startServerLog(t, cfg, a, logx.Discard())
-}
-
-func startServerLog(t *testing.T, cfg Config, a ble.Adapter, log *logx.Logger) *testClient {
-	t.Helper()
-	cfg.Name = "test"
-	return serve(t, NewServer(cfg, a, log))
-}
-
 // listed is one entity from ListEntities.
 type listed struct {
 	typ uint32
@@ -106,8 +95,8 @@ func (tc *testClient) pressButton(id string) {
 
 // TestEntityKeysAreUnique covers every kind of entity, since Home Assistant keys entities across kinds.
 func TestEntityKeysAreUnique(t *testing.T) {
-	tc := startServerConfig(t, Config{Restart: func() {}, LastProblem: func() string { return "" }},
-		&stackAdapter{available: true})
+	tc := startServer(t, &stackAdapter{available: true},
+		withConfig(Config{Restart: func() {}, LastProblem: func() string { return "" }}))
 	seen := map[uint64]string{}
 	for id, e := range tc.listAll() {
 		key := fieldValue(e.fs, 2)
@@ -212,7 +201,7 @@ func TestLastProblemSensor(t *testing.T) {
 	var problem atomic.Value
 	problem.Store("")
 	cfg := Config{LastProblem: func() string { return problem.Load().(string) }}
-	tc := startServerConfig(t, cfg, testAdapter{})
+	tc := startServer(t, testAdapter{}, withConfig(cfg))
 	tc.send(msgSubscribeStatesRequest, nil)
 	if got := tc.textOf("last_problem"); got != "none" {
 		t.Errorf("before any problem: %q", got)
@@ -357,7 +346,7 @@ func TestRestartButtonListing(t *testing.T) {
 	if _, ok := startServer(t, testAdapter{}).listAll()["restart_proxy"]; ok {
 		t.Error("listed with nothing to restart")
 	}
-	got := startServerConfig(t, Config{Restart: func() {}}, testAdapter{}).listAll()["restart_proxy"]
+	got := startServer(t, testAdapter{}, withConfig(Config{Restart: func() {}})).listAll()["restart_proxy"]
 	if got.typ != msgListEntitiesButtonResponse {
 		t.Fatalf("listed as %+v", got)
 	}
@@ -374,7 +363,7 @@ func TestRestartButtonDropsConnectionsFirst(t *testing.T) {
 	conn := &recordingConn{}
 	restarted := make(chan bool, 1)
 	cfg := Config{Restart: func() { restarted <- conn.disconnected.Load() }}
-	tc := startServerConfig(t, cfg, testAdapter{connect: func(ble.Events) (ble.Conn, error) { return conn, nil }})
+	tc := startServer(t, testAdapter{connect: func(ble.Events) (ble.Conn, error) { return conn, nil }}, withConfig(cfg))
 	tc.connect()
 	tc.pressButton("restart_proxy")
 	select {
@@ -397,7 +386,7 @@ func TestRestartButtonDoesNotWaitForAStuckDisconnect(t *testing.T) {
 	conn := &recordingConn{hang: release}
 	restarted := make(chan struct{})
 	cfg := Config{Restart: func() { close(restarted) }}
-	tc := startServerConfig(t, cfg, testAdapter{connect: func(ble.Events) (ble.Conn, error) { return conn, nil }})
+	tc := startServer(t, testAdapter{connect: func(ble.Events) (ble.Conn, error) { return conn, nil }}, withConfig(cfg))
 	tc.connect()
 	tc.pressButton("restart_proxy")
 	select {
@@ -431,7 +420,7 @@ func TestRestartButtonPressesAreNotWarnings(t *testing.T) {
 	restarted := make(chan struct{})
 	a := &stackAdapter{available: true, pressed: make(chan struct{}, 1)}
 	cfg := Config{Restart: func() { close(restarted) }}
-	tc := startServerLog(t, cfg, a, logx.New(&logs, logx.LevelInfo, nil))
+	tc := startServer(t, a, withConfig(cfg), withLog(logx.New(&logs, logx.LevelInfo, nil)))
 	tc.pressButton("restart_bluetooth")
 	<-a.pressed
 	tc.pressButton("restart_proxy")
@@ -445,7 +434,7 @@ func TestRestartButtonPressesAreNotWarnings(t *testing.T) {
 func TestRefusedStackRestartIsAWarning(t *testing.T) {
 	var logs logBuffer
 	a := &stackAdapter{available: true, err: errors.New("too soon"), pressed: make(chan struct{}, 1)}
-	tc := startServerLog(t, Config{}, a, logx.New(&logs, logx.LevelInfo, nil))
+	tc := startServer(t, a, withLog(logx.New(&logs, logx.LevelInfo, nil)))
 	tc.pressButton("restart_bluetooth")
 	<-a.pressed
 	deadline := time.Now().Add(5 * time.Second)

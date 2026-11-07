@@ -194,19 +194,8 @@ func TestLogsDeadClient(t *testing.T) {
 // server's own log lines.
 func TestSubscribeLogs(t *testing.T) {
 	logs := &Logs{}
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { l.Close() })
-	log := logx.New(io.Discard, logx.LevelInfo, logs)
-	go NewServer(Config{Name: "test", MaxConnections: 2, Logs: logs, Backend: "fake"}, testAdapter{}, log).Serve(l)
-	c, err := net.Dial("tcp", l.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { c.Close() })
-	tc := &testClient{t: t, c: c, r: bufio.NewReader(c)}
+	tc := startServer(t, testAdapter{}, withConfig(Config{MaxConnections: 2, Logs: logs, Backend: "fake"}),
+		withLog(logx.New(io.Discard, logx.LevelInfo, logs)))
 
 	var e enc
 	e.uint(1, logDebug)
