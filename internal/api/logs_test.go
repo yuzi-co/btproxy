@@ -54,7 +54,7 @@ func newLogPeer(t *testing.T, logs *Logs, level int32) *logPeer {
 	a, b := net.Pipe()
 	t.Cleanup(func() { a.Close(); b.Close() })
 	c := newClient(&Server{}, a, logx.New(nil, logx.LevelInfo, logs))
-	t.Cleanup(c.closeQueue)
+	t.Cleanup(c.out.close)
 	logs.subscribe(c, level)
 	t.Cleanup(func() { logs.unsubscribe(c) })
 	return &logPeer{t: t, c: c, p: b, r: bufio.NewReader(b)}
@@ -180,7 +180,7 @@ func TestLogsDeadClient(t *testing.T) {
 	a, b := net.Pipe()
 	b.Close()
 	c := newClient(&Server{}, a, log)
-	defer c.closeQueue()
+	defer c.out.close()
 	logs.subscribe(c, logVeryVerbose)
 	defer logs.unsubscribe(c)
 	log.Info("first")

@@ -259,7 +259,8 @@ func TestConnectAfterClientLeft(t *testing.T) {
 		connects.Add(1)
 		return &testConn{}, nil
 	}}, logx.Discard())
-	c := &client{s: s, c: discardConn{}, log: s.log, out: make(chan outMsg, outQueue)} // no writer: out keeps the replies
+	c := &client{s: s, c: discardConn{}, log: s.log}
+	c.out.init(c.c, c.log, false) // no writer: the queue keeps the replies
 	s.clients[c] = true
 	s.removeClient(c)
 	c.deviceRequest(request{kind: reqConnectV3WithCache, addr: testAddr})
@@ -273,7 +274,7 @@ func TestConnectAfterClientLeft(t *testing.T) {
 		t.Fatalf("%d connection slots held for a client that had left", slots)
 	}
 	select {
-	case m := <-c.out:
+	case m := <-c.out.ch:
 		fs, err := fields(m.payload)
 		if err != nil {
 			t.Fatal(err)

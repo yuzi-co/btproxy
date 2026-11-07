@@ -90,7 +90,7 @@ func (l *Logs) publish(level int32, payload []byte) {
 		select {
 		case sub.ch <- payload:
 		default:
-			c.logDrops.Add(1)
+			c.out.logDrops.Add(1)
 		}
 	}
 }
@@ -100,7 +100,7 @@ func (l *Logs) publish(level int32, payload []byte) {
 func (sub *logSub) run(c *client) {
 	for p := range sub.ch {
 		if !c.sendDroppable(msgSubscribeLogsResponse, p) {
-			c.logDrops.Add(1)
+			c.out.logDrops.Add(1)
 		}
 	}
 }

@@ -142,10 +142,10 @@ func (s *Server) setScanning(c *client, on bool) {
 }
 
 // switchCommand handles SwitchCommandRequest; an unknown key is ignored.
-func (c *client) switchCommand(payload []byte) error {
-	fs, err := fields(payload)
+func (c *client) switchCommand(f Frame) bool {
+	fs, err := fields(f.Payload)
 	if err != nil {
-		return err
+		return c.bad(f.Type, err)
 	}
 	var key uint32
 	var on bool
@@ -162,15 +162,15 @@ func (c *client) switchCommand(payload []byte) error {
 	} else {
 		c.log.Debug("command for an unknown switch", "key", key)
 	}
-	return nil
+	return true
 }
 
-// buttonCommand handles ButtonCommandRequest; an unknown key is ignored. False means too many requests are
-// running, which closes the client.
-func (c *client) buttonCommand(payload []byte) (bool, error) {
-	fs, err := fields(payload)
+// buttonCommand handles ButtonCommandRequest; an unknown key is ignored. The press runs in its own goroutine,
+// so false means too many requests are running, which closes the client.
+func (c *client) buttonCommand(f Frame) bool {
+	fs, err := fields(f.Payload)
 	if err != nil {
-		return true, err
+		return c.bad(f.Type, err)
 	}
 	var key uint32
 	for _, f := range fs {
@@ -180,11 +180,11 @@ func (c *client) buttonCommand(payload []byte) (bool, error) {
 	}
 	for i := range c.s.buttons {
 		if b := &c.s.buttons[i]; entityKey(b.id) == key {
-			return c.spawn(func() { b.press(c) }), nil
+			return c.spawn(func() { b.press(c) })
 		}
 	}
 	c.log.Debug("command for an unknown button", "key", key)
-	return true, nil
+	return true
 }
 
 func encBinarySensorInfo(e *binarySensor) []byte {

@@ -173,9 +173,10 @@ func TestConnSuccessWindow(t *testing.T) {
 // TestAdvertStats counts advertisements, their rate, and the ones dropped for a client that is behind.
 func TestAdvertStats(t *testing.T) {
 	s := NewServer(Config{Name: "test"}, testAdapter{}, logx.Discard())
-	c := &client{s: s, c: discardConn{}, log: s.log, out: make(chan outMsg, outQueue), advSubscribed: true}
+	c := &client{s: s, c: discardConn{}, log: s.log, advSubscribed: true}
+	c.out.init(c.c, c.log, false)
 	for range dropLimit { // a writer that does not run: the queue stays full
-		c.out <- outMsg{}
+		c.out.ch <- outMsg{}
 	}
 	s.clients[c] = true
 	for range advBatchSize {

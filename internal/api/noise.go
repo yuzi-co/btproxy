@@ -271,9 +271,7 @@ func (c *client) noiseHandshake(r *bufio.Reader) error {
 	// The reply is queued before the transport cipher is set, so nothing encrypted can go ahead of it.
 	c.recv = recv
 	c.writeRaw(appendNoiseFrame(nil, append([]byte{0x00}, reply...)))
-	c.wmu.Lock()
-	c.sendC = send
-	c.wmu.Unlock()
+	c.out.setCipher(send)
 	return nil
 }
 
@@ -298,7 +296,7 @@ func (c *client) readNoise(r *bufio.Reader) (Frame, error) {
 }
 
 // appendNoise encrypts one message into a frame appended to b, in place. Called by the writer only.
-func (c *client) appendNoise(b []byte, typ uint32, payload []byte) ([]byte, error) {
+func (o *outbox) appendNoise(b []byte, typ uint32, payload []byte) ([]byte, error) {
 	if len(payload) > MaxMessageSize {
 		return b, fmt.Errorf("message of %d bytes is too large", len(payload))
 	}
@@ -309,7 +307,7 @@ func (c *client) appendNoise(b []byte, typ uint32, payload []byte) ([]byte, erro
 	b = binary.BigEndian.AppendUint16(b, uint16(typ))
 	b = binary.BigEndian.AppendUint16(b, uint16(len(payload)))
 	b = append(b, payload...)
-	ct := c.sendC.seal(b[off:off], nil, b[off:])
+	ct := o.cipher.seal(b[off:off], nil, b[off:])
 	return b[:off+len(ct)], nil
 }
 

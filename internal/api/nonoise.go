@@ -23,4 +23,4 @@ func (c *client) noiseHandshake(*bufio.Reader) error { return errNoEncryption }
 
 func (c *client) readNoise(*bufio.Reader) (Frame, error) { return Frame{}, errNoEncryption }
 
-func (c *client) appendNoise(b []byte, _ uint32, _ []byte) ([]byte, error) { return b, errNoEncryption }
+func (o *outbox) appendNoise(b []byte, _ uint32, _ []byte) ([]byte, error) { return b, errNoEncryption }

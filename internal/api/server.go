@@ -179,6 +179,22 @@ func (s *Server) advSubscribed() bool {
 	return false
 }
 
+// subscribeAdverts starts or stops the advertisement stream to c, and the scanner with it when c is the first
+// or last subscriber.
+func (s *Server) subscribeAdverts(c *client, on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.advSubscribed = on
+	s.updateScan()
+}
+
+// subscribeStates has c sent the entity states from now on.
+func (s *Server) subscribeStates(c *client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.statesSubscribed = true
+}
+
 // updateScan starts scanning when the first client subscribes to advertisements and stops after the last
 // one leaves, or while the scanning switch is off. Called with s.mu held.
 func (s *Server) updateScan() {

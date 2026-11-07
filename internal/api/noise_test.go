@@ -264,15 +264,13 @@ func TestNoiseQueueOrder(t *testing.T) {
 	a, b := net.Pipe()
 	defer b.Close()
 	c := newClient(&Server{cfg: Config{EncryptionKey: testPSK}}, a, logx.Discard())
-	c.wmu.Lock()
-	c.sendC = newNoiseCipher(testPSK)
-	c.wmu.Unlock()
+	c.out.setCipher(newNoiseCipher(testPSK))
 	const n = outQueue // no more, or the queue could overflow
 	go func() {
 		for i := range n {
 			c.send(uint32(i%500), bytes.Repeat([]byte{byte(i)}, i%300))
 		}
-		c.closeQueue()
+		c.out.close()
 	}()
 	nc := &noiseClient{t: t, c: b, r: bufio.NewReader(b), recv: newNoiseCipher(testPSK)}
 	for i := range n {
