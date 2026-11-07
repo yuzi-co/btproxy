@@ -9,7 +9,7 @@ import (
 // In active mode Windows reports an empty scan response as an entry of its own, which tells Home Assistant
 // nothing: the device's advertisements arrive anyway.
 func TestDeliverDropsEmptyAdverts(t *testing.T) {
-	a := &Adapter{}
+	a := testAdapter(t)
 	var got []ble.Advert
 	fn := func(ad ble.Advert) { got = append(got, ad) }
 	a.fn.Store(&fn)
@@ -26,5 +26,5 @@ func TestDeliverDropsEmptyAdverts(t *testing.T) {
 }
 
 func TestDeliverWithoutAScan(t *testing.T) {
-	(&Adapter{}).deliver(ble.Advert{Addr: 1, Data: []byte{2, 1, 6}})
+	testAdapter(t).deliver(ble.Advert{Addr: 1, Data: []byte{2, 1, 6}})
 }
