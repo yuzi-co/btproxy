@@ -136,7 +136,17 @@ func (c *conn) Pair() error {
 // Unpair removes the device from BlueZ, which deletes its bond and drops any connection to it: BlueZ has no
 // call that removes only the bond. A device BlueZ does not know has no bond to remove.
 func (a *Adapter) Unpair(addr uint64) error {
-	err := a.call(a.path, ifAdapter+".RemoveDevice", a.devicePath(addr)).Err
+	p := a.devicePath(addr)
+	a.mu.Lock()
+	c := a.conns[p]
+	a.mu.Unlock()
+	if c != nil {
+		// The link going down is the caller's doing, so it is not reported (see ble.Adapter.Unpair).
+		c.mu.Lock()
+		c.closed = true
+		c.mu.Unlock()
+	}
+	err := a.call(a.path, ifAdapter+".RemoveDevice", p).Err
 	var de dbus.Error
 	if errors.As(err, &de) && de.Name == "org.bluez.Error.DoesNotExist" {
 		return nil

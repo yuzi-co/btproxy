@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/bletest"
 )
 
 func fakeQuiet(bz *fakeBlueZ) (rssi int16, quietMons bool, registered int) {
@@ -31,24 +32,24 @@ func TestQuietPassive(t *testing.T) {
 	a.SetScanMode(ble.ScanPassive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	t.Cleanup(stop)
-	waitFor(t, "passive scan", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	bletest.WaitFor(t, "passive scan", statusIs(a, ble.ScanRunning, ble.ScanPassive))
 	if _, q, reg := fakeQuiet(bz); q || reg != len(monitorPatterns) {
 		t.Fatalf("before the monitor delivered: quiet %v, %d monitors", q, reg)
 	}
 
 	src.ads <- ble.Advert{Addr: 1, RSSI: -50}
-	waitFor(t, "monitor that matches nothing", func() bool { _, q, reg := fakeQuiet(bz); return q && reg == 1 })
-	waitFor(t, "passive scan", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	bletest.WaitFor(t, "monitor that matches nothing", func() bool { _, q, reg := fakeQuiet(bz); return q && reg == 1 })
+	bletest.WaitFor(t, "passive scan", statusIs(a, ble.ScanRunning, ble.ScanPassive))
 	if _, disc, _ := bz.state(); disc {
 		t.Fatal("discovering")
 	}
 
 	src.fail <- errors.New("read: network is down")
-	waitFor(t, "real monitors", func() bool {
+	bletest.WaitFor(t, "real monitors", func() bool {
 		_, q, reg := fakeQuiet(bz)
 		return !q && reg == len(monitorPatterns) && allDevices(a)
 	})
-	waitFor(t, "passive scan", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	bletest.WaitFor(t, "passive scan", statusIs(a, ble.ScanRunning, ble.ScanPassive))
 }
 
 // TestQuietActive: once the monitor delivers, discovery runs with an RSSI threshold no advertisement reaches
@@ -62,19 +63,19 @@ func TestQuietActive(t *testing.T) {
 	}
 
 	src.ads <- ble.Advert{Addr: 1, RSSI: -50}
-	waitFor(t, "quiet discovery", func() bool {
+	bletest.WaitFor(t, "quiet discovery", func() bool {
 		rssi, q, reg := fakeQuiet(bz)
 		_, disc, _ := bz.state()
 		return rssi == quietRSSI && q && reg == 1 && disc
 	})
 
 	src.fail <- errors.New("read: network is down")
-	waitFor(t, "discovery after the fallback", func() bool {
+	bletest.WaitFor(t, "discovery after the fallback", func() bool {
 		rssi, _, reg := fakeQuiet(bz)
 		_, disc, _ := bz.state()
 		return rssi == 0 && reg == 0 && disc && dupData(bz)
 	})
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
 }
 
 // TestQuietOffload: when the controller matches monitor patterns itself, bluetoothd keeps reporting devices,
@@ -93,10 +94,10 @@ func TestQuietOffload(t *testing.T) {
 	a.SetScanMode(ble.ScanActive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	t.Cleanup(stop)
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
 	src.ads <- ble.Advert{Addr: 1, RSSI: -50}
-	waitFor(t, "discovery armed again", func() bool { s, _ := bz.calls(); return s >= 2 })
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "discovery armed again", func() bool { s, _ := bz.calls(); return s >= 2 })
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
 	if rssi, q, reg := fakeQuiet(bz); rssi != 0 || q || reg != len(monitorPatterns) {
 		t.Fatalf("with controller patterns: RSSI %d, quiet %v, %d monitors", rssi, q, reg)
 	}
@@ -110,7 +111,7 @@ func TestConnectUnknown(t *testing.T) {
 	useRaw(t, src)
 	a, bz, _ := openRawTest(t, RawOn, true)
 	src.ads <- ble.Advert{Addr: 1, RSSI: -50}
-	waitFor(t, "quiet discovery", func() bool { rssi, _, _ := fakeQuiet(bz); return rssi == quietRSSI })
+	bletest.WaitFor(t, "quiet discovery", func() bool { rssi, _, _ := fakeQuiet(bz); return rssi == quietRSSI })
 	ev := ble.Events{Notification: func(uint16, []byte) {}, Disconnected: func(error) {}}
 	connect := func(addr uint64, want ...string) {
 		t.Helper()
@@ -128,14 +129,14 @@ func TestConnectUnknown(t *testing.T) {
 	}
 
 	connect(0xC1C2C3C4C5C6, "ConnectDevice")
-	waitFor(t, "device announced", func() bool { _, ok := rssiOf(a, fakeAdapter+"/dev_C1_C2_C3_C4_C5_C6"); return ok })
+	bletest.WaitFor(t, "device announced", func() bool { _, ok := rssiOf(a, fakeAdapter+"/dev_C1_C2_C3_C4_C5_C6"); return ok })
 	connect(0xC1C2C3C4C5C6, "Connect")
 
 	bz.hideDevice(fakeAdapter + "/dev_D1_D2_D3_D4_D5_D6")
 	connect(0xD1D2D3D4D5D6, "ConnectDevice", "Connect")
 
 	bz.advertise()
-	waitFor(t, "device announced", func() bool { _, ok := rssiOf(a, fakeDevice); return ok })
+	bletest.WaitFor(t, "device announced", func() bool { _, ok := rssiOf(a, fakeDevice); return ok })
 	bz.bus.Export(nil, fakeDevice, ifDevice) // BlueZ removed it, the signal is on its way
 	bz.mu.Lock()
 	delete(bz.devices, fakeDevice)

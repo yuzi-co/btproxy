@@ -72,23 +72,15 @@ type Adapter struct {
 	retry ble.ConnectRetry // see retry.go
 }
 
-// Options configures the scanner's watchdog (see watch.go).
+// Options configures the adapter: the scanner's watchdog (see watch.go) and connects (see pause.go and retry.go).
 type Options struct {
-	// StallTimeout restarts active discovery when it delivers no advertisement for this long; 0 disables it.
-	StallTimeout time.Duration
+	ble.WatchdogOptions // StallTimeout restarts active discovery
+	ble.ConnectOptions
 	// RestartCmd is a shell command that restarts bluetoothd when scanning stalls or bluetoothd stops
 	// answering repeatedly; empty disables it.
 	RestartCmd string
-	// USBReset lets the watchdog reset the adapter's USB device when nothing else brought scanning back.
-	USBReset bool
 	// RawAdverts selects where advertisements come from (see raw.go).
 	RawAdverts RawMode
-	// PauseOnConnect stops scanning while a connect is in progress (see pause.go).
-	PauseOnConnect bool
-	// ConnectRetries is how often a connect that failed on the radio or lost the link early is retried (see retry.go).
-	ConnectRetries int
-	// ConnectRetryDelay is the wait before the first retry; each later one waits twice the previous. 0 retries at once.
-	ConnectRetryDelay time.Duration
 	// Log receives the adapter's log lines; nil discards them.
 	Log *logx.Logger
 }
@@ -490,13 +482,13 @@ func (a *Adapter) updateDevice(p dbus.ObjectPath, props map[string]dbus.Variant,
 
 // adData rebuilds raw AD structures from the cached properties. BlueZ only exposes the parsed form, so field
 // order and the split between advertisement and scan response are not the original; Home Assistant parses
-// the fields, so that does not matter. Fields that do not fit in 62 bytes are dropped, least useful last.
+// the fields, so that does not matter. Fields that do not fit in ble.MaxAdvert bytes are dropped, least useful
+// last.
 func (d *device) adData() []byte {
-	out := make([]byte, 0, 62)
+	out := make([]byte, 0, ble.MaxAdvert)
 	add := func(typ byte, payload []byte) {
-		if len(payload) > 0 && len(out)+2+len(payload) <= 62 {
-			out = append(out, byte(len(payload)+1), typ)
-			out = append(out, payload...)
+		if len(payload) > 0 {
+			out = ble.AppendAD(out, typ, payload)
 		}
 	}
 	if len(d.flags) > 0 {
@@ -515,7 +507,7 @@ func (d *device) adData() []byte {
 		} else if ok {
 			add(0x20, append([]byte{byte(s), byte(s >> 8), byte(s >> 16), byte(s >> 24)}, data...))
 		} else {
-			add(0x21, append(uuidLE(uu), data...))
+			add(0x21, append(uu.AppendLE(nil), data...))
 		}
 	}
 	var u16, u128 []byte
@@ -527,7 +519,7 @@ func (d *device) adData() []byte {
 		if s, ok := uu.Short(); ok && s <= 0xffff {
 			u16 = append(u16, byte(s), byte(s>>8))
 		} else {
-			u128 = append(u128, uuidLE(uu)...)
+			u128 = uu.AppendLE(u128)
 		}
 	}
 	add(0x03, u16)
@@ -537,16 +529,6 @@ func (d *device) adData() []byte {
 		add(0x0a, []byte{byte(int8(*d.txPower))})
 	}
 	return out
-}
-
-// uuidLE is the little-endian byte order AD structures use for 128-bit UUIDs.
-func uuidLE(u ble.UUID) []byte {
-	b := make([]byte, 16)
-	for i := 0; i < 8; i++ {
-		b[i] = byte(u.Lo >> (8 * i))
-		b[8+i] = byte(u.Hi >> (8 * i))
-	}
-	return b
 }
 
 func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn, error) {
@@ -598,7 +580,7 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		}
 		return c.awaitResolved()
 	}, func(err error) bool {
-		if !errors.Is(err, errLinkLost) && !(radioFailure(err) && connectTook <= retryFast) {
+		if !errors.Is(err, ble.ErrLinkLost) && !(radioFailure(err) && connectTook <= retryFast) {
 			var de dbus.Error
 			errors.As(err, &de)
 			log.Debug("connect failed, not a radio failure", "err", err, "name", de.Name)
@@ -638,7 +620,7 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	c.up = !lost
 	c.mu.Unlock()
 	if lost {
-		return fail(errors.New("link lost while connecting"))
+		return fail(fmt.Errorf("%w while connecting", ble.ErrLinkLost))
 	}
 	return c, nil
 }
@@ -801,7 +783,7 @@ func (c *conn) deviceChanged(changed map[string]dbus.Variant) {
 		c.closed = true
 		c.mu.Unlock()
 		if report {
-			c.ev.Disconnected(errors.New("link lost"))
+			c.ev.Disconnected(ble.ErrLinkLost)
 		}
 	}
 }

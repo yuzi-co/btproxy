@@ -34,7 +34,7 @@ var services = []ble.Service{
 	}},
 }
 
-func short(v uint32) ble.UUID { return ble.UUID{Hi: uint64(v)<<32 | 0x1000, Lo: 0x800000805f9b34fb} }
+func short(v uint32) ble.UUID { return ble.ShortUUID(v) }
 
 func must(s string) ble.UUID {
 	u, err := ble.ParseUUID(s)

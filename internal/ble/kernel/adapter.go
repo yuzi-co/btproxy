@@ -32,7 +32,7 @@ const (
 
 var (
 	// errLinkLost is a link that came up and dropped before it could be used.
-	errLinkLost = errors.New("link lost right after connecting")
+	errLinkLost = fmt.Errorf("%w right after connecting", ble.ErrLinkLost)
 	// errRadio is HCI reason 0x3e, connection failed to be established: the first connection events did not get
 	// through. The kernel waits for an advertisement before it connects, so this can come after some seconds.
 	errRadio = errors.New("connection failed to be established (HCI 0x3e)")
@@ -45,7 +45,7 @@ func retryable(err error, took time.Duration) bool {
 	if errors.As(err, &perm) {
 		return false
 	}
-	return errors.Is(err, errLinkLost) || errors.Is(err, errRadio) || took <= retryFast
+	return errors.Is(err, ble.ErrLinkLost) || errors.Is(err, errRadio) || took <= retryFast
 }
 
 // permanentError is a connect failure that another attempt will not change.
@@ -61,17 +61,10 @@ type Options struct {
 	BondDir string
 	// BlueZDir is where BlueZ keeps its bonds, to copy from the first time this controller is used. Empty for none.
 	BlueZDir string
-	// StallTimeout is how long scanning may deliver nothing before the adapter tries to bring it back; 0 never.
-	StallTimeout time.Duration
-	// USBReset allows resetting the adapter's USB device as the last step of that.
-	USBReset bool
-	// PauseOnConnect stops all scanning while a connect is in progress.
-	PauseOnConnect bool
-	// ConnectRetries is how often a connect that failed on the radio or lost the link early is retried.
-	ConnectRetries int
-	// ConnectRetryDelay is the wait before the first retry; each later one waits twice the previous. 0 retries at once.
-	ConnectRetryDelay time.Duration
-	Log               *logx.Logger
+	ble.WatchdogOptions
+	ble.ConnectOptions // PauseOnConnect stops the monitor too (see applyScan)
+	// Log receives the adapter's log lines; nil discards them.
+	Log *logx.Logger
 
 	tick            time.Duration
 	maxStallBackoff time.Duration
@@ -196,7 +189,7 @@ func open(name string, opt Options, sys system) (*Adapter, error) {
 	if len(info) < 6 {
 		return fail(fmt.Errorf("adapter %s: short controller information", name))
 	}
-	a.mac = getAddr(info)
+	a.mac = ble.AddrFromLE(info)
 	if a.bonds, err = openBonds(opt.BondDir, a.mac); err != nil {
 		return fail(fmt.Errorf("bonds: %w", err))
 	}

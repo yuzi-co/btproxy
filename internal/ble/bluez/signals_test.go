@@ -12,6 +12,7 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/bletest"
 )
 
 // rssiOf is the RSSI the device cache holds for a device; ok is false if it has no entry.
@@ -33,7 +34,7 @@ func flush(t *testing.T, a *Adapter, bz *fakeBlueZ) {
 	n := flushes.Add(1)
 	p := dbus.ObjectPath(fmt.Sprintf("%s/dev_00_00_00_00_%02X_%02X", fakeAdapter, byte(n>>8), byte(n)))
 	bz.advertiseFrom(p, -90)
-	waitFor(t, "flush", func() bool { _, ok := rssiOf(a, p); return ok })
+	bletest.WaitFor(t, "flush", func() bool { _, ok := rssiOf(a, p); return ok })
 }
 
 func allDevices(a *Adapter) bool {
@@ -63,7 +64,7 @@ func TestNarrowMatches(t *testing.T) {
 	expectRSSI(t, a, bz, -61, "before the monitor delivered")
 
 	src.ads <- ble.Advert{Addr: 1, RSSI: -50}
-	waitFor(t, "rule for every device dropped", func() bool { return !allDevices(a) })
+	bletest.WaitFor(t, "rule for every device dropped", func() bool { return !allDevices(a) })
 	bz.advertiseFrom(fakeDevice, -62)
 	expectRSSI(t, a, bz, -61, "not connected")
 
@@ -105,7 +106,7 @@ func TestNarrowMatches(t *testing.T) {
 	bz = startFakeBlueZ(t, os.Getenv("DBUS_SYSTEM_BUS_ADDRESS"), false)
 	t.Cleanup(func() { bz.bus.Close() })
 	bz.advertise() // a new bluetoothd announces the device again
-	waitFor(t, "device announced again", func() bool { r, _ := rssiOf(a, fakeDevice); return r == -60 })
+	bletest.WaitFor(t, "device announced again", func() bool { r, _ := rssiOf(a, fakeDevice); return r == -60 })
 	bz.advertiseFrom(fakeDevice, -67)
 	expectRSSI(t, a, bz, -60, "after bluetoothd restarted")
 	if allDevices(a) {
@@ -121,17 +122,17 @@ func TestFallbackMatches(t *testing.T) {
 	a, bz, got := openRawTest(t, RawOn, false)
 	bz.advertise()
 	src.ads <- ble.Advert{Addr: 1, RSSI: -50}
-	waitFor(t, "rule for every device dropped", func() bool { return !allDevices(a) })
+	bletest.WaitFor(t, "rule for every device dropped", func() bool { return !allDevices(a) })
 	bz.advertiseFrom(fakeDevice, -61)
 	expectRSSI(t, a, bz, -60, "raw advertisements")
 
 	src.fail <- errors.New("read: network is down")
-	waitFor(t, "discovery with DuplicateData", func() bool { return dupData(bz) })
+	bletest.WaitFor(t, "discovery with DuplicateData", func() bool { return dupData(bz) })
 	if !allDevices(a) {
 		t.Fatal("discovery restarted before the rule for every device came back")
 	}
 	bz.advertiseFrom(fakeDevice, -67)
-	waitFor(t, "BlueZ advertisement", func() bool { g := got(); return len(g) > 1 && g[len(g)-1] == -67 })
+	bletest.WaitFor(t, "BlueZ advertisement", func() bool { g := got(); return len(g) > 1 && g[len(g)-1] == -67 })
 }
 
 // TestNoOrphan: a property change for a device BlueZ has removed does not bring it back into the cache.
@@ -144,7 +145,7 @@ func TestNoOrphan(t *testing.T) {
 		t.Fatal(err)
 	}
 	bz.advertise()
-	waitFor(t, "device", func() bool { _, ok := rssiOf(a, fakeDevice); return ok })
+	bletest.WaitFor(t, "device", func() bool { _, ok := rssiOf(a, fakeDevice); return ok })
 	bz.removeDevice(fakeDevice)
 	bz.bus.Emit(fakeDevice, ifProps+".PropertiesChanged", ifDevice,
 		map[string]dbus.Variant{"RSSI": dbus.MakeVariant(int16(-70))}, []string{})

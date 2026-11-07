@@ -32,12 +32,7 @@ var (
 
 // Options configures the adapter.
 type Options struct {
-	// ConnectRetries is how often a connect that failed at once on the radio is retried (see retry_windows.go).
-	ConnectRetries int
-	// ConnectRetryDelay is the wait before the first retry; each later one waits twice the previous. 0 retries at once.
-	ConnectRetryDelay time.Duration
-	// PauseOnConnect stops scanning while a connect is in progress (see pause_windows.go).
-	PauseOnConnect bool
+	ble.ConnectOptions // see retry_windows.go and pause_windows.go
 	// Log receives the adapter's log lines; nil discards them.
 	Log *logx.Logger
 }
@@ -388,7 +383,7 @@ func (a *Adapter) received(args *advertisement.BluetoothLEAdvertisementReceivedE
 	if t, err := args.GetBluetoothAddressType(); err == nil && t == bluetooth.BluetoothAddressTypeRandom {
 		at = ble.AddrRandom
 	}
-	var buf [maxAdvert]byte
+	var buf [ble.MaxAdvert]byte
 	data := buf[:0]
 	if adv, err := args.GetAdvertisement(); err == nil && adv != nil {
 		data = appendSections(data, adv)
@@ -407,7 +402,8 @@ func (a *Adapter) deliver(ad ble.Advert) {
 	(*fn)(ad)
 }
 
-// appendSections rebuilds the raw AD structures of an advertisement from its data sections.
+// appendSections rebuilds the raw AD structures of an advertisement from its data sections, as they were on
+// air: WinRT hands advertisements over parsed.
 func appendSections(dst []byte, adv *advertisement.BluetoothLEAdvertisement) []byte {
 	v, err := adv.GetDataSections()
 	if err != nil || v == nil {
@@ -415,7 +411,7 @@ func appendSections(dst []byte, adv *advertisement.BluetoothLEAdvertisement) []b
 	}
 	defer v.Release()
 	n, _ := v.GetSize()
-	var scratch [maxAdvert]byte
+	var scratch [ble.MaxAdvert]byte
 	for i := range n {
 		p, err := v.GetAt(i)
 		if err != nil || p == nil {
@@ -426,9 +422,9 @@ func appendSections(dst []byte, adv *advertisement.BluetoothLEAdvertisement) []b
 		b, err2 := s.GetData()
 		if err1 == nil && err2 == nil && b != nil {
 			// Sections of an extended advertisement can be long; one that cannot fit is not copied.
-			if n, err := b.GetLength(); err == nil && len(dst)+2+int(n) <= maxAdvert {
+			if n, err := b.GetLength(); err == nil && len(dst)+2+int(n) <= ble.MaxAdvert {
 				if d, err := appendBuffer(scratch[:0], b); err == nil {
-					dst = appendAD(dst, typ, d)
+					dst = ble.AppendAD(dst, typ, d)
 				}
 			}
 		}

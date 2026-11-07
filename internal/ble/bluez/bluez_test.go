@@ -13,6 +13,7 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/bletest"
 )
 
 func TestHandleOf(t *testing.T) {
@@ -53,7 +54,7 @@ func TestADData(t *testing.T) {
 		t.Errorf("adData\n got %x\nwant %x", got, want)
 	}
 	d.name = string(make([]byte, 40)) // too long to fit: dropped, the rest stays
-	if got := d.adData(); len(got) > 62 || bytes.Contains(got, []byte{41, 0x09}) {
+	if got := d.adData(); len(got) > ble.MaxAdvert || bytes.Contains(got, []byte{41, 0x09}) {
 		t.Errorf("oversized name not dropped: %x", got)
 	}
 }
@@ -234,7 +235,7 @@ func stallDispatch(t *testing.T, a *Adapter, bz *fakeBlueZ) (resume func()) {
 			<-gate
 		}
 	})
-	waitFor(t, "running", func() bool { return a.ScanStatus().State == ble.ScanRunning })
+	bletest.WaitFor(t, "running", func() bool { return a.ScanStatus().State == ble.ScanRunning })
 	armed.Store(true)
 	bz.advertise()
 	select {
@@ -271,7 +272,7 @@ func TestDisconnectWaitsForTheLinkDownSignal(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() { errc <- c.Disconnect() }()
-	waitFor(t, "Disconnect call", func() bool { return bz.disconnectCalls() == 1 })
+	bletest.WaitFor(t, "Disconnect call", func() bool { return bz.disconnectCalls() == 1 })
 	select {
 	case err := <-errc:
 		t.Fatalf("Disconnect returned (%v) before its Connected=false signal was handled", err)
@@ -323,6 +324,31 @@ func TestDisconnectGivesUpWaiting(t *testing.T) {
 	}
 	resume()
 	flush(t, a, bz) // the late signal finds no connection
+}
+
+// TestUnpairDropsSilently: RemoveDevice takes the link down, and BlueZ reports that like any other loss. The
+// caller asked for it, so it is not reported through Events.Disconnected (see ble.Adapter.Unpair).
+func TestUnpairDropsSilently(t *testing.T) {
+	a, bz := openForRetries(t, 0, 0)
+	dropped := make(chan error, 1)
+	ev := retryEvents
+	ev.Disconnected = func(err error) { dropped <- err }
+	c := connectTo(t, a, ev)
+	if err := a.Unpair(0xAABBCCDDEEFF); err != nil {
+		t.Fatal(err)
+	}
+	flush(t, a, bz)
+	select {
+	case err := <-dropped:
+		t.Fatalf("the link going down was reported: %v", err)
+	default:
+	}
+	if connOf(a, fakeDevice) != nil || c.isWatched() {
+		t.Fatal("connection still registered after Unpair")
+	}
+	if err := a.Unpair(0xAABBCCDDEEFF); err != nil {
+		t.Fatalf("unpairing a device BlueZ does not know: %v", err)
+	}
 }
 
 // TestLostLinkIsTornDownBeforeTheConnectWakes: a Connect that is retried sets the connection up again as soon
@@ -381,5 +407,5 @@ func TestOpenFailureClosesTheBus(t *testing.T) {
 	if _, err := Open("hci0", Options{RawAdverts: RawOn}); err == nil {
 		t.Fatal("opened without the HCI monitor")
 	}
-	waitFor(t, "bus connection closed", func() bool { return len(busNames(t, bz.bus)) == before })
+	bletest.WaitFor(t, "bus connection closed", func() bool { return len(busNames(t, bz.bus)) == before })
 }

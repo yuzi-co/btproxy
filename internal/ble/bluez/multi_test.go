@@ -12,6 +12,7 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/bletest"
 )
 
 // TestAgentAnyAdapter checks that the one pairing agent of the process accepts a device connected through
@@ -55,19 +56,19 @@ func TestRestartShared(t *testing.T) {
 		as = append(as, a)
 	}
 	for _, a := range as {
-		waitFor(t, "failed", statusIs(a, ble.ScanFailed, ble.ScanActive))
+		bletest.WaitFor(t, "failed", statusIs(a, ble.ScanFailed, ble.ScanActive))
 	}
-	waitFor(t, "restart command", func() bool { return restarts() == 1 })
+	bletest.WaitFor(t, "restart command", func() bool { return restarts() == 1 })
 	n, _ := bz.calls()
 	// Both supervisors keep striking; with a restart limit of their own, each would have run the command once.
-	waitFor(t, "more unanswered starts", func() bool { s, _ := bz.calls(); return s >= n+4*restartAfter })
+	bletest.WaitFor(t, "more unanswered starts", func() bool { s, _ := bz.calls(); return s >= n+4*restartAfter })
 	time.Sleep(2 * scanRetry)
 	if r := restarts(); r != 1 {
 		t.Fatalf("restart command ran %d times within restartEvery", r)
 	}
 	bz.setWedged(false)
 	for _, a := range as {
-		waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
+		bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
 	}
 	bz.bus.Close()
 }

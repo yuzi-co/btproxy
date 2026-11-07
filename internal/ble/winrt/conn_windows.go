@@ -18,7 +18,7 @@ import (
 )
 
 // cccdUUID is the Client Characteristic Configuration descriptor.
-var cccdUUID = ble.UUID{Hi: 0x0000290200001000, Lo: 0x800000805f9b34fb}
+var cccdUUID = ble.ShortUUID(0x2902)
 
 // conn is a GATT session with one device. Windows has no explicit connect: a GATT session that asks to keep
 // the connection makes the stack connect, and the link drops once no session or service object holds it.
@@ -284,7 +284,7 @@ func (c *conn) statusChanged() {
 		// Not on the event thread: tearing down the session from its own event can stall it.
 		go func() {
 			if c.release() {
-				c.ev.Disconnected(errors.New("link lost"))
+				c.ev.Disconnected(ble.ErrLinkLost)
 			}
 		}()
 	}

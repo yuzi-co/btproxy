@@ -93,16 +93,7 @@ func (m *matcher) match(ad Advert) bool {
 	if !m.wantsData() {
 		return false
 	}
-	// Walk the AD structures: length (type included), type, value. A zero length or a structure running past
-	// the end stops the walk.
-	d := ad.Data
-	for len(d) >= 2 {
-		n := 1 + int(d[0])
-		if n == 1 || n > len(d) {
-			break
-		}
-		t, v := d[1], d[2:n]
-		d = d[n:]
+	for t, v := range ADs(ad.Data) {
 		switch t {
 		case 0x02, 0x03: // incomplete and complete lists of 16-bit service UUIDs
 			for ; len(v) >= 2; v = v[2:] {
@@ -159,7 +150,7 @@ func (m *matcher) hasShort(u uint32) bool {
 
 // hasLong matches a 128-bit UUID as sent on the air, least significant byte first.
 func (m *matcher) hasLong(b []byte) bool {
-	u := UUID{Hi: binary.LittleEndian.Uint64(b[8:16]), Lo: binary.LittleEndian.Uint64(b[:8])}
+	u := UUIDFromLE(b[:16])
 	if s, ok := u.Short(); ok {
 		return m.hasShort(s)
 	}

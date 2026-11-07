@@ -797,14 +797,3 @@ func (s *scripted) Close() error {
 	s.once.Do(func() { close(s.closed) })
 	return nil
 }
-
-func TestUUIDs(t *testing.T) {
-	if u := uuidFromLE([]byte{0x0d, 0x18}); u != short(0x180d) {
-		t.Errorf("16-bit: %v", u)
-	}
-	want, _ := ble.ParseUUID("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
-	le := []byte{0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0, 0x93, 0xf3, 0xa3, 0xb5, 0x01, 0x00, 0x40, 0x6e}
-	if u := uuidFromLE(le); u != want {
-		t.Errorf("128-bit: %v", u)
-	}
-}

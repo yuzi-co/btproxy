@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/yuzi-co/btproxy/internal/ble"
+	"github.com/yuzi-co/btproxy/internal/ble/bletest"
 	"github.com/yuzi-co/btproxy/internal/logx"
 )
 
@@ -29,7 +30,7 @@ func openPauseTest(t *testing.T, mode ble.ScanMode, opt Options) (*Adapter, *fak
 	a.SetScanMode(mode)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	t.Cleanup(stop)
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, mode))
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, mode))
 	return a, bz, addr
 }
 
@@ -73,7 +74,7 @@ func passiveUp(a *Adapter, bz *fakeBlueZ) func() bool {
 // waitConnects waits for n connects to have reached the fake and checks that scanning was off for each.
 func waitConnects(t *testing.T, bz *fakeBlueZ, n int) {
 	t.Helper()
-	waitFor(t, "connect started", func() bool { return len(scanningAt(bz)) == n })
+	bletest.WaitFor(t, "connect started", func() bool { return len(scanningAt(bz)) == n })
 	for i, on := range scanningAt(bz) {
 		if on {
 			t.Fatalf("connect %d started while scanning", i+1)
@@ -114,7 +115,7 @@ func TestPausePassive(t *testing.T) {
 // TestPauseActive: discovery stops for the connect and starts again after it, and the stall watchdog does
 // not count the pause as a stall.
 func TestPauseActive(t *testing.T) {
-	a, bz, _ := openPauseTest(t, ble.ScanActive, Options{StallTimeout: 400 * time.Millisecond})
+	a, bz, _ := openPauseTest(t, ble.ScanActive, Options{WatchdogOptions: ble.WatchdogOptions{StallTimeout: 400 * time.Millisecond}})
 	bz.advertise() // the watchdog's clock starts from here
 	var failures atomic.Int32
 	a.OnScanStatus(func(st ble.ScanStatus) {
@@ -125,14 +126,14 @@ func TestPauseActive(t *testing.T) {
 	hold := holdConnects(bz)
 	errc := connectAsync(a, 0xC1C2C3C4C5C6)
 	waitConnects(t, bz, 1)
-	waitFor(t, "idle", statusIs(a, ble.ScanIdle, ble.ScanActive))
+	bletest.WaitFor(t, "idle", statusIs(a, ble.ScanIdle, ble.ScanActive))
 	time.Sleep(time.Second) // over two stall timeouts without advertisements
 	hold <- struct{}{}
 	if err := <-errc; err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "discovery again", func() bool { _, disc, _ := bz.state(); return disc })
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
+	bletest.WaitFor(t, "discovery again", func() bool { _, disc, _ := bz.state(); return disc })
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanActive))
 	if starts, stops := bz.calls(); starts != 2 || stops != 1 || failures.Load() != 0 {
 		t.Fatalf("%d StartDiscovery, %d StopDiscovery, %d failures; want 2, 1, 0", starts, stops, failures.Load())
 	}
@@ -148,7 +149,7 @@ func TestPauseFailure(t *testing.T) {
 		t.Fatal("connect succeeded")
 	}
 	waitConnects(t, bz, 1)
-	waitFor(t, "passive scan again", passiveUp(a, bz))
+	bletest.WaitFor(t, "passive scan again", passiveUp(a, bz))
 }
 
 // TestPauseLimit: a connect that hangs holds scanning off for pauseLimit only.
@@ -160,7 +161,7 @@ func TestPauseLimit(t *testing.T) {
 	hold := holdConnects(bz)
 	errc := connectAsync(a, 0xC1C2C3C4C5C6)
 	waitConnects(t, bz, 1)
-	waitFor(t, "passive scan with the connect still in progress", passiveUp(a, bz))
+	bletest.WaitFor(t, "passive scan with the connect still in progress", passiveUp(a, bz))
 	select {
 	case err := <-errc:
 		t.Fatalf("connect returned early: %v", err)
@@ -195,7 +196,7 @@ func TestPauseBluetoothdLost(t *testing.T) {
 	}
 	bz = startFakeBlueZ(t, addr, true)
 	t.Cleanup(func() { bz.bus.Close() })
-	waitFor(t, "passive scan on the new bluetoothd", passiveUp(a, bz))
+	bletest.WaitFor(t, "passive scan on the new bluetoothd", passiveUp(a, bz))
 }
 
 // TestPauseOverlap: overlapping connects share one pause, which ends with the last of them.
@@ -229,7 +230,7 @@ func TestPauseOverlap(t *testing.T) {
 	if err := <-rest; err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "passive scan again", passiveUp(a, bz))
+	bletest.WaitFor(t, "passive scan again", passiveUp(a, bz))
 }
 
 // TestPauseQuiet: with raw advertisements, the monitor that matches nothing goes for the connect too and comes
@@ -241,7 +242,7 @@ func TestPauseQuiet(t *testing.T) {
 	addr := startBus(t)
 	bz := startFakeBlueZ(t, addr, true)
 	t.Cleanup(func() { bz.bus.Close() })
-	a, err := Open("hci0", Options{RawAdverts: RawOn, PauseOnConnect: true})
+	a, err := Open("hci0", Options{RawAdverts: RawOn, ConnectOptions: ble.ConnectOptions{PauseOnConnect: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +250,7 @@ func TestPauseQuiet(t *testing.T) {
 	stop, _ := a.Scan(func(ble.Advert) { got.Add(1) })
 	t.Cleanup(stop)
 	src.ads <- ble.Advert{Addr: 1, RSSI: -50}
-	waitFor(t, "monitor that matches nothing", func() bool { _, q, reg := fakeQuiet(bz); return q && reg == 1 })
+	bletest.WaitFor(t, "monitor that matches nothing", func() bool { _, q, reg := fakeQuiet(bz); return q && reg == 1 })
 
 	hold := holdConnects(bz)
 	errc := connectAsync(a, 0xC1C2C3C4C5C6)
@@ -258,13 +259,13 @@ func TestPauseQuiet(t *testing.T) {
 	if err := <-errc; err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "monitor that matches nothing again", func() bool {
+	bletest.WaitFor(t, "monitor that matches nothing again", func() bool {
 		_, q, reg := fakeQuiet(bz)
 		return q && reg == 1 && statusIs(a, ble.ScanRunning, ble.ScanPassive)()
 	})
 	n := got.Load()
 	src.ads <- ble.Advert{Addr: 2, RSSI: -50}
-	waitFor(t, "advertisement", func() bool { return got.Load() > n })
+	bletest.WaitFor(t, "advertisement", func() bool { return got.Load() > n })
 }
 
 // TestPauseOff: without PauseOnConnect, scanning goes on during connects, which still count as in progress
@@ -280,10 +281,10 @@ func TestPauseOff(t *testing.T) {
 	a.SetScanMode(ble.ScanPassive)
 	stop, _ := a.Scan(func(ble.Advert) {})
 	t.Cleanup(stop)
-	waitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
+	bletest.WaitFor(t, "running", statusIs(a, ble.ScanRunning, ble.ScanPassive))
 	hold := holdConnects(bz)
 	errc := connectAsync(a, 0xC1C2C3C4C5C6)
-	waitFor(t, "connect started", func() bool { return len(scanningAt(bz)) == 1 })
+	bletest.WaitFor(t, "connect started", func() bool { return len(scanningAt(bz)) == 1 })
 	if n := connecting(a); n != 1 {
 		t.Fatalf("connecting = %d during a connect, want 1", n)
 	}
