@@ -3,6 +3,7 @@ package winrt
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 	"unsafe"
@@ -21,6 +22,15 @@ var cccdUUID = ble.UUID{Hi: 0x0000290200001000, Lo: 0x800000805f9b34fb}
 
 // conn is a GATT session with one device. Windows has no explicit connect: a GATT session that asks to keep
 // the connection makes the stack connect, and the link drops once no session or service object holds it.
+//
+// Three locks guard a connection, taken in this order: c.ops before a.mu or c.mu, and a.mu and c.mu never
+// together. Each lock is taken and released by one small method, so the order holds by construction:
+//   - c.ops is held shared by every call into the WinRT objects (begin/end, attempt, statusChanged) and
+//     exclusively to release them (release, reset). A release thus waits for calls in flight, and a call never
+//     finds an object gone under it.
+//   - a.mu guards the adapter's table of connections (claim, unclaim, connTo, clearUncached).
+//   - c.mu guards the state flags and the per-characteristic notification state (isClosed, live, markUp, close,
+//     subscribe, setCfg, takeConnParams). It is never held across a wait.
 type conn struct {
 	a    *Adapter
 	addr uint64
@@ -41,11 +51,10 @@ type conn struct {
 
 	cpReq *bluetooth.BluetoothLEPreferredConnectionParametersRequest // held while in effect; guarded by mu
 
-	ops      sync.RWMutex // held shared by every call into the WinRT objects, exclusively to release them
-	mu       sync.Mutex
-	up       bool // reported connected to the caller
-	closed   bool // no new calls
-	released bool
+	ops    sync.RWMutex // held shared by every call into the WinRT objects, exclusively to release them
+	mu     sync.Mutex
+	up     bool // reported connected to the caller
+	closed bool // no new calls; release has run or is waiting for the calls in flight
 }
 
 type char struct {
@@ -56,20 +65,16 @@ type char struct {
 	cfg   gatt.GattClientCharacteristicConfigurationDescriptorValue // last value written to the CCCD
 }
 
+// errClosed is a connect attempt overtaken by a Disconnect or Unpair.
+var errClosed = errors.New("connection closed while connecting")
+
 func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn, error) {
 	c := &conn{a: a, addr: addr, ev: ev, upCh: make(chan struct{}, 1), chars: map[uint16]*char{},
 		descs: map[uint16]*gatt.GattDescriptor{}, cccd: map[uint16]uint16{}}
-	a.mu.Lock()
-	if _, busy := a.conns[addr]; busy {
-		a.mu.Unlock()
-		return nil, errors.New("connection already in progress")
+	cacheMode, err := a.claim(c)
+	if err != nil {
+		return nil, err
 	}
-	a.conns[addr] = c
-	cacheMode := bluetooth.BluetoothCacheModeCached
-	if a.uncached[addr] {
-		cacheMode = bluetooth.BluetoothCacheModeUncached
-	}
-	a.mu.Unlock()
 	// Until the services are resolved or the connect fails: the link is most fragile in its first
 	// connection events, and service discovery is a burst of traffic right after.
 	defer a.pauseScan()()
@@ -77,9 +82,8 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	// One deadline for the link to come up, retries included.
 	deadline := time.Now().Add(connectTimeout)
 	log := a.log.With("addr", ble.FormatMAC(addr))
-	c.ops.RLock() // an Unpair while connecting waits for this
 	retries, err := a.connRetry.Do(func() error {
-		return c.connect(addrType, cacheMode, deadline)
+		return c.attempt(addrType, cacheMode, deadline)
 	}, func(err error) bool {
 		if !radioFailure(err) {
 			log.Debug("connect failed, not a radio failure", "err", err)
@@ -89,7 +93,6 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 	}, ev.Withdrawn, func(n int, err error) {
 		log.Debug("connect failed on the radio, retrying", "retry", n, "err", err)
 	})
-	c.ops.RUnlock()
 	if err != nil {
 		c.release()
 		if retries > 0 {
@@ -101,11 +104,57 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		log.Info("connected after retries", "retries", retries)
 	}
 	if cacheMode == bluetooth.BluetoothCacheModeUncached {
-		a.mu.Lock()
-		delete(a.uncached, addr)
-		a.mu.Unlock()
+		a.clearUncached(addr)
 	}
 	return c, nil
+}
+
+// claim registers c as the connection to its address, and tells which GATT cache mode its service discovery
+// uses: uncached once after ClearCache.
+func (a *Adapter) claim(c *conn) (bluetooth.BluetoothCacheMode, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, busy := a.conns[c.addr]; busy {
+		return 0, errors.New("connection already in progress")
+	}
+	a.conns[c.addr] = c
+	if a.uncached[c.addr] {
+		return bluetooth.BluetoothCacheModeUncached, nil
+	}
+	return bluetooth.BluetoothCacheModeCached, nil
+}
+
+// unclaim frees c's address, unless another connection has taken it since.
+func (a *Adapter) unclaim(c *conn) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.conns[c.addr] == c {
+		delete(a.conns, c.addr)
+	}
+}
+
+// connTo is the connection to addr, nil if there is none.
+func (a *Adapter) connTo(addr uint64) *conn {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.conns[addr]
+}
+
+// clearUncached ends the uncached discovery asked for addr, which a connection has done.
+func (a *Adapter) clearUncached(addr uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.uncached, addr)
+}
+
+// attempt makes one connect attempt with c.ops held shared, so a release meanwhile (an Unpair, or a
+// Disconnect from the client) waits for it. A connection released before the attempt starts is not tried.
+func (c *conn) attempt(addrType uint32, cacheMode bluetooth.BluetoothCacheMode, deadline time.Time) error {
+	if err := c.begin(); err != nil {
+		return errClosed
+	}
+	defer c.end()
+	return c.connect(addrType, cacheMode, deadline)
 }
 
 // connect makes one attempt: device lookup, GATT session, link up by deadline, service discovery. On failure
@@ -171,13 +220,9 @@ func (c *conn) connect(addrType uint32, cacheMode bluetooth.BluetoothCacheMode, 
 	c.settleMTU()
 
 	// From here on a lost link is reported through ev.Disconnected; before, Connect fails instead.
-	c.mu.Lock()
-	closed := c.closed
-	lost := closed || !c.connected()
-	c.up = !lost
-	c.mu.Unlock()
+	closed, lost := c.markUp()
 	if closed {
-		return errors.New("connection closed while connecting")
+		return errClosed
 	}
 	if lost {
 		return errLinkLost
@@ -185,10 +230,23 @@ func (c *conn) connect(addrType uint32, cacheMode bluetooth.BluetoothCacheMode, 
 	return nil
 }
 
+// markUp records the link as up, unless the connection was closed meanwhile or the link is down again, and
+// reports which. It is called with c.ops held shared, as it asks the device.
+func (c *conn) markUp() (closed, lost bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	closed = c.closed
+	lost = closed || !c.connected()
+	c.up = !lost
+	return closed, lost
+}
+
 // reset frees the WinRT objects of a failed attempt so the next one starts afresh, and reports whether the
-// connection may be retried (it was not released meanwhile). It is called with c.ops held shared.
+// connection may be retried: a release meanwhile (Disconnect or Unpair) ends the retries. The attempt has let
+// go of c.ops, so reset takes it exclusively the way release does, which also keeps statusChanged from
+// reading the device while it goes. A release that gets the lock first leaves nothing to free and is seen in
+// closed; one that comes later is seen by the next attempt's begin.
 func (c *conn) reset() bool {
-	c.ops.RUnlock()
 	c.ops.Lock()
 	c.free()
 	c.services, c.svcObjs = nil, nil
@@ -200,10 +258,7 @@ func (c *conn) reset() bool {
 	default:
 	}
 	c.ops.Unlock()
-	c.ops.RLock()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return !c.closed
+	return !c.isClosed()
 }
 
 func (c *conn) connected() bool {
@@ -225,10 +280,7 @@ func (c *conn) statusChanged() {
 		}
 		return
 	}
-	c.mu.Lock()
-	report := c.up && !c.closed
-	c.mu.Unlock()
-	if report {
+	if c.live() {
 		// Not on the event thread: tearing down the session from its own event can stall it.
 		go func() {
 			if c.release() {
@@ -267,30 +319,17 @@ func (c *conn) Services() ([]ble.Service, error) { return c.services, nil }
 // discover loads the GATT database and keeps the WinRT object behind every handle.
 func (c *conn) discover(mode bluetooth.BluetoothCacheMode) error {
 	op, err := c.dev.GetGattServicesWithCacheModeAsync(mode)
-	if err != nil {
-		return err
-	}
-	p, err := await(op, gatt.SignatureGattDeviceServicesResult, callTimeout)
-	if err != nil {
-		return err
-	}
-	res := (*gatt.GattDeviceServicesResult)(p)
-	defer res.Release()
-	if err := commStatus(res.GetStatus()); err != nil {
-		if errors.Is(err, errProtocol) {
-			return protocolError(res.GetProtocolError())
+	err = gattOp(op, err, gatt.SignatureGattDeviceServicesResult, func(res *gatt.GattDeviceServicesResult) error {
+		v, err := res.GetServices()
+		if err != nil {
+			return err
 		}
-		return err
-	}
-	v, err := res.GetServices()
-	if err != nil {
-		return err
-	}
-	defer v.Release()
-	err = eachItem(v, func(p unsafe.Pointer) error {
-		s := (*gatt.GattDeviceService)(p)
-		c.svcObjs = append(c.svcObjs, s) // kept and closed with the connection
-		return c.discoverService(s, mode)
+		defer v.Release()
+		return eachItem(v, func(p unsafe.Pointer) error {
+			s := (*gatt.GattDeviceService)(p)
+			c.svcObjs = append(c.svcObjs, s) // kept and closed with the connection
+			return c.discoverService(s, mode)
+		})
 	})
 	if err != nil {
 		return err
@@ -310,40 +349,29 @@ func (c *conn) discoverService(s *gatt.GattDeviceService, mode bluetooth.Bluetoo
 	}
 	svc := ble.Service{UUID: uuidOf(g), Handle: h}
 	op, err := s.GetCharacteristicsWithCacheModeAsync(mode)
-	if err != nil {
-		return err
-	}
-	p, err := await(op, gatt.SignatureGattCharacteristicsResult, callTimeout)
-	if err != nil {
-		return err
-	}
-	res := (*gatt.GattCharacteristicsResult)(p)
-	defer res.Release()
-	if err := commStatus(res.GetStatus()); err != nil {
-		// A service the stack may not open (HID, for one) answers AccessDenied: list it without characteristics.
-		if errors.Is(err, errAccessDenied) {
-			c.services = append(c.services, svc)
-			return nil
-		}
-		return fmt.Errorf("characteristics of %s: %w", svc.UUID, err)
-	}
-	v, err := res.GetCharacteristics()
-	if err != nil {
-		return err
-	}
-	defer v.Release()
-	err = eachItem(v, func(p unsafe.Pointer) error {
-		ch := (*gatt.GattCharacteristic)(p)
-		info, err := c.discoverChar(ch, mode)
+	err = gattOp(op, err, gatt.SignatureGattCharacteristicsResult, func(res *gatt.GattCharacteristicsResult) error {
+		v, err := res.GetCharacteristics()
 		if err != nil {
-			ch.Release()
 			return err
 		}
-		svc.Characteristics = append(svc.Characteristics, info)
-		return nil
+		defer v.Release()
+		return eachItem(v, func(p unsafe.Pointer) error {
+			ch := (*gatt.GattCharacteristic)(p)
+			info, err := c.discoverChar(ch, mode)
+			if err != nil {
+				ch.Release()
+				return err
+			}
+			svc.Characteristics = append(svc.Characteristics, info)
+			return nil
+		})
 	})
+	// A service the stack may not open (HID, for one) answers AccessDenied: list it without characteristics.
+	if err != nil && !errors.Is(err, errAccessDenied) {
+		return fmt.Errorf("characteristics of %s: %w", svc.UUID, err)
+	}
 	c.services = append(c.services, svc)
-	return err
+	return nil
 }
 
 func (c *conn) discoverChar(ch *gatt.GattCharacteristic, mode bluetooth.BluetoothCacheMode) (ble.Characteristic, error) {
@@ -366,45 +394,35 @@ func (c *conn) discoverChar(ch *gatt.GattCharacteristic, mode bluetooth.Bluetoot
 	// The low byte is the GATT properties field; the rest are extended properties Windows folds in.
 	info = ble.Characteristic{UUID: uuidOf(g), Handle: h, Properties: uint32(props) & 0xff}
 	op, err := ch.GetDescriptorsWithCacheModeAsync(mode)
-	if err != nil {
-		return info, err
-	}
-	p, err := await(op, gatt.SignatureGattDescriptorsResult, callTimeout)
-	if err != nil {
-		return info, err
-	}
-	res := (*gatt.GattDescriptorsResult)(p)
-	defer res.Release()
-	if err := commStatus(res.GetStatus()); err != nil {
-		return info, fmt.Errorf("descriptors of %s: %w", info.UUID, err)
-	}
-	v, err := res.GetDescriptors()
-	if err != nil {
-		return info, err
-	}
-	defer v.Release()
-	err = eachItem(v, func(p unsafe.Pointer) error {
-		d := (*gatt.GattDescriptor)(p)
-		dh, err := d.GetAttributeHandle()
+	err = gattOp(op, err, gatt.SignatureGattDescriptorsResult, func(res *gatt.GattDescriptorsResult) error {
+		v, err := res.GetDescriptors()
 		if err != nil {
-			d.Release()
 			return err
 		}
-		dg, err := d.GetUuid()
-		if err != nil {
-			d.Release()
-			return err
-		}
-		u := uuidOf(dg)
-		c.descs[dh] = d
-		if u == cccdUUID {
-			c.cccd[dh] = h
-		}
-		info.Descriptors = append(info.Descriptors, ble.Descriptor{UUID: u, Handle: dh})
-		return nil
+		defer v.Release()
+		return eachItem(v, func(p unsafe.Pointer) error {
+			d := (*gatt.GattDescriptor)(p)
+			dh, err := d.GetAttributeHandle()
+			if err != nil {
+				d.Release()
+				return err
+			}
+			dg, err := d.GetUuid()
+			if err != nil {
+				d.Release()
+				return err
+			}
+			u := uuidOf(dg)
+			c.descs[dh] = d
+			if u == cccdUUID {
+				c.cccd[dh] = h
+			}
+			info.Descriptors = append(info.Descriptors, ble.Descriptor{UUID: u, Handle: dh})
+			return nil
+		})
 	})
 	if err != nil {
-		return info, err
+		return info, fmt.Errorf("descriptors of %s: %w", info.UUID, err)
 	}
 	// Only now: on an error the caller releases ch, so free must not find it here and release it again.
 	c.chars[h] = &char{c: ch, props: info.Properties}
@@ -432,36 +450,118 @@ func eachItem(v *collections.IVectorView, fn func(unsafe.Pointer) error) error {
 	return nil
 }
 
+// The GattCommunicationStatus values other than Success. A ProtocolError comes with the ATT error code, as an
+// attError, which is also an errProtocol.
 var (
 	errUnreachable  = errors.New("device unreachable")
 	errProtocol     = errors.New("GATT protocol error")
 	errAccessDenied = errors.New("access denied")
 )
 
-func commStatus(s gatt.GattCommunicationStatus, err error) error {
+// attError is the error code of an ATT error response, which Windows reports as a ProtocolError status with
+// the code in the result's ProtocolError, or as an HRESULT of FACILITY_BLUETOOTH_ATT. The values are the ATT
+// ones (Core spec Vol 3 Part F, 3.4.1.1), which are also what an ESP32 proxy reports for them (the low
+// esp_gatt_status_t values match the ATT codes).
+type attError byte
+
+// attErrorNames names the codes the core specification defines; 0x80-0x9f are application defined and
+// 0xe0-0xff common profile and service codes.
+var attErrorNames = map[attError]string{
+	0x01: "invalid handle",
+	0x02: "read not permitted",
+	0x03: "write not permitted",
+	0x04: "invalid PDU",
+	0x05: "insufficient authentication",
+	0x06: "request not supported",
+	0x07: "invalid offset",
+	0x08: "insufficient authorization",
+	0x09: "prepare queue full",
+	0x0a: "attribute not found",
+	0x0b: "attribute not long",
+	0x0c: "encryption key size too short",
+	0x0d: "invalid attribute value length",
+	0x0e: "unlikely error",
+	0x0f: "insufficient encryption",
+	0x10: "unsupported group type",
+	0x11: "insufficient resources",
+	0x12: "database out of sync",
+	0x13: "value not allowed",
+	0xfc: "write request rejected",
+	0xfd: "CCCD improperly configured",
+	0xfe: "procedure already in progress",
+	0xff: "out of range",
+}
+
+func (e attError) Error() string {
+	if name, ok := attErrorNames[e]; ok {
+		return fmt.Sprintf("ATT error 0x%02x (%s)", byte(e), name)
+	}
+	return fmt.Sprintf("ATT error 0x%02x", byte(e))
+}
+
+// Is makes every ATT error match errProtocol, the GATT status it arrives with.
+func (e attError) Is(target error) bool { return target == errProtocol }
+
+// protocolError reads the ATT error code from a GATT result's ProtocolError reference; without one, the
+// error is the bare errProtocol.
+func protocolError(ref *foundation.IReference, err error) error {
+	if err != nil || ref == nil {
+		return errProtocol
+	}
+	defer ref.Release()
+	v, err := ref.GetValue() // IReference<UInt8>: the byte comes back in the pointer-sized out slot
+	if err != nil {
+		return errProtocol
+	}
+	return attError(byte(uintptr(v)))
+}
+
+// gattResult is what every GATT result object (services, characteristics, descriptors, read, write) reports:
+// a communication status, and the ATT error code when the status is ProtocolError.
+type gattResult interface {
+	GetStatus() (gatt.GattCommunicationStatus, error)
+	GetProtocolError() (*foundation.IReference, error)
+	Release() int32
+}
+
+// gattOp runs the ladder every GATT operation shares: op, started with err, is awaited with callTimeout; a
+// status other than Success becomes errUnreachable, errAccessDenied, the attError of a ProtocolError or an
+// error naming the status; on Success the result goes to use, and is released once use returns. The result
+// type is that of use's parameter, and sig its WinRT signature.
+func gattOp[R any, PR interface {
+	*R
+	gattResult
+}](op *foundation.IAsyncOperation, err error, sig string, use func(PR) error) error {
 	if err != nil {
 		return err
 	}
-	switch s {
+	p, err := await(op, sig, callTimeout)
+	if err != nil {
+		return err
+	}
+	res := PR(p)
+	defer res.Release()
+	st, err := res.GetStatus()
+	if err != nil {
+		return err
+	}
+	switch st {
 	case gatt.GattCommunicationStatusSuccess:
-		return nil
+		return use(res)
 	case gatt.GattCommunicationStatusUnreachable:
 		return errUnreachable
 	case gatt.GattCommunicationStatusProtocolError:
-		return errProtocol
+		return protocolError(res.GetProtocolError())
 	case gatt.GattCommunicationStatusAccessDenied:
 		return errAccessDenied
 	}
-	return fmt.Errorf("GATT status %d", s)
+	return fmt.Errorf("GATT status %d", st)
 }
 
 // begin starts a call into the connection's WinRT objects; end must follow once it is done.
 func (c *conn) begin() error {
 	c.ops.RLock()
-	c.mu.Lock()
-	closed := c.closed
-	c.mu.Unlock()
-	if closed {
+	if c.isClosed() {
 		c.ops.RUnlock()
 		return ble.ErrNotConnected
 	}
@@ -469,6 +569,19 @@ func (c *conn) begin() error {
 }
 
 func (c *conn) end() { c.ops.RUnlock() }
+
+func (c *conn) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// live reports whether the connection is up and not closed: whether the device's events still count.
+func (c *conn) live() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.up && !c.closed
+}
 
 func (c *conn) char(h uint16) (*char, error) {
 	if ch, ok := c.chars[h]; ok {
@@ -486,47 +599,25 @@ func (c *conn) desc(h uint16) (*gatt.GattDescriptor, error) {
 
 // readResult unpacks an IAsyncOperation<GattReadResult>.
 func readResult(op *foundation.IAsyncOperation, err error) ([]byte, error) {
-	if err != nil {
-		return nil, err
-	}
-	p, err := await(op, gatt.SignatureGattReadResult, callTimeout)
-	if err != nil {
-		return nil, err
-	}
-	res := (*gatt.GattReadResult)(p)
-	defer res.Release()
-	if err := commStatus(res.GetStatus()); err != nil {
-		if errors.Is(err, errProtocol) {
-			return nil, protocolError(res.GetProtocolError())
+	var data []byte
+	err = gattOp(op, err, gatt.SignatureGattReadResult, func(res *gatt.GattReadResult) error {
+		b, err := res.GetValue()
+		if err != nil || b == nil {
+			return err
 		}
+		defer b.Release()
+		data, err = appendBuffer(nil, b)
+		return err
+	})
+	if err != nil {
 		return nil, err
 	}
-	b, err := res.GetValue()
-	if err != nil || b == nil {
-		return nil, err
-	}
-	defer b.Release()
-	return appendBuffer(nil, b)
+	return data, nil
 }
 
 // writeResult unpacks an IAsyncOperation<GattWriteResult>.
 func writeResult(op *foundation.IAsyncOperation, err error) error {
-	if err != nil {
-		return err
-	}
-	p, err := await(op, gatt.SignatureGattWriteResult, callTimeout)
-	if err != nil {
-		return err
-	}
-	res := (*gatt.GattWriteResult)(p)
-	defer res.Release()
-	if err := commStatus(res.GetStatus()); err != nil {
-		if errors.Is(err, errProtocol) {
-			return protocolError(res.GetProtocolError())
-		}
-		return err
-	}
-	return nil
+	return gattOp(op, err, gatt.SignatureGattWriteResult, func(*gatt.GattWriteResult) error { return nil })
 }
 
 func (c *conn) Read(h uint16) ([]byte, error) {
@@ -631,10 +722,23 @@ func (c *conn) Notify(h uint16, enable bool) error {
 // configure writes the CCCD of a characteristic unless it already holds v, and has its values delivered.
 // Home Assistant enables a notification twice, by request and by writing the CCCD.
 func (c *conn) configure(h uint16, ch *char, v gatt.GattClientCharacteristicConfigurationDescriptorValue) error {
+	if same, err := c.subscribe(h, ch, v); same || err != nil {
+		return err
+	}
+	if err := writeResult(ch.c.WriteClientCharacteristicConfigurationDescriptorWithResultAsync(v)); err != nil {
+		return err
+	}
+	c.setCfg(ch, v)
+	return nil
+}
+
+// subscribe reports whether the CCCD of ch already holds v, in which case there is nothing to write, and
+// otherwise registers the ValueChanged handler if v enables notifications and none is registered yet.
+func (c *conn) subscribe(h uint16, ch *char, v gatt.GattClientCharacteristicConfigurationDescriptorValue) (same bool, err error) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if ch.cfg == v {
-		c.mu.Unlock()
-		return nil
+		return true, nil
 	}
 	if ch.h == nil && v != gatt.GattClientCharacteristicConfigurationDescriptorValueNone {
 		ch.h = eventHandler(gatt.SignatureGattCharacteristic, gatt.SignatureGattValueChangedEventArgs,
@@ -643,26 +747,22 @@ func (c *conn) configure(h uint16, ch *char, v gatt.GattClientCharacteristicConf
 		if err != nil {
 			ch.h.Release()
 			ch.h = nil
-			c.mu.Unlock()
-			return err
+			return false, err
 		}
 		ch.tok = tok
 	}
-	c.mu.Unlock()
-	if err := writeResult(ch.c.WriteClientCharacteristicConfigurationDescriptorWithResultAsync(v)); err != nil {
-		return err
-	}
+	return false, nil
+}
+
+// setCfg records v as the value the CCCD of ch holds.
+func (c *conn) setCfg(ch *char, v gatt.GattClientCharacteristicConfigurationDescriptorValue) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	ch.cfg = v
-	c.mu.Unlock()
-	return nil
 }
 
 func (c *conn) valueChanged(h uint16, args *gatt.GattValueChangedEventArgs) {
-	c.mu.Lock()
-	up := c.up && !c.closed
-	c.mu.Unlock()
-	if !up {
+	if !c.live() {
 		return
 	}
 	b, err := args.GetCharacteristicValue()
@@ -683,7 +783,35 @@ func (c *conn) Pair() error {
 		return err
 	}
 	defer c.end()
-	info, err := c.dev.GetDeviceInformation()
+	return withPairing(c.dev, func(pairing *enumeration.DeviceInformationPairing) error {
+		if ok, err := pairing.GetIsPaired(); err == nil && ok {
+			return nil
+		}
+		custom, err := pairing.GetCustom()
+		if err != nil {
+			return err
+		}
+		defer custom.Release()
+		h := eventHandler(enumeration.SignatureDeviceInformationCustomPairing,
+			enumeration.SignatureDevicePairingRequestedEventArgs, func(_, args unsafe.Pointer) {
+				(*enumeration.DevicePairingRequestedEventArgs)(args).Accept()
+			})
+		defer h.Release()
+		tok, err := custom.AddPairingRequested(h)
+		if err != nil {
+			return err
+		}
+		defer custom.RemovePairingRequested(tok)
+		op, err := custom.PairAsync(enumeration.DevicePairingKindsConfirmOnly | enumeration.DevicePairingKindsDisplayPin |
+			enumeration.DevicePairingKindsConfirmPinMatch)
+		return pairingResult[enumeration.DevicePairingResult](op, err, enumeration.SignatureDevicePairingResult, "pairing",
+			enumeration.DevicePairingResultStatusPaired, enumeration.DevicePairingResultStatusAlreadyPaired)
+	})
+}
+
+// withPairing runs fn with the pairing object of dev, which holds the bond state and the pairing calls.
+func withPairing(dev *bluetooth.BluetoothLEDevice, fn func(*enumeration.DeviceInformationPairing) error) error {
+	info, err := dev.GetDeviceInformation()
 	if err != nil {
 		return err
 	}
@@ -693,43 +821,39 @@ func (c *conn) Pair() error {
 		return err
 	}
 	defer pairing.Release()
-	if ok, err := pairing.GetIsPaired(); err == nil && ok {
-		return nil
-	}
-	custom, err := pairing.GetCustom()
+	return fn(pairing)
+}
+
+// statusResult is a WinRT result object that reports a status of enum type S.
+type statusResult[S ~int32] interface {
+	GetStatus() (S, error)
+	Release() int32
+}
+
+// pairingResult awaits a pairing or unpairing operation (op, started with err) for pairTimeout and checks that
+// its status is one of done; any other status fails with the status number and what was attempted. The result
+// type R is given at the call.
+func pairingResult[R any, S ~int32, PR interface {
+	*R
+	statusResult[S]
+}](op *foundation.IAsyncOperation, err error, sig, what string, done ...S) error {
 	if err != nil {
 		return err
 	}
-	defer custom.Release()
-	h := eventHandler(enumeration.SignatureDeviceInformationCustomPairing,
-		enumeration.SignatureDevicePairingRequestedEventArgs, func(_, args unsafe.Pointer) {
-			(*enumeration.DevicePairingRequestedEventArgs)(args).Accept()
-		})
-	defer h.Release()
-	tok, err := custom.AddPairingRequested(h)
+	p, err := await(op, sig, pairTimeout)
 	if err != nil {
 		return err
 	}
-	defer custom.RemovePairingRequested(tok)
-	op, err := custom.PairAsync(enumeration.DevicePairingKindsConfirmOnly | enumeration.DevicePairingKindsDisplayPin |
-		enumeration.DevicePairingKindsConfirmPinMatch)
-	if err != nil {
-		return err
-	}
-	p, err := await(op, enumeration.SignatureDevicePairingResult, pairTimeout)
-	if err != nil {
-		return err
-	}
-	res := (*enumeration.DevicePairingResult)(p)
+	res := PR(p)
 	defer res.Release()
 	st, err := res.GetStatus()
 	if err != nil {
 		return err
 	}
-	if st != enumeration.DevicePairingResultStatusPaired && st != enumeration.DevicePairingResultStatusAlreadyPaired {
-		return fmt.Errorf("pairing failed with status %d", st)
+	if slices.Contains(done, st) {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("%s failed with status %d", what, st)
 }
 
 func (c *conn) Disconnect() error {
@@ -740,34 +864,32 @@ func (c *conn) Disconnect() error {
 // release closes every WinRT object of the connection, which lets Windows drop the link, and frees the
 // address. It waits for calls in flight and reports whether this call did the teardown, which runs once.
 func (c *conn) release() bool {
+	if !c.close() {
+		return false
+	}
+	c.ops.Lock()
+	defer c.ops.Unlock()
+	c.a.unclaim(c)
+	c.free()
+	return true
+}
+
+// close marks the connection closed, so no new call starts, and reports whether this call was the one to
+// do it, which makes it the one to free the WinRT objects.
+func (c *conn) close() bool {
 	c.mu.Lock()
-	if c.closed && c.released {
-		c.mu.Unlock()
+	defer c.mu.Unlock()
+	if c.closed {
 		return false
 	}
 	c.closed = true
-	c.released = true
-	c.mu.Unlock()
-	c.ops.Lock()
-	defer c.ops.Unlock()
-
-	c.a.mu.Lock()
-	if c.a.conns[c.addr] == c {
-		delete(c.a.conns, c.addr)
-	}
-	c.a.mu.Unlock()
-	c.free()
 	return true
 }
 
 // free closes the WinRT objects of the connection; it is called with c.ops held exclusively. A second call
 // does nothing.
 func (c *conn) free() {
-	c.mu.Lock()
-	req := c.cpReq
-	c.cpReq = nil
-	c.mu.Unlock()
-	if req != nil {
+	if req := c.takeConnParams(); req != nil {
 		req.Close()
 		req.Release()
 	}
@@ -806,12 +928,18 @@ func (c *conn) free() {
 	}
 }
 
+// takeConnParams hands over the connection parameter request in effect, if any, leaving none.
+func (c *conn) takeConnParams() *bluetooth.BluetoothLEPreferredConnectionParametersRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	req := c.cpReq
+	c.cpReq = nil
+	return req
+}
+
 // Unpair removes the bond with a device, dropping any connection to it without reporting it.
 func (a *Adapter) Unpair(addr uint64) error {
-	a.mu.Lock()
-	c := a.conns[addr]
-	a.mu.Unlock()
-	if c != nil {
+	if c := a.connTo(addr); c != nil {
 		c.release()
 	}
 	op, err := bluetooth.BluetoothLEDeviceFromBluetoothAddressAsync(addr)
@@ -828,34 +956,12 @@ func (a *Adapter) Unpair(addr uint64) error {
 	dev := (*bluetooth.BluetoothLEDevice)(p)
 	defer dev.Release()
 	defer dev.Close()
-	info, err := dev.GetDeviceInformation()
-	if err != nil {
-		return err
-	}
-	defer info.Release()
-	pairing, err := info.GetPairing()
-	if err != nil {
-		return err
-	}
-	defer pairing.Release()
-	if ok, err := pairing.GetIsPaired(); err == nil && !ok {
-		return nil
-	}
-	op, err = pairing.UnpairAsync()
-	if err != nil {
-		return err
-	}
-	if p, err = await(op, enumeration.SignatureDeviceUnpairingResult, pairTimeout); err != nil {
-		return err
-	}
-	res := (*enumeration.DeviceUnpairingResult)(p)
-	defer res.Release()
-	st, err := res.GetStatus()
-	if err != nil {
-		return err
-	}
-	if st != enumeration.DeviceUnpairingResultStatusUnpaired && st != enumeration.DeviceUnpairingResultStatusAlreadyUnpaired {
-		return fmt.Errorf("unpairing failed with status %d", st)
-	}
-	return nil
+	return withPairing(dev, func(pairing *enumeration.DeviceInformationPairing) error {
+		if ok, err := pairing.GetIsPaired(); err == nil && !ok {
+			return nil
+		}
+		op, err := pairing.UnpairAsync()
+		return pairingResult[enumeration.DeviceUnpairingResult](op, err, enumeration.SignatureDeviceUnpairingResult, "unpairing",
+			enumeration.DeviceUnpairingResultStatusUnpaired, enumeration.DeviceUnpairingResultStatusAlreadyUnpaired)
+	})
 }
