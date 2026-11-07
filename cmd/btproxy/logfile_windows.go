@@ -57,14 +57,16 @@ func (r *rotatingFile) Write(p []byte) (int, error) {
 }
 
 // rotate moves the file to path.1, replacing the older one. If the rename fails (another program holds
-// the file without sharing delete), logging goes on in the same file.
+// the file without sharing delete, e.g. the old proxy for a few seconds after a restart), logging goes on
+// in the same file and the next attempt waits for another max bytes; the older file is kept meanwhile.
 func (r *rotatingFile) rotate() {
 	r.f.Close()
-	os.Remove(r.path + ".1")
-	os.Rename(r.path, r.path+".1")
+	renamed := os.Rename(r.path, r.path+".1") == nil // replaces path.1, so the older file is not removed first
 	if err := r.open(); err != nil {
 		// Reopening failed: drop lines until the next rotation tries again.
 		r.f, _ = os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 		r.size = 0
+	} else if !renamed {
+		r.size = 0 // the file is over max: count from here, not on every write
 	}
 }

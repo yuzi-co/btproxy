@@ -211,12 +211,10 @@ func main() {
 		addNode(n.name, adapter, l, srv)
 		go func() { served <- srv.Serve(l) }()
 	}
-	if len(responders) > 0 {
-		go withdrawOnSignal(log, responders)
-	}
 	if err := startUI(log, responders, *uiAddr, uiPassword, uiToken); err != nil {
 		fatal(log, "settings page", "err", err)
 	}
+	go stopOnSignal()
 	startTray(log)
 	fatal(log, "serve", "err", <-served)
 }
@@ -252,15 +250,12 @@ func startMDNS(log *logx.Logger, name, friendly, mac string, port int, ifaces st
 	return r
 }
 
-// withdrawOnSignal withdraws the mDNS advertisements on SIGINT or SIGTERM and exits.
-func withdrawOnSignal(log *logx.Logger, rs []*mdns.Responder) {
+// stopOnSignal stops the proxy on SIGINT or SIGTERM the way the settings page and the tray icon do: the mDNS
+// advertisements are withdrawn and the tray icon removed.
+func stopOnSignal() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	log.Info("stopping", "signal", <-sig)
-	for _, r := range rs {
-		r.Close()
-	}
-	os.Exit(0)
+	stop("signal "+(<-sig).String(), false)
 }
 
 // encryptionKey decodes the API key from the flag, the key file or the environment, in that order of
