@@ -1,6 +1,6 @@
 # Moving from BlueZ to the kernel backend
 
-BlueZ support in btproxy is deprecated. The kernel backend does the same job without `bluetoothd` or D-Bus. This guide is for a host that runs btproxy on BlueZ today.
+The kernel backend does the same job as BlueZ without `bluetoothd` or D-Bus, and is the default. BlueZ stays supported for hosts that need `bluetoothd` for other devices. This guide is for a host that runs btproxy on BlueZ today and can do without `bluetoothd`.
 
 ## Check where you are
 
@@ -15,7 +15,7 @@ journalctl -u btproxy | grep 'backend chosen'  # systemd
 
 ## Can this host move?
 
-The kernel backend needs the adapter to itself. While `bluetoothd` runs, `auto` picks BlueZ and `-backend kernel` refuses to start. If this host needs `bluetoothd` for something else, such as headphones, it cannot move. Stay on BlueZ for now. Once BlueZ support goes, stay on the last release that has it, or use an ESP32 or another machine as the proxy.
+The kernel backend needs the adapter to itself. While `bluetoothd` runs, `auto` picks BlueZ and `-backend kernel` refuses to start. If this host needs `bluetoothd` for something else, such as headphones, it cannot move: stay on BlueZ, which remains supported, or give the proxy a second adapter on its own `hciN`.
 
 ## Check your bonds first
 

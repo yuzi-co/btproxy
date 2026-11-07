@@ -203,10 +203,10 @@ return view.extend({
 		o.rmempty = true;
 
 		o = s.option(form.ListValue, 'backend', _('Backend'),
-			_('Automatic uses the kernel backend, or BlueZ while bluetoothd runs. The kernel backend needs bluetoothd stopped. BlueZ is deprecated.'));
+			_('Automatic uses the kernel backend, or BlueZ while bluetoothd runs. The kernel backend needs bluetoothd stopped; BlueZ is for a router that keeps it for other devices.'));
 		o.value('', _('Automatic'));
 		o.value('kernel', _('Kernel'));
-		o.value('bluez', _('BlueZ (deprecated)'));
+		o.value('bluez', _('BlueZ'));
 		o.rmempty = true;
 
 		o = s.option(form.Value, 'bluetoothd_restart', _('Bluetooth restart command'),
