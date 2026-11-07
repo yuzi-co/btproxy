@@ -62,7 +62,7 @@ func (a *Adapter) Connect(addr uint64, addrType uint32, ev ble.Events) (ble.Conn
 		}
 		return c.awaitResolved()
 	}, func(err error) bool {
-		if !errors.Is(err, ble.ErrLinkLost) && !radioFailure(err) {
+		if !retryable(err) {
 			var de dbus.Error
 			errors.As(err, &de)
 			log.Debug("connect failed, not a radio failure", "err", err, "name", de.Name)

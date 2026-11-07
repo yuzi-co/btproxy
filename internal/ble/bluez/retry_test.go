@@ -4,6 +4,7 @@ package bluez
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -39,6 +40,25 @@ func TestRadioFailure(t *testing.T) {
 	} {
 		if got := radioFailure(tc.err); got != tc.want {
 			t.Errorf("radioFailure(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+// TestRetryable: a radio failure and a lost link are retried, a timeout and any other error are not.
+func TestRetryable(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{dbus.Error{Name: "org.bluez.Error.Failed", Body: []any{"le-connection-abort-by-local"}}, true},
+		{errLinkLost, true},
+		{fmt.Errorf("attempt: %w", ble.ErrLinkLost), true},
+		{context.DeadlineExceeded, false},
+		{dbus.Error{Name: "org.bluez.Error.Failed", Body: []any{"Page Timeout"}}, false},
+		{errors.New("services not resolved in time"), false},
+	} {
+		if got := retryable(tc.err); got != tc.want {
+			t.Errorf("retryable(%v) = %v, want %v", tc.err, got, tc.want)
 		}
 	}
 }
