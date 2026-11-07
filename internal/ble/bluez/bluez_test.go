@@ -326,6 +326,31 @@ func TestDisconnectGivesUpWaiting(t *testing.T) {
 	flush(t, a, bz) // the late signal finds no connection
 }
 
+// TestUnpairDropsSilently: RemoveDevice takes the link down, and BlueZ reports that like any other loss. The
+// caller asked for it, so it is not reported through Events.Disconnected (see ble.Adapter.Unpair).
+func TestUnpairDropsSilently(t *testing.T) {
+	a, bz := openForRetries(t, 0, 0)
+	dropped := make(chan error, 1)
+	ev := retryEvents
+	ev.Disconnected = func(err error) { dropped <- err }
+	c := connectTo(t, a, ev)
+	if err := a.Unpair(0xAABBCCDDEEFF); err != nil {
+		t.Fatal(err)
+	}
+	flush(t, a, bz)
+	select {
+	case err := <-dropped:
+		t.Fatalf("the link going down was reported: %v", err)
+	default:
+	}
+	if connOf(a, fakeDevice) != nil || c.isWatched() {
+		t.Fatal("connection still registered after Unpair")
+	}
+	if err := a.Unpair(0xAABBCCDDEEFF); err != nil {
+		t.Fatalf("unpairing a device BlueZ does not know: %v", err)
+	}
+}
+
 // TestLostLinkIsTornDownBeforeTheConnectWakes: a Connect that is retried sets the connection up again as soon
 // as lost closes, so the teardown of the lost link (its place on the adapter, its match rule) must be complete
 // by then, or it undoes the retry's setup. The teardown needs the adapter's lock; holding it must hold lost.

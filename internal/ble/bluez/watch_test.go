@@ -274,6 +274,21 @@ func (a fakeAdapterIf) StopDiscovery() *dbus.Error {
 	return nil
 }
 
+// RemoveDevice drops the device and its bond; a connected one is disconnected first, with the same signal as
+// any other loss of the link.
+func (a fakeAdapterIf) RemoveDevice(p dbus.ObjectPath) *dbus.Error {
+	a.f.mu.Lock()
+	known := a.f.devices[p]
+	a.f.mu.Unlock()
+	if !known {
+		return dbus.NewError("org.bluez.Error.DoesNotExist", nil)
+	}
+	a.f.bus.Emit(p, ifProps+".PropertiesChanged", ifDevice, map[string]dbus.Variant{
+		"Connected": dbus.MakeVariant(false), "ServicesResolved": dbus.MakeVariant(false)}, []string{})
+	a.f.removeDevice(p)
+	return nil
+}
+
 type fakeDeviceIf struct {
 	f *fakeBlueZ
 	p dbus.ObjectPath

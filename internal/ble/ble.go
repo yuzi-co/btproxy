@@ -152,7 +152,10 @@ type Adapter interface {
 	// Scan delivers advertisements until stop is called. fn must not keep Advert.Data after it returns.
 	Scan(fn func(Advert)) (stop func(), err error)
 	Connect(addr uint64, addrType uint32, ev Events) (Conn, error)
-	// ClearCache forgets the services the stack has cached for a device. Bonds are kept.
+	// ClearCache makes the next connection to a device discover its services afresh instead of taking what the
+	// stack cached. Bonds are kept. What that takes depends on the stack: bluez removes the device from BlueZ
+	// unless it is paired, winrt bypasses the Windows GATT cache once, and kernel and fake do nothing, since
+	// they keep no services across connections.
 	ClearCache(addr uint64) error
 	// Unpair removes the bond with a device, connected or not, and drops any connection to it without
 	// calling Events.Disconnected.
