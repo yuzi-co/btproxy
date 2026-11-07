@@ -23,12 +23,11 @@ const (
 	attCID = 4 // the fixed L2CAP channel of ATT
 
 	// From <bluetooth/bluetooth.h>.
-	solBluetooth   = 274
-	btSecurity     = 4
-	btSecurityMed  = 2
-	connectTimeout = 30 * time.Second
-	secureTimeout  = 40 * time.Second
-	pollStep       = 200 // ms
+	solBluetooth  = 274
+	btSecurity    = 4
+	btSecurityMed = 2
+	secureTimeout = 40 * time.Second
+	pollStep      = 200 // ms
 )
 
 // Open opens the controller named like hci0. It fails if bluetoothd is running: two stacks driving one controller

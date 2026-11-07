@@ -3,6 +3,7 @@ package kernel
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime/pprof"
@@ -392,14 +393,14 @@ func TestDisconnectNotConnectedIsFine(t *testing.T) {
 	}
 }
 
-func TestConnectRetriesFastFailures(t *testing.T) {
+func TestConnectRetriesRadioFailures(t *testing.T) {
 	k := newFakeKernel()
 	a := openTest(t, k, nil)
 	s := &fakeSocket{peripheral: heartRate()}
 	t.Cleanup(func() { s.Close() })
 	k.dial = func(bool) (socket, error) {
 		if k.dials.Load() < 3 {
-			return nil, errors.New("radio")
+			return nil, errRadio
 		}
 		return s, nil
 	}
@@ -452,7 +453,7 @@ func TestConnectRetriesLinkLostDuringMTU(t *testing.T) {
 func TestConnectWithdrawnStopsRetrying(t *testing.T) {
 	k := newFakeKernel()
 	a := openTest(t, k, nil)
-	k.dial = func(bool) (socket, error) { return nil, errors.New("radio") }
+	k.dial = func(bool) (socket, error) { return nil, errRadio }
 	withdrawn := func() bool { return k.dials.Load() > 0 }
 	if _, err := a.Connect(testPeer, ble.AddrPublic, ble.Events{Withdrawn: withdrawn}); err == nil {
 		t.Fatal("no error")
@@ -930,22 +931,44 @@ func TestStallDoesNotPowerCycleConnections(t *testing.T) {
 }
 
 func TestRetryable(t *testing.T) {
-	slow, fast := 4*time.Second, 100*time.Millisecond
 	for _, tc := range []struct {
 		name string
 		err  error
-		took time.Duration
 		want bool
 	}{
-		{"radio, slow: the kernel waited for an advert first", errRadio, slow, true},
-		{"link lost, slow", errLinkLost, slow, true},
-		{"other, fast", errors.New("x"), fast, true},
-		{"other, slow: a timeout", errors.New("x"), slow, false},
-		{"permanent, fast", errPermanent("x"), fast, false},
+		{"radio", errRadio, true},
+		{"link lost", errLinkLost, true},
+		{"link lost, wrapped", fmt.Errorf("%w: not connected", errLinkLost), true},
+		{"other: a timeout, or something the next attempt sees again", errors.New("x"), false},
+		{"permanent", errPermanent("x"), false},
 	} {
-		if got := retryable(tc.err, tc.took); got != tc.want {
+		if got := retryable(tc.err); got != tc.want {
 			t.Errorf("%s: %v", tc.name, got)
 		}
+	}
+}
+
+// TestConnectRetrySlowRadioFailure: the kernel waits for an advertisement before it connects, so a 0x3e can
+// come after seconds and is still retried.
+func TestConnectRetrySlowRadioFailure(t *testing.T) {
+	k := newFakeKernel()
+	a := openTest(t, k, nil)
+	s := &fakeSocket{peripheral: heartRate()}
+	t.Cleanup(func() { s.Close() })
+	k.dial = func(bool) (socket, error) {
+		if k.dials.Load() < 2 {
+			return nil, errRadio
+		}
+		return s, nil
+	}
+	if a.retry.Fast < ble.ConnectBudget {
+		t.Fatalf("fast cut-off %v short of the budget", a.retry.Fast)
+	}
+	if _, err := a.Connect(testPeer, ble.AddrPublic, ble.Events{}); err != nil {
+		t.Fatal(err)
+	}
+	if k.dials.Load() != 2 {
+		t.Errorf("%d dials", k.dials.Load())
 	}
 }
 
