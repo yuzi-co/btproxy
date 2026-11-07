@@ -54,6 +54,8 @@ type fakeBlueZ struct {
 	connects    []string                 // Device1.Connect and Adapter1.ConnectDevice calls, by method
 	hold        chan struct{}            // while set, connecting waits for a value from it
 	scanning    []bool                   // per connect: discovering or monitors registered when it started
+	disconnects int                      // Device1.Disconnect calls
+	notifyFail  bool                     // GattCharacteristic1.StartNotify fails
 
 	exportMu sync.Mutex // godbus's Export is not safe for concurrent use, which concurrent connects make
 }
@@ -317,11 +319,55 @@ func (d fakeDeviceIf) connected() *dbus.Error {
 	return nil
 }
 
+// Disconnect announces the link going down before replying, as BlueZ does.
 func (d fakeDeviceIf) Disconnect() *dbus.Error {
+	d.f.mu.Lock()
+	d.f.disconnects++
+	d.f.mu.Unlock()
 	d.f.bus.Emit(d.p, ifProps+".PropertiesChanged", ifDevice, map[string]dbus.Variant{
 		"Connected": dbus.MakeVariant(false), "ServicesResolved": dbus.MakeVariant(false)}, []string{})
 	return nil
 }
+
+func (f *fakeBlueZ) disconnectCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.disconnects
+}
+
+// fakeChar is a characteristic of fakeDevice, with value handle fakeCharHandle (see charValueHandle).
+const (
+	fakeChar       = fakeDevice + "/service000a/char000b"
+	fakeCharHandle = 0x0c
+)
+
+type fakeCharIf struct {
+	f *fakeBlueZ
+	p dbus.ObjectPath
+}
+
+func (f *fakeBlueZ) exportChar(p dbus.ObjectPath) {
+	f.exportMu.Lock()
+	defer f.exportMu.Unlock()
+	f.bus.Export(fakeCharIf{f, p}, p, ifChar)
+}
+
+// StartNotify reports the first value before replying, so that the adapter handles the value before the
+// caller sees the reply: the two reach it on different goroutines, and on a real bus either can come first.
+func (c fakeCharIf) StartNotify() *dbus.Error {
+	c.f.mu.Lock()
+	fail := c.f.notifyFail
+	c.f.mu.Unlock()
+	if fail {
+		return dbus.NewError("org.bluez.Error.Failed", []any{"Not supported"})
+	}
+	c.f.bus.Emit(c.p, ifProps+".PropertiesChanged", ifChar, map[string]dbus.Variant{
+		"Value": dbus.MakeVariant([]byte{1})}, []string{})
+	time.Sleep(20 * time.Millisecond)
+	return nil
+}
+
+func (c fakeCharIf) StopNotify() *dbus.Error { return nil }
 
 type fakeMonitorMgr struct{ f *fakeBlueZ }
 

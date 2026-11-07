@@ -23,36 +23,48 @@ var pauseLimit = connectTimeout + resolveTimeout
 // example while the supervisor is busy restarting bluetoothd.
 var pauseWait = 2 * time.Second
 
-// pauseScan stops scanning for a connect and returns the function that ends the pause, which may be called
-// more than once. It returns once the supervisor has stopped scanning, or after pauseWait. Overlapping
-// connects share the pause: scanning resumes when the last one ends, or pauseLimit after each started.
+// pauseScan counts a connect as in progress, which holds the recovery steps off (see strike), and stops
+// scanning for it if PauseOnConnect is set. It returns the function that ends both, which may be called more
+// than once. With the pause it returns once the supervisor has stopped scanning, or after pauseWait.
+// Overlapping connects share the pause: scanning resumes when the last one ends, or pauseLimit after each
+// started, which also bounds how long a hung connect holds recovery off.
 func (a *Adapter) pauseScan() (resume func()) {
-	if !a.pauseOnConnect {
-		return func() {}
-	}
-	stopped := make(chan struct{})
+	pause := a.pauseOnConnect
+	var stopped chan struct{}
 	a.mu.Lock()
 	a.connecting++
-	a.pauseWaiters = append(a.pauseWaiters, stopped)
+	if pause {
+		stopped = make(chan struct{})
+		a.pauseWaiters = append(a.pauseWaiters, stopped)
+	}
 	a.mu.Unlock()
-	a.kickScan()
+	if pause {
+		a.kickScan()
+	}
 
 	var once sync.Once
 	end := func(late bool) {
 		once.Do(func() {
-			if late {
+			if late && pause {
 				a.log.Warn("connect still in progress, resuming scanning", "after", pauseLimit)
+			} else if late {
+				a.log.Warn("connect still in progress, no longer holding recovery off", "after", pauseLimit)
 			}
 			a.mu.Lock()
 			a.connecting--
 			a.mu.Unlock()
-			a.kickScan()
+			if pause {
+				a.kickScan()
+			}
 		})
 	}
 	limit := time.AfterFunc(pauseLimit, func() { end(true) })
 	resume = func() {
 		limit.Stop()
 		end(false)
+	}
+	if !pause {
+		return resume
 	}
 
 	t := time.NewTimer(pauseWait)
@@ -65,13 +77,13 @@ func (a *Adapter) pauseScan() (resume func()) {
 	return resume
 }
 
-// takePause tells the supervisor whether a connect is in progress and hands it the connects waiting for
-// scanning to stop, to release once it has acted on the answer.
+// takePause tells the supervisor whether scanning is paused for a connect in progress and hands it the
+// connects waiting for scanning to stop, to release once it has acted on the answer.
 func (a *Adapter) takePause() (paused bool, waiters []chan struct{}) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	waiters, a.pauseWaiters = a.pauseWaiters, nil
-	return a.connecting > 0, waiters
+	return a.pauseOnConnect && a.connecting > 0, waiters
 }
 
 func release(waiters []chan struct{}) {

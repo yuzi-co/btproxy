@@ -65,7 +65,7 @@ type scanState struct {
 	ownReleaseUntil time.Time     // until when a Release comes from our own UnregisterMonitor
 	adverts         int           // advertisements delivered, for the stall watchdog
 
-	connecting   int             // connects in progress, which pause scanning (see pause.go)
+	connecting   int             // connects in progress, which hold off recovery (see strike) and pause scanning (see pause.go)
 	pauseWaiters []chan struct{} // connects waiting for the supervisor to stop scanning
 
 	// Set by Open.
@@ -96,7 +96,6 @@ type scanState struct {
 }
 
 func (a *Adapter) initScan() error {
-	a.kick = make(chan struct{}, 1)
 	if err := a.exportMonitors(); err != nil {
 		return err
 	}
