@@ -138,10 +138,11 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 	if a.connecting > 0 {
 		a.setStatusLocked(ble.ScanIdle) // paused: the last connect to finish starts the watcher
 	} else if err := a.startLocked(); err != nil {
-		a.scanning = false
-		a.fn.Store(nil)
-		a.setStatusLocked(ble.ScanFailed)
-		return nil, err
+		// Not an error of the call: the radio may be off while Home Assistant subscribes, and the API only
+		// asks again when a client comes or goes. The start is retried like a watcher that stops later,
+		// and the status reports the failure meanwhile.
+		a.log.Warn("starting scan failed, retrying", "err", err, "in", scanRetry)
+		a.failedLocked()
 	}
 	a.scheduleCheckLocked()
 	var once sync.Once
@@ -151,13 +152,6 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 			defer a.mu.Unlock()
 			a.scanning = false
 			a.fn.Store(nil)
-			// The API server calls this with the lock its advertisement callback takes, and closing the
-			// watcher may wait for a running Received handler, which may be waiting for that lock. So the
-			// watcher is closed on the side.
-			if w := a.w; w != nil {
-				a.w = nil
-				go w.close()
-			}
 			a.stopLocked()
 			if a.check != nil {
 				a.check.Stop()
@@ -240,14 +234,19 @@ func (a *Adapter) startLocked() error {
 	return nil
 }
 
+// stopLocked cancels a pending restart and lets go of the watcher, which is closed on the side: closing may
+// wait for a running Received handler, and that handler may be waiting for the API server's lock, which the
+// server holds when it stops the scan, or for a.mu, which a pause or a mode change holds here. A watcher is
+// never closed under a.mu, then. The watcher's own events cannot reach a later watcher: the Stopped handler
+// checks that its watcher is still a.w, and a.w is replaced before the close starts.
 func (a *Adapter) stopLocked() {
 	if a.retry != nil {
 		a.retry.Stop()
 		a.retry = nil
 	}
-	if a.w != nil {
-		a.w.close()
+	if w := a.w; w != nil {
 		a.w = nil
+		go w.close()
 	}
 }
 

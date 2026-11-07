@@ -74,29 +74,106 @@ func waitState(t *testing.T, a *Adapter, want ble.ScanState) {
 	}
 }
 
-// Stopping the scan must not wait for the watcher to close: the API server stops it holding the lock that the
-// advertisement callback, which closing may wait for, takes.
+// waitClosed waits for the watcher to be closed, which happens on the side.
+func waitClosed(t *testing.T, w *fakeWatcher) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !w.closed.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("watcher not closed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// Stopping the watcher must not wait for it to close, on any path: the API server stops the scan holding the
+// lock that the advertisement callback, which closing may wait for, takes, and a connect pauses the scan
+// while that callback may be running.
 func TestStopDoesNotWaitForClose(t *testing.T) {
-	release := make(chan struct{})
-	closed := make(chan struct{})
+	for name, stopper := range map[string]func(a *Adapter, stop func()){
+		"stop":   func(_ *Adapter, stop func()) { stop() },
+		"pause":  func(a *Adapter, _ func()) { a.pauseScan() },
+		"mode":   func(a *Adapter, _ func()) { a.SetScanMode(ble.ScanPassive) },
+		"failed": func(a *Adapter, _ func()) { a.mu.Lock(); a.failedLocked(); a.mu.Unlock() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			release := make(chan struct{})
+			closed := make(chan struct{})
+			first := true
+			a := &Adapter{log: logx.Discard(), pauseOnConnect: true, mode: ble.ScanActive, conns: map[uint64]*conn{},
+				uncached: map[uint64]bool{}, newScanner: func(ble.ScanMode) (scanWatcher, error) {
+					if first { // the watcher a restart (mode, failed) replaces it with closes at once
+						first = false
+						return blockingWatcher{release, closed}, nil
+					}
+					return &fakeWatcher{}, nil
+				}}
+			stop, err := a.Scan(func(ble.Advert) {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var released sync.Once
+			t.Cleanup(stop)                                              // after the watcher is released, else a
+			t.Cleanup(func() { released.Do(func() { close(release) }) }) // failed test hangs on the lock
+			done := make(chan struct{})
+			go func() { stopper(a, stop); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("waits for the watcher to close")
+			}
+			released.Do(func() { close(release) })
+			select {
+			case <-closed:
+			case <-time.After(2 * time.Second):
+				t.Fatal("watcher not closed")
+			}
+		})
+	}
+}
+
+// A scan whose watcher cannot start, e.g. with the radio off when Home Assistant subscribes, is not an error:
+// it is retried like a watcher that stops later, and the status reports the failure meanwhile.
+func TestScanStartFailureRetries(t *testing.T) {
+	shorten(t, &scanRetry, 20*time.Millisecond)
+	r := &fakeRadio{fail: 2}
 	a := &Adapter{log: logx.Discard(), mode: ble.ScanActive, conns: map[uint64]*conn{}, uncached: map[uint64]bool{},
-		newScanner: func(ble.ScanMode) (scanWatcher, error) { return blockingWatcher{release, closed}, nil }}
+		newScanner: r.start}
+	var states []ble.ScanState
+	var mu sync.Mutex
+	a.OnScanStatus(func(st ble.ScanStatus) {
+		mu.Lock()
+		states = append(states, st.State)
+		mu.Unlock()
+	})
 	stop, err := a.Scan(func(ble.Advert) {})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("scan: %v", err)
 	}
-	done := make(chan struct{})
-	go func() { stop(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("stop waits for the watcher to close")
+	if st := a.ScanStatus().State; st != ble.ScanFailed {
+		t.Fatalf("state %d after a failed start, want %d", st, ble.ScanFailed)
 	}
-	close(release)
-	select {
-	case <-closed:
-	case <-time.After(2 * time.Second):
-		t.Fatal("watcher not closed")
+	waitState(t, a, ble.ScanRunning)
+	if n := len(r.watchers()); n != 1 {
+		t.Fatalf("%d watchers", n)
+	}
+	mu.Lock()
+	seen := append([]ble.ScanState(nil), states...)
+	mu.Unlock()
+	failed := 0
+	for _, st := range seen {
+		if st == ble.ScanFailed {
+			failed++
+		}
+	}
+	if failed != 2 {
+		t.Fatalf("states %v: the two failed starts should be reported", seen)
+	}
+	stop()
+	waitState(t, a, ble.ScanIdle)
+	waitClosed(t, r.watchers()[0])
+	if a.retry != nil || a.check != nil {
+		t.Fatal("timers still armed after stop")
 	}
 }
 
@@ -109,9 +186,7 @@ func TestPauseScan(t *testing.T) {
 	a, r := newTestAdapter(t, true)
 	waitState(t, a, ble.ScanRunning)
 	resume1 := a.pauseScan()
-	if !r.watchers()[0].closed.Load() {
-		t.Fatal("watcher not stopped for the connect")
-	}
+	waitClosed(t, r.watchers()[0]) // stopped for the connect
 	waitState(t, a, ble.ScanIdle)
 	resume2 := a.pauseScan() // overlapping connect
 	a.SetScanMode(ble.ScanPassive)
@@ -190,7 +265,5 @@ func TestDeadWatcherRestarts(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	waitState(t, a, ble.ScanRunning)
-	if !r.watchers()[0].closed.Load() {
-		t.Fatal("aborted watcher not closed")
-	}
+	waitClosed(t, r.watchers()[0]) // the aborted one
 }
