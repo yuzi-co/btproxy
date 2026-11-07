@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"slices"
 	"strings"
 )
 
@@ -36,7 +37,8 @@ const (
 var errMalformed = errors.New("malformed packet")
 
 type question struct {
-	name    string // lower case, ending in a dot
+	name    string // lower case, ending in a dot (see readName)
+	wire    []byte // the name as the querier sent it, uncompressed, for the echo in a legacy response
 	qtype   uint16
 	qclass  uint16 // without the QU bit
 	unicast bool   // QU bit: the querier asks for a unicast response
@@ -45,10 +47,11 @@ type question struct {
 type query struct {
 	id        uint16
 	questions []question
+	known     []record // the answer section: records the querier already holds (RFC 6762 section 7.1)
 }
 
-// parseQuery reads the questions of a query. Responses, and queries with an opcode or rcode, are errors. The
-// answer sections (known answers) are ignored.
+// parseQuery reads the questions and the known answers of a query. Responses, and queries with an opcode or
+// rcode, are errors. The authority and additional sections are ignored.
 func parseQuery(b []byte) (query, error) {
 	if len(b) < 12 {
 		return query{}, errMalformed
@@ -64,7 +67,7 @@ func parseQuery(b []byte) (query, error) {
 	}
 	off := 12
 	for range n {
-		name, next, err := readName(b, off)
+		wire, next, err := readLabels(b, off)
 		if err != nil {
 			return query{}, err
 		}
@@ -72,21 +75,78 @@ func parseQuery(b []byte) (query, error) {
 			return query{}, errMalformed
 		}
 		class := binary.BigEndian.Uint16(b[next+2:])
-		q.questions = append(q.questions, question{name: name, qtype: binary.BigEndian.Uint16(b[next:]),
-			qclass: class &^ topBit, unicast: class&topBit != 0})
+		q.questions = append(q.questions, question{name: dotted(wire), wire: wire,
+			qtype: binary.BigEndian.Uint16(b[next:]), qclass: class &^ topBit, unicast: class&topBit != 0})
 		off = next + 4
+	}
+	for range binary.BigEndian.Uint16(b[6:]) {
+		name, next, err := readName(b, off)
+		if err != nil {
+			return query{}, err
+		}
+		if next+10 > len(b) {
+			return query{}, errMalformed
+		}
+		rec := record{name: name, rtype: binary.BigEndian.Uint16(b[next:]), ttl: binary.BigEndian.Uint32(b[next+4:])}
+		class := binary.BigEndian.Uint16(b[next+2:]) &^ topBit
+		l := int(binary.BigEndian.Uint16(b[next+8:]))
+		off = next + 10
+		if off+l > len(b) {
+			return query{}, errMalformed
+		}
+		if rec.data, err = readData(b, off, l, rec.rtype); err != nil {
+			return query{}, err
+		}
+		if class == classIN {
+			q.known = append(q.known, rec)
+		}
+		off += l
 	}
 	return q, nil
 }
 
-// readName decodes a possibly compressed name at off, lower-cased with a trailing dot, and returns the offset
-// after it.
+// readData returns the l bytes of record data at off. The name in PTR and SRV data is decompressed and
+// lower-cased, so that the data compares with ours.
+func readData(b []byte, off, l int, rtype uint16) ([]byte, error) {
+	skip := 0
+	switch rtype {
+	case typePTR:
+	case typeSRV:
+		skip = 6
+	default:
+		return slices.Clone(b[off : off+l]), nil
+	}
+	if l < skip {
+		return nil, errMalformed
+	}
+	wire, next, err := readLabels(b, off+skip)
+	if err != nil {
+		return nil, err
+	}
+	if next != off+l {
+		return nil, errMalformed
+	}
+	return append(slices.Clone(b[off:off+skip]), lower(string(wire))...), nil
+}
+
+// readName decodes a possibly compressed name at off and returns it lower-cased, as dotted labels ending in a
+// dot, and the offset after it. A dot inside a label is escaped, so that the label cannot read as several.
 func readName(b []byte, off int) (string, int, error) {
-	var sb strings.Builder
+	wire, next, err := readLabels(b, off)
+	if err != nil {
+		return "", 0, err
+	}
+	return dotted(wire), next, nil
+}
+
+// readLabels decodes a possibly compressed name at off into its uncompressed wire form, with the label bytes as
+// sent, and returns the offset after it.
+func readLabels(b []byte, off int) ([]byte, int, error) {
+	var wire []byte
 	end := -1
 	for jumps := 0; ; {
 		if off >= len(b) {
-			return "", 0, errMalformed
+			return nil, 0, errMalformed
 		}
 		l := int(b[off])
 		switch {
@@ -94,13 +154,10 @@ func readName(b []byte, off int) (string, int, error) {
 			if end < 0 {
 				end = off + 1
 			}
-			if sb.Len() == 0 {
-				sb.WriteByte('.')
-			}
-			return strings.ToLower(sb.String()), end, nil
+			return append(wire, 0), end, nil
 		case l&0xc0 == 0xc0:
 			if off+1 >= len(b) || jumps > 16 {
-				return "", 0, errMalformed
+				return nil, 0, errMalformed
 			}
 			if end < 0 {
 				end = off + 2
@@ -108,16 +165,46 @@ func readName(b []byte, off int) (string, int, error) {
 			off = int(binary.BigEndian.Uint16(b[off:]) & 0x3fff)
 			jumps++
 		case l&0xc0 != 0:
-			return "", 0, errMalformed
+			return nil, 0, errMalformed
 		default:
-			if off+1+l > len(b) || sb.Len()+l+1 >= maxNameBytes {
-				return "", 0, errMalformed
+			if off+1+l > len(b) || len(wire)+l+1 >= maxNameBytes {
+				return nil, 0, errMalformed
 			}
-			sb.Write(b[off+1 : off+1+l])
-			sb.WriteByte('.')
+			wire = append(wire, b[off:off+1+l]...)
 			off += 1 + l
 		}
 	}
+}
+
+// dotted turns an uncompressed wire name into the lower-cased dotted form the records use, with a dot inside a
+// label escaped.
+func dotted(wire []byte) string {
+	var sb strings.Builder
+	for off := 0; off < len(wire) && wire[off] != 0; off += 1 + int(wire[off]) {
+		for _, c := range wire[off+1 : off+1+int(wire[off])] {
+			if c == '.' {
+				sb.WriteByte('\\')
+			}
+			sb.WriteByte(c)
+		}
+		sb.WriteByte('.')
+	}
+	if sb.Len() == 0 {
+		return "."
+	}
+	return lower(sb.String())
+}
+
+// lower lower-cases the ASCII letters of s and nothing else, as DNS names compare (RFC 6762 section 16). Unlike
+// strings.ToLower it keeps every byte count, which the wire form of a name depends on.
+func lower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // appendName writes name uncompressed; labels must not contain dots.
@@ -141,6 +228,28 @@ type record struct {
 }
 
 func (r record) key() string { return r.name + "/" + string(rune(r.rtype)) + "/" + string(r.data) }
+
+// rdataKey returns r's data for comparison, with the name in PTR and SRV data lower-cased.
+func (r record) rdataKey() string {
+	switch {
+	case r.rtype == typePTR:
+		return lower(string(r.data))
+	case r.rtype == typeSRV && len(r.data) >= 6:
+		return string(r.data[:6]) + lower(string(r.data[6:]))
+	}
+	return string(r.data)
+}
+
+// knows reports whether the querier lists r among its known answers with a TTL of at least half of r's, in
+// which case r must not be sent again (RFC 6762 section 7.1).
+func (q query) knows(r record) bool {
+	for _, k := range q.known {
+		if k.rtype == r.rtype && k.ttl >= r.ttl/2 && k.name == lower(r.name) && k.rdataKey() == r.rdataKey() {
+			return true
+		}
+	}
+	return false
+}
 
 // service is what the responder advertises: one ESPHome API instance on one host.
 type service struct {
@@ -196,8 +305,9 @@ func (s service) all(ips []net.IP) []record {
 	return append([]record{s.ptr(), s.srv(), s.txtRecord(), s.ptrServices()}, s.addrs(ips)...)
 }
 
-// answer returns the answers and additional records for q, given the addresses of the interface it came in on.
-// unicast reports that every question asked for a unicast response.
+// answer returns the answers and additional records for q, given the addresses of the interface it came in on,
+// leaving out the answers the querier already knows. unicast reports that every question asked for a unicast
+// response.
 func (s service) answer(q query, ips []net.IP) (answers, extra []record, unicast bool) {
 	have := map[string]bool{}
 	add := func(list *[]record, rs ...record) {
@@ -224,19 +334,20 @@ func (s service) answer(q query, ips []net.IP) (answers, extra []record, unicast
 			if is(typePTR) {
 				add(&answers, s.ptr())
 			}
-		case strings.ToLower(s.instance):
+		case lower(s.instance):
 			if is(typeSRV) {
 				add(&answers, s.srv())
 			}
 			if is(typeTXT) {
 				add(&answers, s.txtRecord())
 			}
-		case strings.ToLower(s.host):
+		case lower(s.host):
 			if is(typeA) {
 				add(&answers, s.addrs(ips)...)
 			}
 		}
 	}
+	answers = slices.DeleteFunc(answers, q.knows)
 	if len(answers) == 0 {
 		return nil, nil, false
 	}
@@ -257,7 +368,7 @@ func (s service) answer(q query, ips []net.IP) (answers, extra []record, unicast
 }
 
 // encodeResponse builds an authoritative response. legacy (a query from a port other than 5353) echoes the id
-// and questions, caps TTLs and drops the cache-flush bit; ttl0 makes goodbye records.
+// and questions as parsed from the query, caps TTLs and drops the cache-flush bit; ttl0 makes goodbye records.
 func encodeResponse(id uint16, qs []question, answers, extra []record, legacy, ttl0 bool) []byte {
 	b := make([]byte, 12, 512)
 	binary.BigEndian.PutUint16(b[0:], id)
@@ -265,7 +376,7 @@ func encodeResponse(id uint16, qs []question, answers, extra []record, legacy, t
 	if legacy {
 		binary.BigEndian.PutUint16(b[4:], uint16(len(qs)))
 		for _, q := range qs {
-			b = appendName(b, q.name)
+			b = append(b, q.wire...)
 			b = binary.BigEndian.AppendUint16(b, q.qtype)
 			b = binary.BigEndian.AppendUint16(b, q.qclass)
 		}
