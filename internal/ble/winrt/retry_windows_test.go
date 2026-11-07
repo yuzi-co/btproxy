@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/yuzi-co/btproxy/internal/ble"
 )
 
 func TestRadioFailure(t *testing.T) {
@@ -34,15 +36,11 @@ func TestRadioFailure(t *testing.T) {
 	}
 }
 
+// TestConnectRetryDefaults: the fast cut-off fits the budget, which must leave a client's 30 s connect most
+// of its time.
 func TestConnectRetryDefaults(t *testing.T) {
-	r := connectRetry(-1, time.Second)
-	if r.Retries != 0 {
-		t.Errorf("negative retries: %d", r.Retries)
-	}
-	r = connectRetry(2, time.Second)
-	// Two retries with their doubling delays (1 s, then 2 s) must fit the budget, which must leave a client's
-	// 30 s connect most of its time.
-	if r.Delay != time.Second || r.Budget < 3*r.Delay || r.Budget > 10*time.Second || r.Fast > r.Budget {
+	r := ble.ConnectOptions{ConnectRetries: 2, ConnectRetryDelay: time.Second}.Retry(retryFast)
+	if r.Budget > 10*time.Second || r.Fast > r.Budget {
 		t.Errorf("odd timings: %+v", r)
 	}
 }

@@ -19,16 +19,8 @@ import (
 // The wait before a retry comes from Options.ConnectRetryDelay and doubles with each retry (see
 // ble.ConnectRetry); Windows takes a moment to drop the failed link, so it should not be much under 500 ms.
 
-const (
-	retryFast = 5 * time.Second // lookup, session and link-up come before discovery fails
-	// retryBudget is how long after the first attempt a retry may still start. A client gives a connect about
-	// 20 s, so 10 s fits the doubling delays of the default retries and leaves the last attempt as much again.
-	retryBudget = 10 * time.Second
-)
-
-func connectRetry(retries int, delay time.Duration) ble.ConnectRetry {
-	return ble.ConnectRetry{Retries: max(retries, 0), Delay: delay, Fast: retryFast, Budget: retryBudget}
-}
+// retryFast is ble.ConnectRetry.Fast here: lookup, session and link-up come before discovery fails.
+const retryFast = 5 * time.Second
 
 // errLinkLost is a link that went down between coming up and the end of service discovery.
 var errLinkLost = fmt.Errorf("%w while connecting", ble.ErrLinkLost)

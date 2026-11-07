@@ -1,6 +1,7 @@
 package winrt
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"sync"
@@ -24,11 +25,20 @@ const (
 	mtuSettleWindow = time.Second // how long a new connection may take to finish its MTU exchange
 )
 
-// Variables, so the tests can shorten them.
-var (
-	scanRetry = 5 * time.Second  // after the watcher stops on its own, e.g. with the radio off
-	scanCheck = 10 * time.Second // how often a running watcher's status is checked
-)
+// timings are the scanner's waits, which the tests shorten; a zero field takes the default.
+type timings struct {
+	scanRetry  time.Duration // after the watcher stops on its own, e.g. with the radio off
+	scanCheck  time.Duration // how often a running watcher's status is checked
+	pauseLimit time.Duration // bounds a pause for a connect, should it hang beyond its own timeouts
+}
+
+func (t timings) withDefaults() timings {
+	return timings{
+		scanRetry:  cmp.Or(t.scanRetry, 5*time.Second),
+		scanCheck:  cmp.Or(t.scanCheck, 10*time.Second),
+		pauseLimit: cmp.Or(t.pauseLimit, connectTimeout+callTimeout),
+	}
+}
 
 // Options configures the adapter.
 type Options struct {
@@ -41,24 +51,23 @@ type Options struct {
 type Adapter struct {
 	log       *logx.Logger
 	mac       uint64
+	tm        timings
 	connRetry ble.ConnectRetry
 	presets   []preset // connection parameter presets, Windows 11 and later
 	// newScanner starts a watcher; a field, so the tests can do without the radio.
-	newScanner     func(ble.ScanMode) (scanWatcher, error)
-	pauseOnConnect bool
+	newScanner func(ble.ScanMode) (scanWatcher, error)
 
-	mu         sync.Mutex
-	mode       ble.ScanMode
-	status     ble.ScanStatus
-	onStatus   func(ble.ScanStatus)
-	scanning   bool                             // scanning is wanted
-	fn         atomic.Pointer[func(ble.Advert)] // read without mu: Stop may wait for a running Received handler
-	w          scanWatcher
-	retry      *time.Timer // restarts a failed watcher
-	check      *time.Timer // checks the running watcher's status
-	connecting int         // connects in progress, which pause scanning (see pause_windows.go)
-	conns      map[uint64]*conn
-	uncached   map[uint64]bool // devices whose next service discovery bypasses the Windows GATT cache
+	scan  ble.ScanCell  // the mode and status reported
+	pause ble.ScanPause // connects in progress, which pause scanning (see pause_windows.go)
+
+	mu       sync.Mutex
+	scanning bool                             // scanning is wanted
+	fn       atomic.Pointer[func(ble.Advert)] // read without mu: Stop may wait for a running Received handler
+	w        scanWatcher
+	retry    *time.Timer // restarts a failed watcher
+	check    *time.Timer // checks the running watcher's status
+	conns    map[uint64]*conn
+	uncached map[uint64]bool // devices whose next service discovery bypasses the Windows GATT cache
 }
 
 // scanWatcher is a started advertisement watcher.
@@ -98,8 +107,9 @@ func Open(opt Options) (*Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &Adapter{log: log, mac: mac, connRetry: connectRetry(opt.ConnectRetries, opt.ConnectRetryDelay),
-		pauseOnConnect: opt.PauseOnConnect, mode: ble.ScanActive, conns: map[uint64]*conn{}, uncached: map[uint64]bool{}}
+	a := &Adapter{log: log, mac: mac, tm: timings{}.withDefaults(), connRetry: opt.Retry(retryFast),
+		conns: map[uint64]*conn{}, uncached: map[uint64]bool{}}
+	a.initScan(ble.ScanActive, opt.PauseOnConnect)
 	if a.presets, err = loadPresets(); err != nil {
 		log.Debug("no connection parameter presets (Windows 11 needed), not offering connection parameters", "err", err)
 	} else {
@@ -120,22 +130,37 @@ func Open(opt Options) (*Adapter, error) {
 
 func (a *Adapter) MAC() uint64 { return a.mac }
 
+// initScan sets up the scanner state with the mode and whether connects pause scanning; the tests call it on
+// an Adapter without a radio.
+func (a *Adapter) initScan(mode ble.ScanMode, pauseOnConnect bool) {
+	a.scan.SetMode(mode)
+	a.scan.Log = a.log
+	a.pause = ble.ScanPause{Pause: pauseOnConnect, Limit: a.tm.pauseLimit, Kick: a.applyPause, Log: a.log}
+}
+
+// unlockPublish releases a.mu and then reports what changed under it to the status callback, which is not
+// to be called holding a lock of the adapter's: every path that changes the status ends with it.
+func (a *Adapter) unlockPublish() {
+	a.mu.Unlock()
+	a.scan.Publish()
+}
+
 // Scan starts an advertisement watcher. Advertisements and scan responses arrive as separate events, each
 // delivered as its own Advert, as an ESP32 reports them.
 func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	defer a.unlockPublish()
 	if a.scanning {
 		return nil, errors.New("already scanning")
 	}
 	a.scanning = true
 	a.fn.Store(&fn)
-	if a.connecting > 0 {
-		a.setStatusLocked(ble.ScanIdle) // paused: the last connect to finish starts the watcher
+	if a.pause.Paused() {
+		a.scan.StoreState(ble.ScanIdle) // paused: the last connect to finish starts the watcher
 	} else if err := a.startLocked(); err != nil {
 		a.scanning = false
 		a.fn.Store(nil)
-		a.setStatusLocked(ble.ScanFailed)
+		a.scan.StoreState(ble.ScanFailed)
 		return nil, err
 	}
 	a.scheduleCheckLocked()
@@ -143,7 +168,7 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 	return func() {
 		once.Do(func() {
 			a.mu.Lock()
-			defer a.mu.Unlock()
+			defer a.unlockPublish()
 			a.scanning = false
 			a.fn.Store(nil)
 			// The API server calls this with the lock its advertisement callback takes, and closing the
@@ -158,7 +183,7 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 				a.check.Stop()
 				a.check = nil
 			}
-			a.setStatusLocked(ble.ScanIdle)
+			a.scan.StoreState(ble.ScanIdle)
 		})
 	}, nil
 }
@@ -167,14 +192,14 @@ func (a *Adapter) Scan(fn func(ble.Advert)) (func(), error) {
 // reports a watcher that stopped on its own, but a watcher can also end up Aborted without one.
 func (a *Adapter) scheduleCheckLocked() {
 	var t *time.Timer
-	t = time.AfterFunc(scanCheck, func() {
+	t = time.AfterFunc(a.tm.scanCheck, func() {
 		a.mu.Lock()
-		defer a.mu.Unlock()
+		defer a.unlockPublish()
 		if a.check != t || !a.scanning {
 			return
 		}
 		if a.w != nil && !a.w.alive() {
-			a.log.Warn("scanning stopped without notice, retrying", "in", scanRetry)
+			a.log.Warn("scanning stopped without notice, retrying", "in", a.tm.scanRetry)
 			a.failedLocked()
 		}
 		a.scheduleCheckLocked()
@@ -184,13 +209,13 @@ func (a *Adapter) scheduleCheckLocked() {
 
 func (a *Adapter) SetScanMode(m ble.ScanMode) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if m == a.mode {
+	defer a.unlockPublish()
+	if m == a.scan.Mode() {
 		return
 	}
-	a.mode = m
+	a.scan.SetMode(m)
 	if !a.scanning || a.w == nil {
-		a.setStatusLocked(a.status.State)
+		a.scan.StoreState(a.scan.Status().State)
 		return
 	}
 	// The scanning mode of a started watcher cannot change: restart it.
@@ -201,37 +226,22 @@ func (a *Adapter) SetScanMode(m ble.ScanMode) {
 	}
 }
 
-func (a *Adapter) ScanStatus() ble.ScanStatus {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.status
-}
+func (a *Adapter) ScanStatus() ble.ScanStatus { return a.scan.Status() }
 
-func (a *Adapter) OnScanStatus(fn func(ble.ScanStatus)) {
-	a.mu.Lock()
-	a.onStatus = fn
-	a.mu.Unlock()
-}
-
-func (a *Adapter) setStatusLocked(s ble.ScanState) {
-	a.status = ble.ScanStatus{State: s, Mode: a.mode}
-	if a.onStatus != nil {
-		a.onStatus(a.status)
-	}
-}
+func (a *Adapter) OnScanStatus(fn func(ble.ScanStatus)) { a.scan.OnStatus(fn) }
 
 func (a *Adapter) startLocked() error {
 	if a.retry != nil {
 		a.retry.Stop()
 		a.retry = nil
 	}
-	a.setStatusLocked(ble.ScanStarting)
-	w, err := a.newScanner(a.mode)
+	a.scan.StoreState(ble.ScanStarting)
+	w, err := a.newScanner(a.scan.Mode())
 	if err != nil {
 		return err
 	}
 	a.w = w
-	a.setStatusLocked(ble.ScanRunning)
+	a.scan.StoreState(ble.ScanRunning)
 	return nil
 }
 
@@ -249,17 +259,17 @@ func (a *Adapter) stopLocked() {
 // failedLocked reports the scanner failed and tries again later while scanning is still wanted.
 func (a *Adapter) failedLocked() {
 	a.stopLocked()
-	a.setStatusLocked(ble.ScanFailed)
+	a.scan.StoreState(ble.ScanFailed)
 	var t *time.Timer
-	t = time.AfterFunc(scanRetry, func() {
+	t = time.AfterFunc(a.tm.scanRetry, func() {
 		a.mu.Lock()
-		defer a.mu.Unlock()
+		defer a.unlockPublish()
 		if a.retry != t || !a.scanning {
 			return
 		}
 		a.retry = nil
-		if a.connecting > 0 {
-			a.setStatusLocked(ble.ScanIdle) // paused: the last connect to finish starts the watcher
+		if a.pause.Paused() {
+			a.scan.StoreState(ble.ScanIdle) // paused: the last connect to finish starts the watcher
 			return
 		}
 		if err := a.startLocked(); err != nil {
@@ -361,11 +371,11 @@ func (a *Adapter) watcherStopped(w *watcher, code bluetooth.BluetoothError) {
 	}
 	go func() {
 		a.mu.Lock()
-		defer a.mu.Unlock()
+		defer a.unlockPublish()
 		if a.w != scanWatcher(w) {
 			return
 		}
-		a.log.Warn("scanning stopped by Windows, retrying", "bluetooth_error", int(code), "in", scanRetry)
+		a.log.Warn("scanning stopped by Windows, retrying", "bluetooth_error", int(code), "in", a.tm.scanRetry)
 		a.failedLocked()
 	}()
 }
