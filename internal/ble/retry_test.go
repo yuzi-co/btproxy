@@ -131,10 +131,10 @@ func TestConnectOptionsRetry(t *testing.T) {
 	if r := (ConnectOptions{ConnectRetries: -1}).Retry(time.Second); r.Retries != 0 {
 		t.Errorf("negative retries not clamped: %+v", r)
 	}
-	// Two retries with their doubling delays (1 s, then 2 s) must fit the budget.
-	r := ConnectOptions{ConnectRetries: 2, ConnectRetryDelay: time.Second}.Retry(3 * time.Second)
-	if r.Retries != 2 || r.Delay != time.Second || r.Fast != 3*time.Second || r.Budget != ConnectBudget ||
-		r.Budget < 3*r.Delay {
+	// Three retries with their doubling delays (1 s, 2 s, then 4 s) must fit the budget.
+	r := ConnectOptions{ConnectRetries: 3, ConnectRetryDelay: time.Second}.Retry(3 * time.Second)
+	if r.Retries != 3 || r.Delay != time.Second || r.Fast != 3*time.Second || r.Budget != ConnectBudget ||
+		r.Budget < 7*r.Delay {
 		t.Errorf("bad options %+v", r)
 	}
 }

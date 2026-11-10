@@ -105,7 +105,7 @@ func settingsTable() []setting {
 		{name: "scan-pause-on-connect", def: true, usage: "stop scanning while a connection is being made, like ESPHome",
 			section: "Bluetooth", label: "Pause scanning while connecting", backend: "bluez,kernel,winrt",
 			doc: "stop scanning while connecting; see [Scan pause and connect retries](#scan-pause-and-connect-retries)"},
-		{name: "connect-retries", def: 2,
+		{name: "connect-retries", def: 3,
 			usage:   "retry a connect that fails at once on the radio (HCI 0x3e) or loses the link right after, this many times, 0 to disable",
 			section: "Bluetooth", label: "Connect retries on radio failures", backend: "bluez,kernel,winrt",
 			doc: "retries of a connect that fails at once on the radio or loses the link right after; `0` disables"},
