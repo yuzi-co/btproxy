@@ -563,8 +563,8 @@ Failed connects are retried, still paused, up to `-connect-retries` times, and a
 `connected after retries`. The first retry waits `-connect-retry-delay` (1 s by default) and each further one
 twice the previous (2 s, 4 s...), so that a device which drops a burst of attempts, or resets under one, gets a
 breather, and no retry starts more than 10 s after the first attempt. The kernel backend retries HCI reason 0x3e
-and a link lost before that first exchange if the attempt took up to 10 s, and any other error if it came within
-3 s. Errors another attempt cannot change, such as no permission or no adapter, are not retried.
+and a link lost before that first exchange, however long the attempt took within those 10 s. Other errors,
+timeouts included, are not retried: another attempt would not change them.
 
 On BlueZ, connects that fail within about half a second (`le-connection-abort-by-local`, or an error without
 message) are retried the same way, and so is a link that comes up and drops before its services are resolved,
