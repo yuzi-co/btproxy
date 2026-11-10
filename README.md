@@ -285,7 +285,7 @@ Home Assistant discovers it over mDNS. Otherwise add it by hand: Add integration
 | `-scan-mode` | `active` | `active` or `passive` |
 | `-adv-allow`, `-adv-deny`, `-adv-deny-random` | | see [Advertisement filter](#advertisement-filter) |
 | `-scan-pause-on-connect` | `true` | stop scanning while connecting; see [Scan pause and connect retries](#scan-pause-and-connect-retries) (bluez, kernel and winrt backends) |
-| `-connect-retries` | `2` | retries of a connect that fails at once on the radio or loses the link right after; `0` disables (bluez, kernel and winrt backends) |
+| `-connect-retries` | `3` | retries of a connect that fails at once on the radio or loses the link right after; `0` disables (bluez, kernel and winrt backends) |
 | `-connect-retry-delay` | `1s` | wait before the first connect retry; doubles before each further one (bluez, kernel and winrt backends) |
 | `-adapter` | `hci0` | adapter, or comma-separated list (bluez and kernel backends) |
 | `-agent` | `true` | register a BlueZ pairing agent (bluez backend) |
