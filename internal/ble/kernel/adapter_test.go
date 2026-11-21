@@ -168,6 +168,8 @@ func (s *fakeSocket) Secure() error {
 	return nil
 }
 
+func (s *fakeSocket) Flush(time.Duration) {}
+
 func openTest(t *testing.T, k *fakeKernel, tweak func(*Options)) *Adapter {
 	t.Helper()
 	opt := Options{BondDir: t.TempDir(), ConnectOptions: ble.ConnectOptions{ConnectRetries: 4}, Log: logx.Discard(),

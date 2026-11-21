@@ -47,6 +47,11 @@ const (
 	maxGATTQueueBytes = 1 << 20 // of write data, per connection
 )
 
+// disconnectDrain bounds how long a client's disconnect waits for the GATT requests it sent before it. An ESP32
+// proxy handles a client's messages in order, so writes sent just before a disconnect still reach the device;
+// a request stuck on the device must not hold the disconnect for long.
+const disconnectDrain = 5 * time.Second
+
 // advBatchSize and advFlushInterval follow ESPHome's batching of raw advertisements: a batch is sent when it
 // is full or advFlushInterval after its first advertisement.
 const (
@@ -76,8 +81,9 @@ type Server struct {
 	stats    stats    // see stats.go
 	entities []entity // in the order they are listed; fixed by NewServer
 
-	helloTimeout time.Duration // fields so the tests can shorten them
-	setupTimeout time.Duration
+	helloTimeout    time.Duration // fields so the tests can shorten them
+	setupTimeout    time.Duration
+	disconnectDrain time.Duration
 }
 
 // btConn is a connection slot. conn is nil while the connection is being made; dropped records a link that
@@ -89,6 +95,15 @@ type btConn struct {
 	queue      []gattJob
 	queueBytes int // write data in queue
 	running    bool
+	queued     uint64  // requests ever queued
+	done       uint64  // and finished
+	drained    []drain // disconnects waiting for requests queued before them
+}
+
+// drain is a disconnect waiting until the connection's done count reaches upTo.
+type drain struct {
+	upTo uint64
+	ch   chan struct{}
 }
 
 type gattJob struct {
@@ -104,7 +119,7 @@ func NewServer(cfg Config, adapter ble.Adapter, log *logx.Logger) *Server {
 	s := &Server{
 		cfg: cfg, adapter: adapter, log: log,
 		clients: map[*client]bool{}, conns: map[uint64]*btConn{}, scanKick: make(chan struct{}, 1),
-		helloTimeout: helloTimeout, setupTimeout: setupTimeout,
+		helloTimeout: helloTimeout, setupTimeout: setupTimeout, disconnectDrain: disconnectDrain,
 	}
 	s.initScanner()
 	s.initStats()
@@ -455,6 +470,36 @@ func (a *connAttempt) settle(conn ble.Conn) (withdrawn, dropped bool) {
 	return withdrawn, dropped
 }
 
+// requestDisconnect handles a client's disconnect: GATT requests already queued on the connection run first,
+// for up to s.disconnectDrain, as they would on an ESP32 proxy, which handles a client's messages in order.
+// Writes without response followed at once by a disconnect are common, and must not be dropped.
+func (s *Server) requestDisconnect(addr uint64) {
+	s.mu.Lock()
+	bc := s.conns[addr]
+	var wait chan struct{}
+	if bc != nil && bc.conn != nil && bc.done < bc.queued {
+		wait = make(chan struct{})
+		bc.drained = append(bc.drained, drain{upTo: bc.queued, ch: wait})
+	}
+	s.mu.Unlock()
+	if wait != nil {
+		t := time.NewTimer(s.disconnectDrain)
+		select {
+		case <-wait:
+		case <-t.C:
+			s.log.Warn("gatt requests still running at disconnect, disconnecting anyway", "addr", ble.FormatMAC(addr))
+		}
+		t.Stop()
+		s.mu.Lock()
+		gone := s.conns[addr] != bc // the link dropped, or the last client left, meanwhile: already reported
+		s.mu.Unlock()
+		if gone {
+			return
+		}
+	}
+	s.disconnect(addr)
+}
+
 // disconnect ends the connection on addr, or withdraws the connect still making it.
 func (s *Server) disconnect(addr uint64) {
 	a, conn := s.attempt(addr)
@@ -515,6 +560,7 @@ func (s *Server) enqueue(j gattJob) {
 	}
 	bc.queue = append(bc.queue, j)
 	bc.queueBytes += len(j.r.data)
+	bc.queued++
 	start := !bc.running
 	bc.running = true
 	s.mu.Unlock()
@@ -543,5 +589,17 @@ func (s *Server) runQueue(bc *btConn) {
 		}
 		s.mu.Unlock()
 		j.c.gatt(conn, j.typ, j.r)
+		s.mu.Lock()
+		bc.done++
+		waiting := bc.drained[:0]
+		for _, d := range bc.drained {
+			if bc.done >= d.upTo {
+				close(d.ch)
+			} else {
+				waiting = append(waiting, d)
+			}
+		}
+		bc.drained = waiting
+		s.mu.Unlock()
 	}
 }

@@ -655,6 +655,10 @@ Integrations can request other parameters on a live connection (aioesphomeapi
   anything else finding it full closes the client, as does a write over 10 s.
 - GATT requests wait in a queue per connection, of at most 256 requests and 1 MiB of write data; one over that
   fails with a GATT error. A client with 32 device or connection parameter requests running is closed.
+- A client's disconnect waits, for up to 5 s, until the GATT requests it sent before it have run, as an ESP32
+  proxy handles a client's messages in order: writes sent just before a disconnect still reach the device. The
+  kernel backend also lets written data leave for the adapter before it drops the link. When the last client
+  leaves, connections are dropped at once.
 
 ## Logs
 

@@ -93,6 +93,7 @@ type attClient struct {
 	timeout time.Duration
 
 	mtu   atomic.Uint32
+	wcmd  atomic.Int64 // when the last write without response was sent, in Unix nanoseconds
 	reqMu sync.Mutex
 	rsp   chan []byte
 
@@ -286,6 +287,14 @@ func (c *attClient) readLong(h uint16) ([]byte, error) {
 	return data, nil
 }
 
+// lastWriteCmd is when the last write without response was sent, the zero time if none was.
+func (c *attClient) lastWriteCmd() time.Time {
+	if ns := c.wcmd.Load(); ns != 0 {
+		return time.Unix(0, ns)
+	}
+	return time.Time{}
+}
+
 // ReadDescriptor implements ble.Conn. In ATT a descriptor is an attribute like any other.
 func (c *attClient) ReadDescriptor(h uint16) ([]byte, error) { return c.Read(h) }
 
@@ -300,6 +309,7 @@ func (c *attClient) Write(h uint16, data []byte, withResponse bool) error {
 		if err != nil {
 			return fmt.Errorf("%w: %v", ble.ErrNotConnected, err)
 		}
+		c.wcmd.Store(time.Now().UnixNano())
 		return nil
 	}
 	return c.secure(func() error {

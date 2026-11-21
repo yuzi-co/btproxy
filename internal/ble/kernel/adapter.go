@@ -26,6 +26,8 @@ const (
 
 	connectTimeout = 30 * time.Second // until the kernel reports the link up
 	mtuTimeout     = 10 * time.Second
+	flushTimeout   = 2 * time.Second        // for written data to leave the socket at a disconnect
+	writeGrace     = 100 * time.Millisecond // after a write without response, before a disconnect
 )
 
 var (
@@ -80,6 +82,8 @@ type socket interface {
 	transport
 	// Secure encrypts the link, pairing if there is no bond, and returns once that is done or failed.
 	Secure() error
+	// Flush waits, up to timeout, until what was written has left the socket for the controller.
+	Flush(timeout time.Duration)
 }
 
 // advSource delivers advertisements as received, the HCI monitor outside the tests.
@@ -793,6 +797,13 @@ func (c *conn) Pair() error {
 // socket wants it.
 func (c *conn) Disconnect() error {
 	c.silence()
+	// A write without response returns once its PDU is on the socket. Ending the link before the kernel has
+	// passed it to the controller loses it, so let the socket empty first, and give a PDU just written a few
+	// connection intervals to leave the controller.
+	c.sock.Flush(flushTimeout)
+	if d := writeGrace - time.Since(c.lastWriteCmd()); d > 0 {
+		time.Sleep(d)
+	}
 	c.a.mu.Lock()
 	if c.a.conns[c.addr] == c {
 		delete(c.a.conns, c.addr)
