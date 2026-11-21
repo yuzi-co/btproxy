@@ -36,8 +36,9 @@ type testConn struct {
 	once    sync.Once
 	pairErr error
 
-	mu     sync.Mutex
-	writes [][]byte
+	mu           sync.Mutex
+	writes       [][]byte
+	atDisconnect []int // the number of writes done at each Disconnect
 }
 
 func (c *testConn) MTU() uint32                           { return 23 }
@@ -47,6 +48,9 @@ func (c *testConn) ReadDescriptor(uint16) ([]byte, error) { return nil, errors.N
 func (c *testConn) WriteDescriptor(uint16, []byte) error  { return nil }
 func (c *testConn) Notify(uint16, bool) error             { return nil }
 func (c *testConn) Disconnect() error {
+	c.mu.Lock()
+	c.atDisconnect = append(c.atDisconnect, len(c.writes))
+	c.mu.Unlock()
 	if c.stuck != nil {
 		c.once.Do(func() { close(c.stuck) })
 	}
@@ -216,10 +220,64 @@ func TestWritesInOrder(t *testing.T) {
 	}
 }
 
-// TestDisconnectNotBlocked checks that a disconnect goes through while a GATT request hangs on the device.
+// TestWritesBeforeDisconnect sends two writes without response and at once a disconnect, as an integration
+// that pulses a characteristic and leaves does. The writes must reach the device before the link is dropped,
+// as they do through an ESP32 proxy, even though the backend is slow to carry them out.
+func TestWritesBeforeDisconnect(t *testing.T) {
+	tconn := &testConn{delay: func(int) time.Duration { return 50 * time.Millisecond }}
+	tc := startServer(t, testAdapter{connect: func(ble.Events) (ble.Conn, error) { return tconn, nil }})
+	if r := tc.connect(); fieldValue(r, 2) != 1 {
+		t.Fatalf("not connected: %+v", r)
+	}
+	var msgs []byte
+	for _, v := range []byte{1, 0} {
+		var e enc
+		e.uint(1, testAddr)
+		e.uint(2, 18)
+		e.bool(3, false)
+		e.bytes(4, []byte{v})
+		msgs = AppendFrame(msgs, msgBTGATTWriteRequest, e.b)
+	}
+	var e enc
+	e.uint(1, testAddr)
+	e.uint(2, reqDisconnect)
+	msgs = AppendFrame(msgs, msgBTDeviceRequest, e.b)
+	if _, err := tc.c.Write(msgs); err != nil { // in one segment, so the server reads them together
+		t.Fatal(err)
+	}
+	tc.c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		f, err := ReadFrame(tc.r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.Type == msgBTGATTErrorResponse {
+			t.Fatal("a write failed")
+		}
+		if f.Type == msgBTDeviceConnectionResponse {
+			fs, _ := fields(f.Payload)
+			if fieldValue(fs, 2) != 0 {
+				t.Fatalf("still connected: %+v", fs)
+			}
+			break
+		}
+	}
+	tconn.mu.Lock()
+	defer tconn.mu.Unlock()
+	if len(tconn.atDisconnect) != 1 || tconn.atDisconnect[0] != 2 {
+		t.Fatalf("disconnected after %v writes, want once after 2", tconn.atDisconnect)
+	}
+	if len(tconn.writes) != 2 || tconn.writes[0][0] != 1 || tconn.writes[1][0] != 0 {
+		t.Fatalf("writes %v, want [[1] [0]]", tconn.writes)
+	}
+}
+
+// TestDisconnectNotBlocked checks that a disconnect goes through while a GATT request hangs on the device,
+// once it has waited for the request for disconnectDrain.
 func TestDisconnectNotBlocked(t *testing.T) {
 	tconn := &testConn{stuck: make(chan struct{})}
-	tc := startServer(t, testAdapter{connect: func(ble.Events) (ble.Conn, error) { return tconn, nil }})
+	tc := startServer(t, testAdapter{connect: func(ble.Events) (ble.Conn, error) { return tconn, nil }},
+		withSetup(func(s *Server) { s.disconnectDrain = 50 * time.Millisecond }))
 	if r := tc.connect(); fieldValue(r, 2) != 1 {
 		t.Fatalf("not connected: %+v", r)
 	}

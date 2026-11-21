@@ -276,6 +276,29 @@ func (s *attSocket) Secure() error {
 	return opErr
 }
 
+// Flush implements socket. What is written to an L2CAP socket stays charged to its send buffer until the
+// kernel has handed it to the controller, so the socket is flushed once TIOCOUTQ, the free space, is the whole
+// buffer again.
+func (s *attSocket) Flush(timeout time.Duration) {
+	raw, err := s.f.SyscallConn()
+	if err != nil {
+		return
+	}
+	raw.Control(func(fd uintptr) {
+		size, err := unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF)
+		if err != nil {
+			return
+		}
+		for deadline := time.Now().Add(timeout); time.Now().Before(deadline); {
+			free, err := unix.IoctlGetInt(int(fd), unix.TIOCOUTQ)
+			if err != nil || free >= size {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+}
+
 // securityLevel is the level of the socket's link, or 0 if the kernel does not say.
 func securityLevel(fd int) int {
 	sec, err := unix.GetsockoptString(fd, solBluetooth, btSecurity)

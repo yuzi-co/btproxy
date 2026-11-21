@@ -421,7 +421,8 @@ func (c *client) setConnParamsRequest(f Frame) bool {
 }
 
 // bluetoothDeviceRequest runs a connect, disconnect, cache clearing or pairing request in its own goroutine.
-// Connects and disconnects block on the radio too, but must not wait behind a stuck GATT request.
+// Connects and disconnects block on the radio too, but must not wait long behind a stuck GATT request: a
+// disconnect waits for the requests sent before it only up to a limit (see Server.requestDisconnect).
 func (c *client) bluetoothDeviceRequest(f Frame) bool {
 	r, err := decRequest(f.Type, f.Payload)
 	if err != nil {
@@ -462,7 +463,7 @@ func (c *client) deviceRequest(r request) {
 	case reqConnectV3WithCache, reqConnectV3WithoutCache:
 		s.connect(c, r.addr, r.addrType)
 	case reqDisconnect:
-		s.disconnect(r.addr)
+		s.requestDisconnect(r.addr)
 	case reqClearCache:
 		err := s.adapter.ClearCache(r.addr)
 		code := int32(0)
